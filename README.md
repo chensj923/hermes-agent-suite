@@ -63,6 +63,22 @@ chmod +x hermes-suite-linux-x86_64.sh
 | Crystal Reflex | 9124 | Fast reflection engine |
 | Img Service | 9121 | OCR + image understanding |
 
+### Recommended System
+
+| Item | Minimum | Recommended |
+|------|---------|-------------|
+| OS | Ubuntu 20.04 LTS x86_64 | Ubuntu 22.04 / 24.04 LTS |
+| CPU | 2 cores | 4+ cores |
+| RAM | 4 GB | 8+ GB (16 GB for local vision) |
+| Disk | 20 GB free | 50+ GB SSD |
+| Python | 3.10+ | 3.11+ |
+| Node.js | 18+ | 20 LTS |
+| GPU | — | NVIDIA RTX 3060+ (CUDA 12.x, for Moondream vision) |
+| Camera | — | USB UVC camera (for embodied AI) |
+| Network | Outbound HTTPS | Stable broadband (model download ~1.2 GB) |
+
+> **Note:** The installer auto-detects hardware and adjusts module availability. Systems without GPU will use CPU-only vision (slower but functional). China mainland users: the installer configures pip/npm/apt mirrors automatically.
+
 ### Building from Source
 
 ```bash
@@ -148,6 +164,22 @@ chmod +x hermes-suite-linux-x86_64.sh
 | 模型路由 | 8800 | 多供应商 LLM 路由 |
 | 结晶反射 | 9124 | 快速反射引擎 |
 | 图像服务 | 9121 | OCR + 图像理解 |
+
+### 推荐配置
+
+| 项目 | 最低要求 | 推荐配置 |
+|------|---------|---------|
+| 操作系统 | Ubuntu 20.04 LTS x86_64 | Ubuntu 22.04 / 24.04 LTS |
+| CPU | 2 核 | 4 核以上 |
+| 内存 | 4 GB | 8 GB+（本地视觉需 16 GB） |
+| 磁盘 | 20 GB 可用 | 50 GB+ SSD |
+| Python | 3.10+ | 3.11+ |
+| Node.js | 18+ | 20 LTS |
+| GPU | — | NVIDIA RTX 3060+（CUDA 12.x，Moondream 视觉加速） |
+| 摄像头 | — | USB UVC 摄像头（具身智能模块） |
+| 网络 | 出站 HTTPS | 稳定宽带（模型下载约 1.2 GB） |
+
+> **提示：** 安装程序自动检测硬件并调整可用模块。无 GPU 时使用 CPU 视觉（较慢但可用）。中国大陆用户：安装程序自动配置 pip/npm/apt 国内镜像源。
 
 ### 从源码构建
 
