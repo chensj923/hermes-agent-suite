@@ -1,0 +1,30 @@
+# Build artifacts
+dist/
+*.sh
+!build-installer.sh
+
+# Runtime data
+data/
+*.log
+*.db
+__pycache__/
+*.pyc
+
+# Buddy binaries (too large for git)
+buddy-dist/
+*.exe
+*.AppImage
+*.dmg
+
+# Environment
+.env
+*.env
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

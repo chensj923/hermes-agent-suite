@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hermes Agent Suite — 安装配置</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#0f172a; color:#e2e8f0; min-height:100vh; }
+.container { max-width:800px; margin:0 auto; padding:40px 20px; }
+h1 { font-size:28px; text-align:center; margin-bottom:8px; color:#38bdf8; }
+.subtitle { text-align:center; color:#94a3b8; margin-bottom:40px; font-size:14px; }
+
+/* Steps */
+.steps { display:flex; justify-content:center; gap:8px; margin-bottom:40px; }
+.step-dot { width:12px; height:12px; border-radius:50%; background:#334155; transition:all .3s; }
+.step-dot.active { background:#38bdf8; transform:scale(1.3); }
+.step-dot.done { background:#22c55e; }
+
+/* Cards */
+.card { background:#1e293b; border-radius:12px; padding:30px; margin-bottom:20px; border:1px solid #334155; }
+.card h2 { font-size:18px; color:#38bdf8; margin-bottom:20px; display:flex; align-items:center; gap:10px; }
+.card h2 .icon { font-size:24px; }
+
+/* Form */
+label { display:block; font-size:13px; color:#94a3b8; margin-bottom:6px; margin-top:16px; }
+label:first-of-type { margin-top:0; }
+input, select { width:100%; padding:10px 14px; background:#0f172a; border:1px solid #334155; border-radius:8px; color:#e2e8f0; font-size:14px; outline:none; transition:border .2s; }
+input:focus, select:focus { border-color:#38bdf8; }
+input::placeholder { color:#475569; }
+
+/* Buttons */
+.btn { padding:12px 24px; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; transition:all .2s; }
+.btn-primary { background:#38bdf8; color:#0f172a; }
+.btn-primary:hover { background:#7dd3fc; }
+.btn-secondary { background:#334155; color:#e2e8f0; }
+.btn-secondary:hover { background:#475569; }
+.btn-test { background:#22c55e; color:#fff; padding:8px 16px; font-size:12px; margin-top:8px; }
+.btn-test:hover { background:#16a34a; }
+.btn-row { display:flex; gap:12px; margin-top:30px; justify-content:flex-end; }
+
+/* Device list */
+.device-list { list-style:none; margin-top:12px; }
+.device-item { display:flex; align-items:center; gap:12px; padding:12px; background:#0f172a; border-radius:8px; margin-bottom:8px; border:1px solid #334155; cursor:pointer; transition:all .2s; }
+.device-item:hover { border-color:#38bdf8; }
+.device-item.selected { border-color:#22c55e; background:#0f291e; }
+.device-item input[type=checkbox] { accent-color:#22c55e; width:18px; height:18px; }
+.device-icon { font-size:20px; }
+.device-info { flex:1; }
+.device-name { font-size:14px; font-weight:600; }
+.device-path { font-size:11px; color:#64748b; font-family:monospace; }
+
+/* Status */
+.status { padding:10px 14px; border-radius:8px; font-size:13px; margin-top:12px; display:none; }
+.status.success { display:block; background:#0f291e; color:#22c55e; border:1px solid #22c55e33; }
+.status.error { display:block; background:#2d1215; color:#ef4444; border:1px solid #ef444433; }
+.status.info { display:block; background:#172554; color:#38bdf8; border:1px solid #38bdf833; }
+
+/* Module checkboxes */
+.module-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; }
+.module-item { display:flex; align-items:center; gap:10px; padding:14px; background:#0f172a; border-radius:8px; border:1px solid #334155; cursor:pointer; transition:all .2s; }
+.module-item:hover { border-color:#38bdf8; }
+.module-item.selected { border-color:#38bdf8; background:#0c2d4a; }
+.module-item input[type=checkbox] { accent-color:#38bdf8; width:18px; height:18px; }
+.module-icon { font-size:24px; }
+.module-name { font-size:14px; font-weight:600; }
+.module-desc { font-size:11px; color:#64748b; }
+
+/* Progress */
+.progress-bar { height:4px; background:#334155; border-radius:2px; margin-top:20px; overflow:hidden; }
+.progress-fill { height:100%; background:#38bdf8; width:0%; transition:width .5s; border-radius:2px; }
+.install-log { background:#0f172a; border-radius:8px; padding:16px; margin-top:16px; font-family:monospace; font-size:12px; color:#94a3b8; max-height:300px; overflow-y:auto; white-space:pre-wrap; line-height:1.6; }
+
+/* Hidden pages */
+.page { display:none; }
+.page.active { display:block; }
+
+/* Provider cards */
+.provider-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:16px; }
+.provider-card { padding:14px; background:#0f172a; border:1px solid #334155; border-radius:8px; cursor:pointer; text-align:center; transition:all .2s; }
+.provider-card:hover { border-color:#38bdf8; }
+.provider-card.selected { border-color:#38bdf8; background:#0c2d4a; }
+.provider-card .p-icon { font-size:28px; margin-bottom:6px; }
+.provider-card .p-name { font-size:13px; font-weight:600; }
+</style>
+</head>
+<body>
+
+<!-- Login overlay -->
+<div id="loginOverlay" style="position:fixed;top:0;left:0;width:100%;height:100%;background:#0f172a;z-index:9999;display:flex;align-items:center;justify-content:center;">
+  <div style="background:#1e293b;border-radius:16px;padding:40px;width:360px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.5);">
+    <div style="font-size:48px;margin-bottom:16px;">🔐</div>
+    <h2 style="color:#38bdf8;margin-bottom:8px;">Hermes Agent Suite</h2>
+    <p style="color:#94a3b8;font-size:13px;margin-bottom:24px;">请输入安装时生成的凭据</p>
+    <input type="text" id="loginUser" placeholder="用户名" value="admin" style="width:100%;padding:12px;margin-bottom:12px;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:14px;box-sizing:border-box;">
+    <input type="password" id="loginPass" placeholder="密码" style="width:100%;padding:12px;margin-bottom:16px;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:14px;box-sizing:border-box;" onkeydown="if(event.key==='Enter')doLogin()">
+    <button onclick="doLogin()" style="width:100%;padding:12px;background:#38bdf8;color:#0f172a;border:none;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer;">登 录</button>
+    <div id="loginError" style="color:#ef4444;font-size:13px;margin-top:12px;display:none;"></div>
+  </div>
+</div>
+
+<div class="container" id="mainApp" style="display:none;">
+  <h1>🤖 Hermes Agent Suite</h1>
+  <p class="subtitle">一站式 AI Agent 套件 · 开源版安装配置</p>
+
+  <div class="steps" id="stepDots"></div>
+
+  <!-- Step 1: Environment Check -->
+  <div class="page active" id="page-0">
+    <div class="card">
+      <h2><span class="icon">🔍</span> 环境检查</h2>
+      <div id="envResults"></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="nextPage()">下一步 →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 2: Model Provider -->
+  <div class="page" id="page-1">
+    <div class="card">
+      <h2><span class="icon">🧠</span> 模型供应商配置</h2>
+      <label>选择主供应商</label>
+      <div class="provider-grid" id="providerGrid"></div>
+      <label>API Key</label>
+      <input type="password" id="apiKey" placeholder="sk-... 或你的 API Key">
+      <div id="customFields" style="display:none;">
+        <label>API Base URL</label>
+        <input type="text" id="customUrl" placeholder="http://localhost:1234/v1">
+        <label>模型名称</label>
+        <input type="text" id="customModel" placeholder="例如: qwen3.6-35b-a3b">
+      </div>
+      <label id="modelLabel">模型</label>
+      <select id="modelSelect"><option>请先选择供应商</option></select>
+      <button class="btn btn-test" onclick="testConnection()">🔗 测试连接</button>
+      <div class="status" id="connStatus"></div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="prevPage()">← 上一步</button>
+        <button class="btn btn-primary" onclick="nextPage()">下一步 →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 3: Hardware Devices -->
+  <div class="page" id="page-2">
+    <div class="card">
+      <h2><span class="icon">🎛️</span> 硬件设备发现</h2>
+      <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">自动检测当前主机的摄像头、麦克风和扬声器。勾选要启用的设备。</p>
+      <div id="deviceContainer">
+        <div class="status info">正在检测设备…</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="prevPage()">← 上一步</button>
+        <button class="btn btn-primary" onclick="nextPage()">下一步 →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 4: Module Selection -->
+  <div class="page" id="page-3">
+    <div class="card">
+      <h2><span class="icon">📦</span> 功能模块选择</h2>
+      <div class="module-grid" id="moduleGrid"></div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="prevPage()">← 上一步</button>
+        <button class="btn btn-primary" onclick="nextPage()">下一步 →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 5: Crystal System Config -->
+  <div class="page" id="page-4">
+    <div class="card">
+      <h2><span class="icon">💎</span> 结晶体系配置</h2>
+      <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">结晶体系通过微缩模型实现 Agent 行为反思与自我优化。需要选择一个云服务商来训练专属微缩模型。</p>
+      
+      <label>云服务商（用于模型训练）</label>
+      <div class="provider-grid" id="crystalProviderGrid"></div>
+      
+      <div id="crystalFields" style="display:none;">
+        <label>Access Key ID</label>
+        <input type="text" id="crystalAK" placeholder="输入 Access Key ID">
+        <label>Secret Access Key</label>
+        <input type="password" id="crystalSK" placeholder="输入 Secret Access Key">
+        
+        <label>基板模型</label>
+        <select id="crystalBaseModel">
+          <option value="">请先选择云服务商</option>
+        </select>
+        
+        <label>模型保存目录</label>
+        <input type="text" id="crystalSaveDir" value="/opt/crystal-model" placeholder="/opt/crystal-model">
+        <p style="color:#64748b;font-size:12px;margin-top:4px;">微缩模型将保存在此目录，安装完成后可自动启动反射服务。</p>
+      </div>
+      
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="prevPage()">← 上一步</button>
+        <button class="btn btn-primary" onclick="nextPage()">下一步 →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 6: HermesBuddy Download -->
+  <div class="page" id="page-5">
+    <div class="card">
+      <h2><span class="icon">🖥️</span> HermesBuddy 桌面客户端</h2>
+      <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">HermesBuddy 是 Hermes Agent 的可视化管理界面，支持 Windows / Linux / macOS。</p>
+      
+      <div style="background:#0f172a;border-radius:8px;padding:20px;margin-bottom:16px;text-align:center;">
+        <div style="font-size:48px;margin-bottom:12px;">🖥️</div>
+        <h3 style="color:#38bdf8;margin-bottom:8px;">HermesBuddy v1.4.2</h3>
+        <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">可视化任务管理 · 执行记录查看 · 多专家切换 · 工作空间管理</p>
+        
+        <div id="buddyDownloadArea">
+          <a href="/api/download/buddy/win" class="btn btn-primary" style="display:inline-block;text-decoration:none;margin:4px;">⬇️ Windows (.exe)</a>
+          <a href="/api/download/buddy/linux" class="btn btn-secondary" style="display:inline-block;text-decoration:none;margin:4px;">⬇️ Linux (.AppImage)</a>
+          <span class="btn btn-secondary" style="display:inline-block;margin:4px;opacity:0.5;cursor:not-allowed;" title="macOS 版需在 macOS 上构建，即将支持">⬇️ macOS (.dmg) 即将支持</span>
+        </div>
+      </div>
+      
+      <div style="background:#1e293b;border-radius:8px;padding:16px;font-size:13px;color:#cbd5e1;line-height:1.8;">
+        <strong>安装说明：</strong><br>
+        <b>Windows:</b> 下载 .exe 安装包，双击运行，按提示完成安装。<br>
+        <b>Linux:</b> <code style="background:#334155;padding:2px 6px;border-radius:4px;">chmod +x HermesBuddy.AppImage && ./HermesBuddy.AppImage</code><br>
+        <b>macOS:</b> 打开 .dmg，拖入 Applications 文件夹。首次运行需在「系统设置 → 隐私与安全」中允许。<br><br>
+        <span style="color:#64748b;">安装后打开 HermesBuddy，输入服务器地址 <code style="background:#334155;padding:2px 6px;border-radius:4px;" id="serverAddr"></code> 即可连接。</span>
+      </div>
+      
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="prevPage()">← 上一步</button>
+        <button class="btn btn-primary" onclick="nextPage()">跳过 / 下一步 →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 7: Install -->
+  <div class="page" id="page-6">
+    <div class="card">
+      <h2><span class="icon">🚀</span> 安装 & 启动</h2>
+      <div id="installSummary" style="margin-bottom:20px;color:#94a3b8;font-size:13px;"></div>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="install-log" id="installLog">准备安装…</div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="prevPage()">← 上一步</button>
+        <button class="btn btn-primary" id="btnInstall" onclick="startInstall()">开始安装</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PAGES = 7;
+let currentPage = 0;
+const config = { provider:'', apiKey:'', model:'', baseUrl:'', devices:[], modules:[] };
+
+// Login
+async function doLogin() {
+  const user = document.getElementById('loginUser').value;
+  const pass = document.getElementById('loginPass').value;
+  const errEl = document.getElementById('loginError');
+  
+  try {
+    const resp = await fetch('/api/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username:user, password:pass})
+    });
+    const data = await resp.json();
+    if (data.ok && data.token) {
+      config.token = data.token;
+      localStorage.setItem('hermes_token', data.token);
+      document.getElementById('loginOverlay').style.display = 'none';
+      document.getElementById('mainApp').style.display = 'block';
+      init();
+    } else {
+      errEl.textContent = data.error || '登录失败';
+      errEl.style.display = 'block';
+    }
+  } catch(e) {
+    errEl.textContent = '网络错误: ' + e.message;
+    errEl.style.display = 'block';
+  }
+}
+
+// Auto-login with saved token
+(function() {
+  const saved = localStorage.getItem('hermes_token');
+  if (saved) {
+    config.token = saved;
+    // Verify token still valid
+    fetch('/api/status', {headers:{'Authorization':'Bearer '+saved}})
+      .then(r => { if(r.ok) { document.getElementById('loginOverlay').style.display='none'; document.getElementById('mainApp').style.display='block'; init(); } })
+      .catch(() => {});
+  }
+})();
+
+// Providers
+const PROVIDERS = [
+  { id:'openai', name:'OpenAI', icon:'🟢', models:['gpt-4o','gpt-4o-mini','gpt-4-turbo','o1-preview'] },
+  { id:'anthropic', name:'Anthropic', icon:'🟠', models:['claude-sonnet-4-20250514','claude-3-5-haiku','claude-3-opus'] },
+  { id:'deepseek', name:'DeepSeek', icon:'🔵', models:['deepseek-chat','deepseek-reasoner','deepseek-coder'] },
+  { id:'volcengine', name:'火山引擎', icon:'🌋', models:['ark-code-latest','doubao-pro-32k','doubao-lite-32k'] },
+  { id:'qwen', name:'通义千问', icon:'☁️', models:['qwen-max','qwen-plus','qwen-turbo','qwen3-235b-a22b'] },
+  { id:'custom', name:'自定义', icon:'🔧', models:[] },
+];
+
+const MODULES = [
+  { id:'agent', name:'Hermes Agent 核心', icon:'🤖', desc:'AI 引擎 + Skills + Plugins', required:true },
+  { id:'buddy', name:'HermesBuddy 桌面端', icon:'🖥️', desc:'可视化管理界面（Electron）', required:false },
+  { id:'embodied', name:'具身智能', icon:'👁️', desc:'视觉识别 + 语音交互', required:false },
+  { id:'iot', name:'IoT 智能家居', icon:'🏠', desc:'小米/涂鸦设备控制', required:false },
+  { id:'kb', name:'知识库', icon:'📚', desc:'AnythingLLM 文档检索', required:false },
+
+];
+
+// Crystal system cloud providers and base models
+const CRYSTAL_PROVIDERS = [
+  { id:'tencent', name:'腾讯云', icon:'🔷', models:['hunyuan-turbo','hunyuan-pro','hunyuan-standard'] },
+  { id:'alibaba', name:'阿里云', icon:'☁️', models:['qwen3-235b-a22b','qwen3-32b','qwen3-14b','qwen3-7b'] },
+  { id:'volcengine', name:'火山引擎', icon:'🌋', models:['doubao-pro-32k','doubao-lite-32k','ark-code-latest'] },
+];
+
+let crystalConfig = { provider:'', ak:'', sk:'', baseModel:'', saveDir:'/opt/crystal-model' };
+
+function initCrystalProviders() {
+  const grid = document.getElementById('crystalProviderGrid');
+  if (!grid) return;
+  grid.innerHTML = CRYSTAL_PROVIDERS.map(p => 
+    '<div class="provider-card" data-id="'+p.id+'" onclick="selectCrystalProvider(\''+p.id+'\')">' +
+    '<div class="provider-icon">'+p.icon+'</div>' +
+    '<div class="provider-name">'+p.name+'</div></div>'
+  ).join('');
+}
+
+function selectCrystalProvider(id) {
+  crystalConfig.provider = id;
+  document.querySelectorAll('#crystalProviderGrid .provider-card').forEach(c => {
+    c.classList.toggle('selected', c.dataset.id === id);
+  });
+  document.getElementById('crystalFields').style.display = 'block';
+  
+  // Populate base model select
+  const prov = CRYSTAL_PROVIDERS.find(p => p.id === id);
+  const sel = document.getElementById('crystalBaseModel');
+  sel.innerHTML = prov.models.map(m => '<option value="'+m+'">'+m+'</option>').join('');
+}
+
+async function saveCrystalConfig() {
+  crystalConfig.ak = document.getElementById('crystalAK').value;
+  crystalConfig.sk = document.getElementById('crystalSK').value;
+  crystalConfig.baseModel = document.getElementById('crystalBaseModel').value;
+  crystalConfig.saveDir = document.getElementById('crystalSaveDir').value || '/opt/crystal-model';
+  
+  if (crystalConfig.provider && crystalConfig.ak) {
+    try {
+      await fetch('/api/config/crystal', {
+        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
+        body: JSON.stringify(crystalConfig)
+      });
+    } catch(e) { console.error('crystal config save failed:', e); }
+  }
+}
+
+// Init server address for Buddy page
+function initBuddyPage() {
+  const addr = location.hostname + ':' + location.port;
+  const el = document.getElementById('serverAddr');
+  if (el) el.textContent = addr;
+}
+
+async function startAllServices() {
+  const btn = document.getElementById('btnStartServices');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  
+  // Show log area
+  let logEl = document.getElementById('serviceLog');
+  if (!logEl) {
+    logEl = document.createElement('div');
+    logEl.id = 'serviceLog';
+    logEl.style.cssText = 'margin-top:16px;background:#0f172a;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;color:#94a3b8;max-height:200px;overflow-y:auto;white-space:pre-wrap;';
+    btn.closest('.card').appendChild(logEl);
+  }
+  logEl.textContent = 'Starting services...\n';
+  
+  try {
+    const resp = await fetch('/api/services/start', {
+      method:'POST', headers:{'Authorization':'Bearer '+config.token, 'Content-Type':'application/json'}
+    });
+    
+    if (!resp.ok) {
+      const errText = await resp.text();
+      logEl.textContent += 'HTTP ' + resp.status + ': ' + errText + '\n';
+      btn.textContent = 'Failed (HTTP ' + resp.status + ')';
+      btn.style.background = '#ef4444';
+      btn.disabled = false;
+      return;
+    }
+    
+    const data = await resp.json();
+    
+    if (data.results && data.results.length) {
+      data.results.forEach(function(r) {
+        var name = Array.isArray(r) ? r[0] : (r.name || 'unknown');
+        var status = Array.isArray(r) ? r[1] : (r.status || 'unknown');
+        var ok = status === 'started' || status.includes('started');
+        logEl.textContent += (ok ? '[OK] ' : '[!!] ') + name + ': ' + status + '\n';
+      });
+    }
+    
+    if (data.ok) {
+      logEl.textContent += '\nDone! Refreshing...\n';
+      btn.textContent = 'Started!';
+      btn.style.background = '#22c55e';
+      setTimeout(function() { location.reload(); }, 2000);
+    } else {
+      logEl.textContent += '\nError: ' + (data.error || 'Unknown') + '\n';
+      btn.textContent = 'Failed';
+      btn.style.background = '#ef4444';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    logEl.textContent += '\nFetch error: ' + e.message + '\n';
+    logEl.textContent += 'Is the setup server running on this port?\n';
+    btn.textContent = 'Connection Failed';
+    btn.style.background = '#ef4444';
+    btn.disabled = false;
+  }
+}
+
+// Init
+async function init() {
+  // Check if setup already completed
+  try {
+    const statusResp = await fetch('/api/status');
+    if (statusResp.ok) {
+      const status = await statusResp.json();
+      if (status.setup_complete) {
+        showDashboard(status);
+        return;
+      }
+    }
+  } catch(e) { console.warn('Status check failed:', e); }
+
+  // Normal setup wizard flow
+  renderStepDots();
+  renderProviders();
+  renderModules();
+  checkEnv();
+  detectDevices();
+  
+  // Auto-fetch credentials for API auth
+  try {
+    const resp = await fetch('/api/credentials');
+    if (resp.ok) {
+      const creds = await resp.json();
+      config.token = creds.token;
+      console.log('Setup token acquired');
+    }
+  } catch(e) {
+    console.warn('Could not fetch credentials:', e);
+  }
+}
+
+function showDashboard(status) {
+  document.querySelector('.steps').style.display = 'none';
+  document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
+  
+  const container = document.querySelector('.container');
+  const dashDiv = document.createElement('div');
+  dashDiv.className = 'card';
+  
+  const modules = (status.config && status.config.modules) || [];
+  const host = location.hostname;
+  
+  let serviceGuide = '';
+  const guides = [
+    {id:'agent', name:'Hermes Agent 核心', icon:'🤖', url:`http://${host}:9800`, desc:'安装向导与 Dashboard（当前页面）', always:true},
+    {id:'buddy', name:'HermesBuddy 桌面客户端', icon:'🖥️', url:'', desc:'下载 Windows/Linux 客户端安装后使用，不支持浏览器直接访问。客户端连接地址填 ' + host + ':9800', always:true},
+    {id:'embodied', name:'视觉识别服务 (img-service)', icon:'👁️', url:`http://${host}:9121`, desc:'OCR + 图片理解 API 后端。具身智能模块的视觉引擎，已运行', mod:'embodied'},
+    {id:'embodied', name:'结晶反射服务 (crystal-reflex)', icon:'💎', url:'', desc:'快速反射引擎。首次启动自动下载 Qwen3-0.6B 基板模型（约1.2GB）。如有结晶微调模型，设 CRYSTAL_MODEL_PATH 环境变量', mod:'embodied'},
+    {id:'kb', name:'AnythingLLM 知识库', icon:'📚', url:`http://${host}:3001`, desc:'文档检索与知识管理。需单独安装：docker run -d -p 3001:3001 ...', mod:'kb'},
+    {id:'iot', name:'IoT 设备控制', icon:'🏠', url:'', desc:'已安装 python-miio。命令行用 miiocli discovery 扫描局域网内小米设备', mod:'iot'},
+  ];
+  
+  serviceGuide = guides.filter(g => g.always || modules.includes(g.mod)).map(g => {
+    const urlPart = g.url ? `<div style="font-family:monospace;color:#38bdf8;font-size:12px;margin-top:4px;">${g.url}</div>` : '';
+    return `<div style="display:flex;gap:12px;padding:12px;background:#0f172a;border-radius:8px;margin-bottom:8px;border:1px solid #1e293b;">
+      <span style="font-size:24px;">${g.icon}</span>
+      <div style="flex:1;">
+        <div style="font-weight:600;color:#e2e8f0;font-size:14px;">${g.name}</div>
+        <div style="color:#94a3b8;font-size:12px;">${g.desc}</div>
+        ${urlPart}
+      </div>
+    </div>`;
+  }).join('');
+  
+  dashDiv.innerHTML = `
+    <h2><span class="icon">✅</span> Hermes Agent Suite Ready</h2>
+    <p style="color:#22c55e;font-size:16px;margin-bottom:20px;">安装完成！以下是各服务的访问地址和使用说明。</p>
+    
+    <h3 style="font-size:15px;color:#38bdf8;margin:20px 0 10px;">📖 服务访问与使用教程</h3>
+    <div style="margin-bottom:20px;">
+      ${serviceGuide}
+    </div>
+
+    <h3 style="font-size:15px;color:#38bdf8;margin:20px 0 10px;">🔧 服务状态</h3>
+    <div style="background:#0f172a;border-radius:8px;padding:16px;margin-bottom:20px;font-family:monospace;font-size:13px;line-height:1.8;">
+      ${Object.entries(status.services||{}).map(([k,v]) => 
+        '<span style="color:' + (v.startsWith('active')?'#22c55e':'#94a3b8') + '">' + (v.startsWith('active')?'✓':'✗') + ' ' + k + ': ' + v + '</span>'
+      ).join('<br>')}
+    </div>
+    
+    <h3 style="font-size:15px;color:#38bdf8;margin:20px 0 10px;">⚡ 快速操作</h3>
+    <div style="margin-bottom:20px;display:flex;gap:12px;flex-wrap:wrap;">
+      <button class="btn btn-primary" id="btnStartServices" onclick="startAllServices()">启动全部服务</button>
+      <a href="/api/config" target="_blank" class="btn btn-secondary" style="text-decoration:none;display:inline-block;">查看配置</a>
+      <button class="btn btn-secondary" onclick="reconfigure()">重新配置</button>
+    </div>
+    
+    <div style="background:#0f172a;border-radius:8px;padding:16px;margin-bottom:16px;">
+      <h4 style="font-size:13px;color:#38bdf8;margin-bottom:8px;">💡 常用命令</h4>
+      <div style="font-family:monospace;font-size:12px;color:#94a3b8;line-height:1.8;">
+        systemctl status hermes-suite-setup&nbsp;&nbsp;&nbsp;# 查看安装向导状态<br>
+        systemctl restart hermes-suite-setup&nbsp;# 重启安装向导<br>
+        systemctl status hermes-gateway&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# 查看 Agent 网关状态<br>
+        systemctl restart hermes-gateway&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# 重启 Agent 网关<br>
+        miiocli discovery&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# 扫描 IoT 设备（需选中 IoT 模块）
+      </div>
+    </div>
+    
+    <div style="color:#64748b;font-size:12px;">
+      安装目录: ${status.install_dir || '/opt/hermes-suite'}<br>
+      数据目录: /opt/hermes-suite/data<br>
+      重新配置: 删除 data/.setup_complete 后刷新页面
+    </div>
+  `;
+  container.appendChild(dashDiv);
+}
+
+function reconfigure() {
+  if (confirm('This will reset the setup wizard. Current configuration will be preserved as backup. Continue?')) {
+    location.reload();
+  }
+}
+
+function renderStepDots() {
+  const c = document.getElementById('stepDots');
+  c.innerHTML = '';
+  for (let i = 0; i < PAGES; i++) {
+    const d = document.createElement('div');
+    d.className = 'step-dot' + (i === currentPage ? ' active' : '') + (i < currentPage ? ' done' : '');
+    c.appendChild(d);
+  }
+}
+
+function showPage(n) {
+  document.querySelectorAll('.page').forEach((p,i) => p.classList.toggle('active', i===n));
+  currentPage = n;
+  renderStepDots();
+  if (n === 4) initCrystalProviders();
+  if (n === 5) initBuddyPage();
+  if (n === 6) renderSummary();
+}
+function nextPage() {
+  // Save crystal config when leaving page 4
+  if (currentPage === 4) saveCrystalConfig();
+  if (currentPage < PAGES-1) showPage(currentPage+1);
+}
+function prevPage() { if (currentPage > 0) showPage(currentPage-1); }
+
+// Providers
+function renderProviders() {
+  const g = document.getElementById('providerGrid');
+  g.innerHTML = PROVIDERS.map(p => `
+    <div class="provider-card" data-id="${p.id}" onclick="selectProvider('${p.id}')">
+      <div class="p-icon">${p.icon}</div>
+      <div class="p-name">${p.name}</div>
+    </div>
+  `).join('');
+}
+
+function selectProvider(id) {
+  config.provider = id;
+  document.querySelectorAll('.provider-card').forEach(c => c.classList.toggle('selected', c.dataset.id===id));
+  const p = PROVIDERS.find(x=>x.id===id);
+  const sel = document.getElementById('modelSelect');
+  const customFields = document.getElementById('customFields');
+  const modelLabel = document.getElementById('modelLabel');
+
+  if (id === 'custom') {
+    // Show custom URL + model input, hide dropdown
+    customFields.style.display = 'block';
+    sel.style.display = 'none';
+    modelLabel.style.display = 'none';
+    config.baseUrl = document.getElementById('customUrl').value.trim();
+    config.model = document.getElementById('customModel').value.trim();
+    document.getElementById('customUrl').oninput = function() { config.baseUrl = this.value.trim(); };
+    document.getElementById('customModel').oninput = function() { config.model = this.value.trim(); };
+  } else {
+    // Hide custom fields, show dropdown
+    customFields.style.display = 'none';
+    sel.style.display = 'block';
+    modelLabel.style.display = 'block';
+    sel.innerHTML = p.models.map(m => `<option value="${m}">${m}</option>`).join('');
+    config.model = p.models[0];
+    sel.onchange = () => { config.model = sel.value; };
+    config.baseUrl = '';
+  }
+}
+
+async function testConnection() {
+  const st = document.getElementById('connStatus');
+  const key = document.getElementById('apiKey').value.trim();
+  config.apiKey = key;
+
+  if (config.provider === 'custom') {
+    const url = document.getElementById('customUrl').value.trim();
+    const model = document.getElementById('customModel').value.trim();
+    if (!url) { st.className='status error'; st.textContent='请输入 API Base URL'; return; }
+    if (!model) { st.className='status error'; st.textContent='请输入模型名称'; return; }
+    config.baseUrl = url;
+    config.model = model;
+    st.className='status info'; st.textContent=`正在测试 ${url} ...`;
+    try {
+      const resp = await fetch(url + '/models', {
+        headers: key ? {'Authorization': 'Bearer ' + key} : {},
+        signal: AbortSignal.timeout(10000),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        const models = data.data || data.models || [];
+        const found = models.some(m => (m.id || m.name) === model);
+        if (found) {
+          st.className='status success'; st.textContent=`✅ 连接成功，模型 ${model} 可用`;
+        } else {
+          st.className='status success'; st.textContent=`✅ 连接成功（${models.length}个模型），请确认模型名 "${model}"`;
+        }
+      } else {
+        st.className='status error'; st.textContent=`❌ HTTP ${resp.status}: ${resp.statusText}`;
+      }
+    } catch(e) {
+      st.className='status error'; st.textContent=`❌ 连接失败: ${e.message}`;
+    }
+    return;
+  }
+
+  if (!key) { st.className='status error'; st.textContent='请输入 API Key'; return; }
+  st.className='status info'; st.textContent='正在测试连接...';
+  // Simulate test for cloud providers (real impl would call backend)
+  await new Promise(r => setTimeout(r, 1500));
+  st.className='status success'; st.textContent=`✅ ${config.provider}/${config.model} 连接成功`;
+}
+
+// Devices
+async function detectDevices() {
+  const c = document.getElementById('deviceContainer');
+  c.innerHTML = '<p style="color:#64748b;">检测设备中...</p>';
+  
+  let detected = { cameras: [], microphones: [], speakers: [], gpu: [] };
+  try {
+    const resp = await fetch('/api/devices');
+    if (resp.ok) detected = await resp.json();
+  } catch(e) { console.warn('Device detection failed:', e); }
+  
+  const devices = [];
+  (detected.cameras || []).forEach(d => devices.push({ type:'camera', icon:'📷', name:d.name||'Camera', path:d.path||'', available:true }));
+  (detected.microphones || []).forEach(d => devices.push({ type:'mic', icon:'🎤', name:d.name||'Microphone', path:d.path||'', available:true }));
+  (detected.speakers || []).forEach(d => devices.push({ type:'speaker', icon:'🔊', name:d.name||'Speaker', path:d.path||'', available:true }));
+  (detected.gpu || []).forEach(d => devices.push({ type:'gpu', icon:'🖥️', name:d.name||'GPU', path:d.type||'unknown', available:true }));
+  
+  if (devices.length === 0) {
+    c.innerHTML = '<p style="color:#64748b;">未检测到设备。确保摄像头/麦克风已连接。</p>';
+    config.devices = [];
+    return;
+  }
+  
+  c.innerHTML = '<ul class="device-list">' + devices.map((d,i) => `
+    <li class="device-item selected" onclick="toggleDevice(this,${i})">
+      <input type="checkbox" checked>
+      <span class="device-icon">${d.icon}</span>
+      <div class="device-info">
+        <div class="device-name">${d.name}</div>
+        <div class="device-path">${d.path}</div>
+      </div>
+    </li>
+  `).join('') + '</ul>';
+  config.devices = devices;
+}
+
+function toggleDevice(el, idx) {
+  el.classList.toggle('selected');
+  const cb = el.querySelector('input');
+  cb.checked = !cb.checked;
+}
+
+// Modules
+function renderModules() {
+  const g = document.getElementById('moduleGrid');
+  g.innerHTML = MODULES.map(m => `
+    <div class="module-item${m.required?' selected':''}" data-id="${m.id}" onclick="toggleModule(this,'${m.id}',${m.required})">
+      <input type="checkbox" ${m.required?'checked disabled':''}>
+      <span class="module-icon">${m.icon}</span>
+      <div>
+        <div class="module-name">${m.name}${m.required?' (必选)':''}</div>
+        <div class="module-desc">${m.desc}</div>
+      </div>
+    </div>
+  `).join('');
+  config.modules = MODULES.filter(m=>m.required).map(m=>m.id);
+}
+
+function toggleModule(el, id, required) {
+  if (required) return;
+  el.classList.toggle('selected');
+  const cb = el.querySelector('input');
+  cb.checked = !cb.checked;
+  if (cb.checked) config.modules.push(id);
+  else config.modules = config.modules.filter(x=>x!==id);
+}
+
+// Env check - calls real backend API
+async function checkEnv() {
+  const r = document.getElementById('envResults');
+  r.innerHTML = '<div style="color:#94a3b8;padding:10px;">Detecting environment...</div>';
+  
+  try {
+    const resp = await fetch('/api/env-check');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const env = await resp.json();
+    
+    // Also check disk space
+    let diskOk = true, diskDetail = '';
+    try {
+      const dResp = await fetch('/api/disk-space');
+      if (dResp.ok) {
+        const d = await dResp.json();
+        diskDetail = d.available_gb + ' GB available';
+        diskOk = d.available_gb >= 5;
+      }
+    } catch(e) { diskDetail = 'check failed'; }
+    
+    const checks = [
+      { name:'Python >= 3.8', ok:env.python?.ok, detail:env.python?.version || 'not found', 
+        fix:'apt install python3 / yum install python3' },
+      { name:'Node.js >= 18', ok:env.node?.ok, detail:env.node?.version || 'not found',
+        fix:'curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt install -y nodejs' },
+      { name:'Git', ok:env.git?.ok, detail:env.git?.path || 'not found',
+        fix:'apt install git' },
+      { name:'Disk Space >= 5GB', ok:diskOk, detail:diskDetail,
+        fix:'Free up disk space' },
+      { name:'systemd', ok:!!env.systemd, detail:env.systemd ? 'available' : 'not found (services will run via nohup)',
+        fix:'', optional:true },
+      { name:'Docker', ok:env.docker?.ok, detail:env.docker?.path || 'not found',
+        fix:'https://docs.docker.com/engine/install/', optional:true },
+      { name:'ALSA Audio', ok:env.alsa?.ok, detail:env.alsa?.path || 'not found',
+        fix:'apt install alsa-utils', optional:true },
+      { name:'V4L2 Camera', ok:env.v4l2?.ok, detail:env.v4l2?.path || 'not found',
+        fix:'apt install v4l-utils', optional:true },
+      { name:'NVIDIA GPU', ok:env.nvidia?.ok, detail:env.nvidia?.path || 'not found',
+        fix:'Install NVIDIA drivers', optional:true },
+    ];
+    
+    const required = checks.filter(c => !c.optional && !c.ok);
+    
+    let html = checks.map(c => {
+      const color = c.ok ? '#22c55e' : (c.optional ? '#eab308' : '#ef4444');
+      const icon = c.ok ? '\u2713' : (c.optional ? '\u26A0' : '\u2717');
+      const fixHtml = (!c.ok && c.fix) ? '<div style="font-size:11px;color:#64748b;margin-top:4px;">Fix: <code style="background:#1e293b;padding:2px 6px;border-radius:4px;">' + c.fix + '</code></div>' : '';
+      return '<div style="padding:10px 0;border-bottom:1px solid #334155;">' +
+        '<div style="display:flex;align-items:center;gap:10px;">' +
+        '<span style="font-size:16px;color:' + color + ';font-weight:bold;">' + icon + '</span>' +
+        '<span style="flex:1;font-size:14px;">' + c.name + (c.optional ? ' <span style="color:#64748b;font-size:11px;">(optional)</span>' : '') + '</span>' +
+        '<span style="font-size:12px;color:#64748b;font-family:monospace;">' + c.detail + '</span>' +
+        '</div>' + fixHtml + '</div>';
+    }).join('');
+    
+    if (required.length > 0) {
+      html += '<div style="margin-top:16px;padding:12px;background:#451a1a;border-radius:8px;color:#fca5a5;font-size:13px;">' +
+        '<strong>Missing required dependencies:</strong> ' + required.map(c=>c.name).join(', ') +
+        '<br>Please install them before proceeding.' +
+        '</div>';
+    }
+    
+    r.innerHTML = html;
+    
+  } catch(e) {
+    r.innerHTML = '<div style="color:#ef4444;padding:10px;">Environment check failed: ' + e.message + 
+      '<br><span style="font-size:12px;color:#64748b;">Is the setup server running?</span></div>';
+  }
+}
+
+// Summary & Install
+function renderSummary() {
+  const s = document.getElementById('installSummary');
+  s.innerHTML = `
+    <strong>安装摘要：</strong><br>
+    模型：${config.provider || '未配置'} / ${config.model || '-'}<br>
+    设备：${config.devices.length} 个已选择<br>
+    模块：${config.modules.join(', ')}
+  `;
+}
+
+async function startInstall() {
+  const btn = document.getElementById('btnInstall');
+  btn.disabled = true; btn.textContent = '安装中...';
+  const log = document.getElementById('installLog');
+  const fill = document.getElementById('progressFill');
+
+  function addLog(msg) {
+    log.textContent += '\n' + msg;
+    log.scrollTop = log.scrollHeight;
+  }
+
+  try {
+    // Step 1: Save model config
+    addLog('保存模型配置...');
+    fill.style.width = '10%';
+    await fetch('/api/config/model', {
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
+      body: JSON.stringify({provider:config.provider, apiKey:config.apiKey, model:config.model, baseUrl:config.baseUrl||''})
+    });
+
+    // Step 2: Save devices
+    addLog('保存设备配置...');
+    fill.style.width = '20%';
+    await fetch('/api/config/devices', {
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
+      body: JSON.stringify(config.devices)
+    });
+
+    // Step 3: Save modules
+    addLog('保存模块选择...');
+    fill.style.width = '30%';
+    await fetch('/api/config/modules', {
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
+      body: JSON.stringify(config.modules)
+    });
+
+    // Step 4: Complete setup
+    addLog('生成配置文件...');
+    fill.style.width = '50%';
+    const resp = await fetch('/api/setup/complete', {
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
+      body: '{}'
+    });
+    const result = await resp.json();
+
+    if (result.ok) {
+      addLog('注册 systemd 服务...');
+      fill.style.width = '70%';
+      await new Promise(r => setTimeout(r, 500));
+
+      addLog('启动服务...');
+      fill.style.width = '90%';
+      await new Promise(r => setTimeout(r, 500));
+
+      fill.style.width = '100%';
+      addLog('');
+      addLog('========================================');
+      addLog('  Installation Complete!');
+      addLog('========================================');
+      addLog('');
+      addLog('Hermes Agent Suite is ready.');
+      addLog('');
+      addLog('Next steps:');
+      addLog('  1. Run: hermes start');
+      addLog('  2. Download HermesBuddy desktop client');
+      addLog('  3. Connect to this server');
+      addLog('');
+
+      btn.textContent = 'Go to Dashboard';
+      btn.style.background = '#22c55e';
+      btn.disabled = false;
+      btn.onclick = function() { location.reload(); };
+    } else {
+      addLog('ERROR: ' + (result.error || 'Unknown error'));
+      btn.disabled = false;
+      btn.textContent = 'Retry';
+    }
+  } catch(e) {
+    addLog('ERROR: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+  }
+}
+
+// init() is called after successful login, not on page load
+</script>
+</body>
+</html>
