@@ -1,16 +1,68 @@
 #!/bin/bash
 # ============================================================
-# Hermes Agent Suite — Self-Extracting Installer
-# Usage: bash hermes-suite-v1.0.0-linux-x86_64.sh
+# Hermes Agent Suite — Build Self-Extracting Installer
+# Usage: ./build-installer.sh
+# Output: hermes-suite-v{VERSION}-linux-x86_64.sh
 # ============================================================
 
-VERSION="1.1.0"
+VERSION="0.3.0"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+STAGING_DIR="/tmp/hermes-pkg-staging"
+OUTPUT="${SCRIPT_DIR}/hermes-suite-v${VERSION}-linux-x86_64.sh"
+
+echo "Building Hermes Agent Suite v${VERSION} installer..."
+
+# ============================================================
+# 1. Prepare staging directory
+# ============================================================
+rm -rf "$STAGING_DIR"
+mkdir -p "$STAGING_DIR"
+
+# Copy project files to staging (exclude build artifacts, git, runtime data)
+rsync -a \
+    --exclude='.git' \
+    --exclude='dist' \
+    --exclude='node_modules' \
+    --exclude='*.pyc' \
+    --exclude='__pycache__' \
+    --exclude='.env' \
+    --exclude='knowledge.db' \
+    --exclude='*.log' \
+    --exclude='.setup_complete' \
+    --exclude='.setup_credentials' \
+    --exclude='setup_config.json' \
+    --exclude='build-installer.sh' \
+    --exclude='hermes-suite-*.sh' \
+    "$SCRIPT_DIR/" "$STAGING_DIR/"
+
+echo "[OK] Staging directory prepared"
+
+# ============================================================
+# 2. Create tarball payload
+# ============================================================
+PAYLOAD_TAR="/tmp/hermes-payload.tar.gz"
+tar czf "$PAYLOAD_TAR" -C "$STAGING_DIR" .
+PAYLOAD_SIZE=$(du -sh "$PAYLOAD_TAR" | cut -f1)
+echo "[OK] Payload created: $PAYLOAD_SIZE"
+
+# ============================================================
+# 3. Write self-extracting installer
+# ============================================================
+cat > "$OUTPUT" << 'HEADER_EOF'
+#!/bin/bash
+# ============================================================
+# Hermes Agent Suite — Self-Extracting Installer
+# This file contains a shell script header + tar.gz payload.
+# Run: chmod +x hermes-suite-v*-linux-x86_64.sh && sudo ./hermes-suite-v*-linux-x86_64.sh
+# ============================================================
+
+VERSION="__VERSION_PLACEHOLDER__"
 INSTALL_DIR="/opt/hermes-suite"
 DATA_DIR="$INSTALL_DIR/data"
 SERVICE_NAME="hermes-suite-setup"
 PORT=9800
 
-# --- Color helpers (safe for non-tty) ---
+# --- Color helpers ---
 if [ -t 1 ]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 else
@@ -31,172 +83,110 @@ echo ""
 # ============================================================
 # 1. Pre-flight checks
 # ============================================================
-
-# Root check
 if [ "$(id -u)" -ne 0 ]; then
     fail "This installer requires root privileges. Run: sudo bash $0"
 fi
 
-# Python3 check
 if ! command -v python3 &>/dev/null; then
     fail "python3 not found. Install: apt install python3 / yum install python3"
 fi
 
 PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-PYTHON_MAJOR=$(echo "$PYTHON_VER" | cut -d. -f1)
-PYTHON_MINOR=$(echo "$PYTHON_VER" | cut -d. -f2)
-if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 8 ]); then
-    fail "Python >= 3.8 required, found $PYTHON_VER"
-fi
 info "Python $PYTHON_VER"
 
-# systemd check
-if ! command -v systemctl &>/dev/null; then
-    warn "systemctl not found. Service will not auto-start."
-    warn "You can run manually: python3 $INSTALL_DIR/scripts/setup-server.py"
-    NO_SYSTEMD=1
-else
+HAS_SYSTEMD=false
+if command -v systemctl &>/dev/null && [ -d /run/systemd/system ]; then
+    HAS_SYSTEMD=true
     info "systemd available"
+else
+    warn "systemctl not found. Service will not auto-start."
 fi
 
-# Port check
-if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || netstat -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+# Check port
+if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
     warn "Port $PORT is already in use!"
-    PROC=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | head -1 || true)
-    echo "     $PROC"
-    echo ""
-    read -r -p "     Kill existing process and continue? [y/N] " ANSWER
-    if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
-        fuser -k ${PORT}/tcp 2>/dev/null || true
+    ss -tlnp 2>/dev/null | grep ":${PORT} "
+    read -p "Kill existing process and continue? [y/N] " yn
+    if [ "$yn" = "y" ] || [ "$yn" = "Y" ]; then
+        PIDS=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | grep -oP 'pid=\K\d+')
+        for pid in $PIDS; do kill $pid 2>/dev/null; done
         sleep 1
         info "Port $PORT freed"
     else
-        fail "Port $PORT occupied. Aborting."
+        echo "Cancelled."
+        exit 0
     fi
 fi
 
 # ============================================================
-# 2. Existing installation detection
+# 2. Handle existing installation
 # ============================================================
-
-EXISTING=0
 if [ -d "$INSTALL_DIR" ]; then
-    EXISTING=1
-    echo ""
     warn "Existing installation detected at $INSTALL_DIR"
-    echo ""
-    
-    # Show what's there
     FILE_COUNT=$(find "$INSTALL_DIR" -type f 2>/dev/null | wc -l)
     DIR_SIZE=$(du -sh "$INSTALL_DIR" 2>/dev/null | cut -f1)
-    echo "     Files: $FILE_COUNT"
-    echo "     Size:  $DIR_SIZE"
-    
-    # Check service status
-    if [ -z "$NO_SYSTEMD" ]; then
-        SVC_STATUS=$(systemctl is-active ${SERVICE_NAME} 2>/dev/null || echo "inactive")
-        echo "     Service: $SVC_STATUS"
+    echo "Files: $FILE_COUNT"
+    echo "Size: $DIR_SIZE"
+
+    if [ "$HAS_SYSTEMD" = true ]; then
+        SVC_STATUS=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo "inactive")
+        echo "Service: $SVC_STATUS"
     fi
-    
-    # Check if setup was completed
+
     if [ -f "$DATA_DIR/.setup_complete" ]; then
-        echo "     Setup: COMPLETED"
-    elif [ -f "$DATA_DIR/.setup_credentials" ]; then
-        echo "     Setup: IN PROGRESS (credentials generated)"
+        echo "Setup: COMPLETED"
     else
-        echo "     Setup: NOT STARTED"
+        echo "Setup: NOT COMPLETED"
     fi
-    
+
     echo ""
-    echo "     Options:"
-    echo "       1) Clean install (remove everything, reinstall)"
-    echo "       2) Upgrade (keep data/credentials, replace code)"
-    echo "       3) Cancel"
-    echo ""
-    read -r -p "     Choose [1/2/3]: " CHOICE
-    
-    case "$CHOICE" in
+    echo "Options:"
+    echo "  1) Clean install (remove everything, reinstall)"
+    echo "  2) Upgrade (keep data/credentials, replace code)"
+    echo "  3) Cancel"
+    read -p "Choose [1/2/3]: " choice
+
+    case "$choice" in
         1)
-            echo ""
             info "Cleaning previous installation..."
-            
-            # Stop service first
-            if [ -z "$NO_SYSTEMD" ]; then
-                systemctl stop ${SERVICE_NAME} 2>/dev/null || true
-                systemctl disable ${SERVICE_NAME} 2>/dev/null || true
-            fi
-            
-            # Kill anything on our port
-            fuser -k ${PORT}/tcp 2>/dev/null || true
-            sleep 1
-            
-            # Remove install dir
+            systemctl stop "$SERVICE_NAME" 2>/dev/null
+            systemctl disable "$SERVICE_NAME" 2>/dev/null
             rm -rf "$INSTALL_DIR"
-            info "Removed $INSTALL_DIR"
-            
-            # Remove ~/.hermes (generated configs, env, etc.)
-            if [ -d "/root/.hermes" ]; then
-                rm -rf "/root/.hermes"
-                info "Removed /root/.hermes"
-            fi
-            
-            # Kill related processes
-            pkill -9 -f crystal_reflex 2>/dev/null || true
-            pkill -9 -f ocr_server 2>/dev/null || true
-            pkill -9 -f "node.*server.js" 2>/dev/null || true
-            pkill -9 -f hermes_cli 2>/dev/null || true
-            
-            # Remove service file
-            rm -f /etc/systemd/system/${SERVICE_NAME}.service
-            if [ -z "$NO_SYSTEMD" ]; then
-                systemctl daemon-reload 2>/dev/null || true
-            fi
-            info "Removed systemd service"
-            
-            # Remove stale symlinks
-            find /etc/systemd/system/ -lname "*${SERVICE_NAME}*" -delete 2>/dev/null || true
-            
+            rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+            rm -rf /root/.hermes
+            systemctl daemon-reload 2>/dev/null
             info "Cleanup complete"
             ;;
         2)
-            echo ""
-            info "Upgrade mode: preserving $DATA_DIR"
-            UPGRADE=1
+            info "Upgrade mode: keeping data and credentials"
             ;;
-        3|*)
-            echo ""
-            echo "     Installation cancelled."
+        *)
+            echo "Cancelled."
             exit 0
             ;;
     esac
-    echo ""
 fi
 
 # ============================================================
 # 3. Extract payload
 # ============================================================
-
-echo "Extracting files..."
+info "Extracting files..."
+mkdir -p "$INSTALL_DIR" "$DATA_DIR"
 
 # Find archive start line
 ARCHIVE_LINE=$(awk '/^__ARCHIVE_START__$/{print NR + 1; exit 0; }' "$0")
+
 if [ -z "$ARCHIVE_LINE" ]; then
-    fail "Corrupted installer: archive marker not found"
+    fail "Archive marker not found in this script. File may be corrupted."
 fi
 
-# Create dirs
-mkdir -p "$INSTALL_DIR"
-
-# Extract with error handling
 if ! tail -n +"$ARCHIVE_LINE" "$0" | tar xzf - -C "$INSTALL_DIR" 2>/tmp/hermes-install-err.log; then
-    ERR=$(cat /tmp/hermes-install-err.log 2>/dev/null)
-    fail "Extraction failed: $ERR"
+    fail "Extraction failed: $(cat /tmp/hermes-install-err.log)"
 fi
-rm -f /tmp/hermes-install-err.log
 
 # Verify critical files
 MISSING=""
-for f in scripts/setup-server.py web-setup/index.html .hermes/.env.example; do
+for f in scripts/setup-server.py web-setup/index.html install.sh; do
     if [ ! -f "$INSTALL_DIR/$f" ]; then
         MISSING="$MISSING $f"
     fi
@@ -207,135 +197,91 @@ fi
 
 info "Files extracted to $INSTALL_DIR"
 
-# Create data directory (preserve if upgrade)
-mkdir -p "$DATA_DIR"
+# ============================================================
+# 4. Install Python dependencies
+# ============================================================
+info "Installing Python dependencies..."
+pip3 install -q --break-system-packages flask pyyaml requests 2>/dev/null || \
+pip3 install -q flask pyyaml requests 2>/dev/null || \
+warn "Some pip packages may need manual install"
 
 # ============================================================
-# 4. Install systemd service
+# 5. Register and start setup service
 # ============================================================
-
-if [ -z "$NO_SYSTEMD" ]; then
-    echo "Installing systemd service..."
-    
-    cat > /etc/systemd/system/${SERVICE_NAME}.service << SVCEOF
+if [ "$HAS_SYSTEMD" = true ]; then
+    cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
 [Unit]
 Description=Hermes Agent Suite Setup Wizard
 After=network.target
 
 [Service]
 Type=simple
+WorkingDirectory=$INSTALL_DIR
 ExecStart=/usr/bin/python3 ${INSTALL_DIR}/scripts/setup-server.py
-Environment=HERMES_INSTALL_DIR=${INSTALL_DIR}
-Environment=HERMES_SETUP_PORT=${PORT}
+Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
-RestartSec=5
-WorkingDirectory=${INSTALL_DIR}
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
-SVCEOF
+EOF
 
     systemctl daemon-reload
-    systemctl enable ${SERVICE_NAME} 2>/dev/null
-    systemctl start ${SERVICE_NAME}
-    
-    # Verify service started
-    sleep 2
-    SVC_STATUS=$(systemctl is-active ${SERVICE_NAME} 2>/dev/null || echo "unknown")
-    if [ "$SVC_STATUS" = "active" ]; then
-        info "Service started successfully"
+    systemctl enable "$SERVICE_NAME" 2>/dev/null
+    systemctl start "$SERVICE_NAME"
+
+    sleep 1
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        info "Setup service started"
     else
-        warn "Service status: $SVC_STATUS"
-        warn "Check logs: journalctl -u ${SERVICE_NAME} -n 20"
-        
-        # Fallback: try running directly
-        echo "     Attempting direct start..."
-        HERMES_INSTALL_DIR="$INSTALL_DIR" HERMES_SETUP_PORT="$PORT" \
-            nohup python3 "$INSTALL_DIR/scripts/setup-server.py" > /tmp/hermes-setup.log 2>&1 &
-        sleep 2
-        if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
-            info "Direct start succeeded (no systemd management)"
-        else
-            fail "Setup server failed to start. Check /tmp/hermes-setup.log"
-        fi
+        warn "Service failed to start, trying nohup..."
+        nohup python3 "$INSTALL_DIR/scripts/setup-server.py" > "$DATA_DIR/setup.log" 2>&1 &
+        info "Setup service started (nohup)"
     fi
 else
-    # No systemd — run directly
-    echo "Starting setup server directly..."
-    HERMES_INSTALL_DIR="$INSTALL_DIR" HERMES_SETUP_PORT="$PORT" \
-        nohup python3 "$INSTALL_DIR/scripts/setup-server.py" > /tmp/hermes-setup.log 2>&1 &
-    sleep 2
-    if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
-        info "Setup server started (PID: $(pgrep -f setup-server.py))"
-    else
-        fail "Setup server failed to start. Check /tmp/hermes-setup.log"
-    fi
+    nohup python3 "$INSTALL_DIR/scripts/setup-server.py" > "$DATA_DIR/setup.log" 2>&1 &
+    info "Setup service started (nohup, no systemd)"
 fi
-
-# ============================================================
-# 5. Wait for ready & get credentials
-# ============================================================
-
-echo "Waiting for setup wizard..."
-RETRIES=0
-MAX_RETRIES=10
-while [ $RETRIES -lt $MAX_RETRIES ]; do
-    if curl -sf http://localhost:${PORT}/api/status > /dev/null 2>&1; then
-        break
-    fi
-    RETRIES=$((RETRIES + 1))
-    sleep 1
-done
-
-if [ $RETRIES -ge $MAX_RETRIES ]; then
-    warn "Setup wizard not responding after ${MAX_RETRIES}s"
-    warn "Try manually: curl http://localhost:${PORT}/api/status"
-fi
-
-# Get credentials
-USERNAME="admin"
-PASSWORD="(see server output)"
-if [ -f "$DATA_DIR/.setup_credentials" ]; then
-    USERNAME=$(python3 -c "import json; c=json.load(open('$DATA_DIR/.setup_credentials')); print(c.get('username','admin'))" 2>/dev/null || echo "admin")
-    PASSWORD=$(python3 -c "import json; c=json.load(open('$DATA_DIR/.setup_credentials')); print(c.get('password','???'))" 2>/dev/null || echo "???")
-fi
-
-# Detect local IP
-LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-[ -z "$LOCAL_IP" ] && LOCAL_IP="localhost"
 
 # ============================================================
 # 6. Done
 # ============================================================
-
 echo ""
 echo "========================================================"
-echo "          Installation Complete!"
+echo "  Installation Complete!"
 echo "========================================================"
 echo ""
-echo "  Open in browser:"
-echo "     http://localhost:${PORT}"
-echo "     http://${LOCAL_IP}:${PORT}"
+echo "  Open your browser and visit:"
+echo "    http://localhost:${PORT}"
 echo ""
-echo "  Login Credentials:"
-echo "     Username: ${USERNAME}"
-echo "     Password: ${PASSWORD}"
-echo ""
-if [ -z "$NO_SYSTEMD" ]; then
-    echo "  Management Commands:"
-    echo "     systemctl status  ${SERVICE_NAME}"
-    echo "     systemctl stop    ${SERVICE_NAME}"
-    echo "     systemctl restart ${SERVICE_NAME}"
+LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [ -n "$LOCAL_IP" ]; then
+    echo "  Or from another machine:"
+    echo "    http://${LOCAL_IP}:${PORT}"
     echo ""
 fi
-echo "  Uninstall:"
-echo "     bash $0   (choose option 1 to clean)"
-echo ""
-echo "  Install Directory: ${INSTALL_DIR}"
-echo "  Data Directory:    ${DATA_DIR}"
-echo ""
+echo "  Follow the web wizard to complete configuration."
 echo "========================================================"
-echo ""
 
 exit 0
 __ARCHIVE_START__
+HEADER_EOF
+
+# Replace version placeholder
+sed -i "s/__VERSION_PLACEHOLDER__/${VERSION}/g" "$OUTPUT"
+
+# Append tarball payload
+cat "$PAYLOAD_TAR" >> "$OUTPUT"
+
+chmod +x "$OUTPUT"
+
+FINAL_SIZE=$(du -sh "$OUTPUT" | cut -f1)
+echo ""
+echo "========================================================"
+echo "  Build Complete!"
+echo "  Output: $OUTPUT"
+echo "  Size: $FINAL_SIZE"
+echo "========================================================"
+
+# Cleanup
+rm -rf "$STAGING_DIR" "$PAYLOAD_TAR"
