@@ -1,120 +1,229 @@
 # Hermes Agent Suite
 
-一站式 AI Agent 套件 · 开源版安装配置
+[中文](#中文说明) | [English](#english)
 
-## 概述
+---
 
-Hermes Agent Suite 是基于 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 的开源 AI Agent 套件，提供：
+## English
 
-- 🤖 **Hermes Agent 核心** - AI 引擎 + Skills + Plugins
-- 👁️ **具身智能** - 视觉识别 + 语音交互 + 结晶反射引擎
-- 📚 **知识库** - AnythingLLM 文档检索
-- 🖥️ **HermesBuddy 桌面端** - 可视化管理界面（Windows / Linux）
-- 🏠 **IoT 智能家居** - 小米/涂鸦设备控制
+### What is Hermes Agent Suite?
 
-## 安装
+Hermes Agent Suite is an open-source, one-stop AI Agent deployment package. It bundles everything you need to run a production-grade AI agent system on a single Linux machine — from the LLM routing layer to hardware integration, with a web-based setup wizard that gets you running in under 10 minutes.
 
-```bash
-# 下载安装包后执行
-bash hermes-suite-v1.x.x-linux-x86_64.sh
-```
+### Features
 
-安装向导会引导你完成：
-1. 环境检查（Python / Node.js / Git）
-2. 模型配置（API Key / Provider）
-3. 硬件设备发现（摄像头 / 麦克风 / 扬声器 / GPU）
-4. 功能模块选择
-5. 结晶体系配置（云服务商 AK/SK + 基板模型）
-6. HermesBuddy 桌面客户端下载
+- **🧠 Crystallization Engine** — Procedural memory system that distills agent experience into reusable knowledge. Auto-downloads Qwen3-0.6B base model on first launch; supports custom fine-tuned models via `CRYSTAL_MODEL_PATH` env var.
+- **🖥️ HermesBuddy Desktop Client** — Cross-platform Electron app (Windows EXE + Linux AppImage) for interacting with your agent. Includes permission controls, workspace management, and session logging.
+- **📷 Embodied AI Module** — Camera, microphone, speaker, and GPU detection with multi-level fallback. Powers local vision services (OCR + image understanding via Moondream).
+- **🏠 Smart Home IoT** — Xiaomi device discovery and control via miIO protocol. Supports lights, switches, sensors, and scene automation.
+- **📚 Knowledge Base** — AnythingLLM integration for shared knowledge across agents. Vector search + document ingestion pipeline.
+- **🔒 Security First** — Command approval system, credential scrubbing, and per-module permission controls. Nothing runs without explicit authorization.
+- **🌐 Web Setup Wizard** — 7-step guided installation: environment check → model config → hardware detection → module selection → crystallization setup → client download → service startup.
 
-## 服务端口
-
-| 服务 | 端口 | 说明 |
-|------|------|------|
-| Setup Wizard / Dashboard | 9800 | 安装向导与状态面板 |
-| HermesBuddy Server | 8700 | API 代理（需客户端访问） |
-| Crystal Reflex | 9124 | 结晶反射引擎 |
-| Image Service (OCR) | 9121 | 视觉识别 API |
-| Hermes Gateway | - | Agent 网关（systemd） |
-
-## 结晶反射引擎
-
-Crystal Reflex 使用 Qwen3-0.6B 作为基板模型：
-
-- **默认行为**：首次启动自动从 ModelScope/HuggingFace 下载 Qwen3-0.6B（约1.2GB）
-- **微调模型**：如已训练结晶微调模型，设置环境变量 `CRYSTAL_MODEL_PATH=/path/to/model`
-- **训练流程**：使用 LLaMA-Factory 进行 SFT 全参微调，配置见 `crystallization/qwen3_06b_full.yaml`
-
-## 项目结构
-
-```
-hermes-suite/
-├── build-installer.sh          # 自解压安装包构建脚本
-├── scripts/
-│   ├── setup-server.py         # Web 安装向导后端
-│   ├── detect-devices.sh       # 硬件设备检测脚本
-│   └── sanitize.py             # 发布前去敏脚本
-├── web-setup/
-│   └── index.html              # Web 安装向导前端 (SPA)
-├── crystallization/
-│   ├── crystal_reflex.py       # 结晶反射推理服务
-│   ├── reflection_engine.py    # 反射引擎
-│   ├── analyzer.py             # 分析器
-│   ├── kv_cache_optimizer.py   # KV Cache 优化
-│   ├── export_training_data.py # 训练数据导出
-│   ├── qwen3_06b_full.yaml     # LLaMA-Factory 训练配置
-│   └── deploy_training.sh      # 训练部署脚本
-├── workbuddy/                   # HermesBuddy 服务端
-├── ocr-service/                 # 视觉识别服务
-├── DESIGN.md                   # 架构设计文档
-└── TECH-SELECTION-linux-packaging.md  # 技术选型文档
-```
-
-## 从源码构建
+### Quick Start
 
 ```bash
-# 1. 准备打包目录
-mkdir -p /tmp/hermes-pkg
-cp -r scripts web-setup crystallization workbuddy ocr-service /tmp/hermes-pkg/
+# Download the installer
+wget https://github.com/chensj923/hermes-agent-suite/releases/latest/download/hermes-suite-linux-x86_64.sh
 
-# 2. 放入 HermesBuddy 客户端
-cp HermesBuddy-Setup-1.4.2.exe /tmp/hermes-pkg/buddy-dist/
-cp HermesBuddy-1.4.2.AppImage /tmp/hermes-pkg/buddy-dist/
+# Run the installer
+chmod +x hermes-suite-linux-x86_64.sh
+./hermes-suite-linux-x86_64.sh
 
-# 3. 去敏
-python3 scripts/sanitize.py --source /tmp/hermes-pkg --dest /tmp/hermes-pkg
-
-# 4. 构建安装包
-cd /tmp/hermes-pkg
-tar czf /tmp/payload.tar.gz --exclude='./data/.setup_complete' .
-cat build-installer.sh /tmp/payload.tar.gz > hermes-suite-v1.x.x-linux-x86_64.sh
-chmod +x hermes-suite-v1.x.x-linux-x86_64.sh
+# Follow the web wizard at http://localhost:9800
 ```
 
-## HermesBuddy 桌面客户端构建
+### Screenshots
+
+**HermesBuddy - Expert Profiles (Hermes Profile 管理)**
+![HermesBuddy Experts](docs/screenshots/hermesbuddy-experts.jpg)
+
+**HermesBuddy - Chat Interface (对话交互)**
+![HermesBuddy Chat](docs/screenshots/hermesbuddy-chat.jpg)
+
+**HermesBuddy - Task Records (工具执行日志)**
+![HermesBuddy Task Records](docs/screenshots/hermesbuddy-task-records.jpg)
+
+### Architecture
+
+```
+┌─────────────────────────────────────────┐
+│           Web Setup Wizard (:9800)      │
+├─────────────────────────────────────────┤
+│  Hermes Gateway    Model Router (:8800) │
+│  (API :8700)       ┌──────────────┐    │
+│                    │ Volcengine   │    │
+│  Crystal Reflex    │ Qwen/Alibaba │    │
+│  (:9124)           │ LM Studio    │    │
+│                    └──────────────┘    │
+│  Img Service (:9121)                   │
+│  OCR + Vision                          │
+├─────────────────────────────────────────┤
+│  Hardware Layer                        │
+│  Camera / Mic / Speaker / GPU / IoT    │
+└─────────────────────────────────────────┘
+```
+
+### Port Reference
+
+| Service | Port | Description |
+|---------|------|-------------|
+| Setup Wizard | 9800 | Web-based installation & dashboard |
+| WorkBuddy API | 8700 | Agent API (not a web UI — use HermesBuddy client) |
+| Model Router | 8800 | Multi-provider LLM routing |
+| Crystal Reflex | 9124 | Fast reflection engine |
+| Img Service | 9121 | OCR + image understanding |
+
+### Recommended System
+
+| Item | Minimum | Recommended |
+|------|---------|-------------|
+| OS | Ubuntu 20.04 LTS x86_64 | Ubuntu 22.04 / 24.04 LTS |
+| CPU | 2 cores | 4+ cores |
+| RAM | 4 GB | 8+ GB (16 GB for local vision) |
+| Disk | 20 GB free | 50+ GB SSD |
+| Python | 3.10+ | 3.11+ |
+| Node.js | 18+ | 20 LTS |
+| GPU | — | NVIDIA RTX 3060+ (CUDA 12.x, for Moondream vision) |
+| Camera | — | USB UVC camera (for embodied AI) |
+| Network | Outbound HTTPS | Stable broadband (model download ~1.2 GB) |
+
+> **Note:** The installer auto-detects hardware and adjusts module availability. Systems without GPU will use CPU-only vision (slower but functional). China mainland users: the installer configures pip/npm/apt mirrors automatically.
+
+### Building from Source
 
 ```bash
-cd desktop/
-npm install
-# Windows
-npx electron-builder --win --x64
-# Linux (在 Linux 上构建)
-ELECTRON_MIRROR="https://registry.npmmirror.com/-/binary/electron/" npx electron-builder --linux AppImage --x64
+# Clone
+git clone https://github.com/chensj923/hermes-agent-suite.git
+cd hermes-suite
+
+# Build installer
+./build-installer.sh
+
+# Output: dist/hermes-suite-v{VERSION}-linux-x86_64.sh
 ```
 
-## 技术栈
+### Requirements
 
-- **后端**: Python 3 (http.server, transformers, torch)
-- **前端**: 原生 HTML/CSS/JS SPA
-- **桌面端**: Electron + electron-builder
-- **AI 模型**: Qwen3-0.6B (结晶反射), 火山视觉 (图片识别)
-- **IoT**: python-miio
-- **知识库**: AnythingLLM
+- Linux x86_64 (Ubuntu 20.04+ recommended)
+- Python 3.10+
+- Node.js 18+
+- Optional: NVIDIA GPU (for local vision model)
+- Optional: USB camera/microphone (for embodied AI)
 
-## License
+### License
 
 MIT
 
-## Author
+---
 
-陈嗣俊
+## 中文说明
+
+### Hermes Agent Suite 是什么？
+
+Hermes Agent Suite 是一个开源的一站式 AI Agent 部署套件。它将运行生产级 AI Agent 系统所需的一切打包到一个 Linux 安装包中——从模型路由到硬件集成，配合 Web 安装向导，10 分钟内完成部署。
+
+### 核心功能
+
+- **🧠 结晶引擎** — 程序化记忆系统，将 Agent 经验蒸馏为可复用知识。首次启动自动下载 Qwen3-0.6B 基板模型；支持通过 `CRYSTAL_MODEL_PATH` 环境变量指定自定义微调模型。
+- **🖥️ HermesBuddy 桌面客户端** — 跨平台 Electron 应用（Windows EXE + Linux AppImage），提供权限控制、工作空间管理和会话日志。
+- **📷 具身智能模块** — 摄像头、麦克风、扬声器、GPU 检测，多级 fallback。驱动本地视觉服务（OCR + Moondream 图像理解）。
+- **🏠 智能家居 IoT** — 小米设备发现与控制（miIO 协议），支持灯光、开关、传感器和场景联动。
+- **📚 知识库** — AnythingLLM 集成，跨 Agent 共享知识。向量搜索 + 文档摄入管线。
+- **🔒 安全优先** — 命令审批系统、凭证去敏、模块化权限控制。未经明确授权不执行任何操作。
+- **🌐 Web 安装向导** — 7 步引导安装：环境检查 → 模型配置 → 硬件检测 → 模块选择 → 结晶体系 → 客户端下载 → 服务启动。
+
+### 快速开始
+
+```bash
+# 下载安装包
+wget https://github.com/chensj923/hermes-agent-suite/releases/latest/download/hermes-suite-linux-x86_64.sh
+
+# 运行安装
+chmod +x hermes-suite-linux-x86_64.sh
+./hermes-suite-linux-x86_64.sh
+
+# 打开浏览器访问 http://localhost:9800 跟随向导完成配置
+```
+
+### 界面截图
+
+**HermesBuddy - 专家页面（Hermes Profile 管理）**
+![HermesBuddy 专家](docs/screenshots/hermesbuddy-experts.jpg)
+
+**HermesBuddy - 对话页面（聊天交互）**
+![HermesBuddy 对话](docs/screenshots/hermesbuddy-chat.jpg)
+
+**HermesBuddy - 任务记录（工具执行日志）**
+![HermesBuddy 任务记录](docs/screenshots/hermesbuddy-task-records.jpg)
+
+### 架构概览
+
+```
+┌─────────────────────────────────────────┐
+│         Web 安装向导 (:9800)             │
+├─────────────────────────────────────────┤
+│  Hermes Gateway    模型路由 (:8800)      │
+│  (API :8700)       ┌──────────────┐    │
+│                    │ 火山引擎     │    │
+│  结晶反射          │ 通义千问     │    │
+│  (:9124)           │ LM Studio    │    │
+│                    └──────────────┘    │
+│  图像服务 (:9121)                        │
+│  OCR + 视觉理解                         │
+├─────────────────────────────────────────┤
+│  硬件层                                 │
+│  摄像头 / 麦克风 / 扬声器 / GPU / IoT  │
+└─────────────────────────────────────────┘
+```
+
+### 端口说明
+
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| 安装向导 | 9800 | Web 安装与仪表盘 |
+| WorkBuddy API | 8700 | Agent API（非 Web UI，需下载 HermesBuddy 客户端） |
+| 模型路由 | 8800 | 多供应商 LLM 路由 |
+| 结晶反射 | 9124 | 快速反射引擎 |
+| 图像服务 | 9121 | OCR + 图像理解 |
+
+### 推荐配置
+
+| 项目 | 最低要求 | 推荐配置 |
+|------|---------|---------|
+| 操作系统 | Ubuntu 20.04 LTS x86_64 | Ubuntu 22.04 / 24.04 LTS |
+| CPU | 2 核 | 4 核以上 |
+| 内存 | 4 GB | 8 GB+（本地视觉需 16 GB） |
+| 磁盘 | 20 GB 可用 | 50 GB+ SSD |
+| Python | 3.10+ | 3.11+ |
+| Node.js | 18+ | 20 LTS |
+| GPU | — | NVIDIA RTX 3060+（CUDA 12.x，Moondream 视觉加速） |
+| 摄像头 | — | USB UVC 摄像头（具身智能模块） |
+| 网络 | 出站 HTTPS | 稳定宽带（模型下载约 1.2 GB） |
+
+> **提示：** 安装程序自动检测硬件并调整可用模块。无 GPU 时使用 CPU 视觉（较慢但可用）。中国大陆用户：安装程序自动配置 pip/npm/apt 国内镜像源。
+
+### 从源码构建
+
+```bash
+# 克隆
+git clone https://github.com/chensj923/hermes-agent-suite.git
+cd hermes-suite
+
+# 构建安装包
+./build-installer.sh
+
+# 产物: dist/hermes-suite-v{VERSION}-linux-x86_64.sh
+```
+
+### 系统要求
+
+- Linux x86_64（推荐 Ubuntu 20.04+）
+- Python 3.10+
+- Node.js 18+
+- 可选：NVIDIA GPU（本地视觉模型加速）
+- 可选：USB 摄像头/麦克风（具身智能模块）
+
+### 许可证
+
+MIT
