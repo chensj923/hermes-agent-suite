@@ -22,14 +22,22 @@ Hermes Agent Suite is an open-source, one-stop AI Agent deployment package. It b
 
 ### Quick Start
 
+**Option 1: Download self-extracting installer / 下载自解压包**
+```bash
+wget https://github.com/chensj923/hermes-agent-suite/releases/download/v0.3.0/hermes-suite-linux-x86_64.sh
+chmod +x hermes-suite-linux-x86_64.sh
+sudo ./hermes-suite-linux-x86_64.sh
+```
+
+**Option 2: Clone from source / 从源码安装**
 ```bash
 git clone https://github.com/chensj923/hermes-agent-suite.git
 cd hermes-agent-suite
 chmod +x install.sh
 sudo ./install.sh
-
-# Follow the web wizard at http://localhost:9800
 ```
+
+After installation, open http://localhost:9800 to follow the web wizard. / 安装完成后打开 http://localhost:9800 跟随向导完成配置。
 
 ### Screenshots
 
@@ -133,14 +141,22 @@ Hermes Agent Suite 是一个开源的一站式 AI Agent 部署套件。它将运
 
 ### 快速开始
 
+**方式一：下载自解压包**
+```bash
+wget https://github.com/chensj923/hermes-agent-suite/releases/download/v0.3.0/hermes-suite-linux-x86_64.sh
+chmod +x hermes-suite-linux-x86_64.sh
+sudo ./hermes-suite-linux-x86_64.sh
+```
+
+**方式二：从源码安装**
 ```bash
 git clone https://github.com/chensj923/hermes-agent-suite.git
 cd hermes-agent-suite
 chmod +x install.sh
 sudo ./install.sh
-
-# 打开浏览器访问 http://localhost:9800 跟随向导完成配置
 ```
+
+安装完成后打开 http://localhost:9800 跟随向导完成配置。
 
 ### 界面截图
 
