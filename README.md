@@ -25,8 +25,8 @@ Hermes Agent Suite is an open-source, one-stop AI Agent deployment package. It b
 ```bash
 git clone https://github.com/chensj923/hermes-agent-suite.git
 cd hermes-agent-suite
-chmod +x build-installer.sh
-./build-installer.sh
+chmod +x install.sh
+sudo ./install.sh
 
 # Follow the web wizard at http://localhost:9800
 ```
@@ -136,8 +136,8 @@ Hermes Agent Suite 是一个开源的一站式 AI Agent 部署套件。它将运
 ```bash
 git clone https://github.com/chensj923/hermes-agent-suite.git
 cd hermes-agent-suite
-chmod +x build-installer.sh
-./build-installer.sh
+chmod +x install.sh
+sudo ./install.sh
 
 # 打开浏览器访问 http://localhost:9800 跟随向导完成配置
 ```
