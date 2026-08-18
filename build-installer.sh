@@ -8,7 +8,7 @@
 VERSION="0.3.0"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGING_DIR="/tmp/hermes-pkg-staging"
-OUTPUT="${SCRIPT_DIR}/hermes-suite-v${VERSION}-linux-x86_64.sh"
+OUTPUT="${SCRIPT_DIR}/hermes-suite-linux-x86_64.sh"
 
 echo "Building Hermes Agent Suite v${VERSION} installer..."
 
