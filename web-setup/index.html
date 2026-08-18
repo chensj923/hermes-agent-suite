@@ -172,7 +172,7 @@ input::placeholder { color:#475569; }
   <div class="page" id="page-4">
     <div class="card">
       <h2><span class="icon">💎</span> 结晶体系配置</h2>
-      <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">结晶体系通过微缩模型实现 Agent 行为反思与自我优化。需要选择一个云服务商来训练专属微缩模型。</p>
+      <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">结晶体系通过微缩模型实现 Agent 行为反思与自我优化。可选择本机训练或云服务商训练专属微缩模型。</p>
       
       <label>云服务商（用于模型训练）</label>
       <div class="provider-grid" id="crystalProviderGrid"></div>
@@ -314,6 +314,7 @@ const MODULES = [
 
 // Crystal system cloud providers and base models
 const CRYSTAL_PROVIDERS = [
+  { id:'local', name:'本机训练', icon:'🖥️', models:['Qwen3-0.6B','Qwen3-1.7B','Qwen3-4B'], local:true },
   { id:'tencent', name:'腾讯云', icon:'🔷', models:['hunyuan-turbo','hunyuan-pro','hunyuan-standard'] },
   { id:'alibaba', name:'阿里云', icon:'☁️', models:['qwen3-235b-a22b','qwen3-32b','qwen3-14b','qwen3-7b'] },
   { id:'volcengine', name:'火山引擎', icon:'🌋', models:['doubao-pro-32k','doubao-lite-32k','ark-code-latest'] },
@@ -336,12 +337,45 @@ function selectCrystalProvider(id) {
   document.querySelectorAll('#crystalProviderGrid .provider-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.id === id);
   });
-  document.getElementById('crystalFields').style.display = 'block';
+  
+  const prov = CRYSTAL_PROVIDERS.find(p => p.id === id);
+  const fields = document.getElementById('crystalFields');
+  const akField = document.getElementById('crystalAK');
+  const skField = document.getElementById('crystalSK');
+  const akLabel = akField.previousElementSibling;
+  const skLabel = skField.previousElementSibling;
   
   // Populate base model select
-  const prov = CRYSTAL_PROVIDERS.find(p => p.id === id);
   const sel = document.getElementById('crystalBaseModel');
   sel.innerHTML = prov.models.map(m => '<option value="'+m+'">'+m+'</option>').join('');
+  
+  if (prov.local) {
+    // Local training: hide AK/SK, show info
+    fields.style.display = 'block';
+    akField.style.display = 'none';
+    akLabel.style.display = 'none';
+    skField.style.display = 'none';
+    skLabel.style.display = 'none';
+    // Show local training note
+    let note = document.getElementById('localTrainNote');
+    if (!note) {
+      note = document.createElement('div');
+      note.id = 'localTrainNote';
+      note.style.cssText = 'color:#94a3b8;font-size:13px;margin-top:8px;padding:10px;background:rgba(59,130,246,0.1);border-radius:8px;';
+      skField.parentNode.insertBefore(note, skField.nextSibling);
+    }
+    note.style.display = 'block';
+    note.innerHTML = '💡 本机训练使用本地 GPU/CPU，无需云服务凭据。首次启动会自动下载基板模型（约1.2GB）。如有 NVIDIA GPU 将自动使用 CUDA 加速。';
+  } else {
+    // Cloud provider: show AK/SK
+    fields.style.display = 'block';
+    akField.style.display = '';
+    akLabel.style.display = '';
+    skField.style.display = '';
+    skLabel.style.display = '';
+    const note = document.getElementById('localTrainNote');
+    if (note) note.style.display = 'none';
+  }
 }
 
 async function saveCrystalConfig() {
@@ -350,7 +384,9 @@ async function saveCrystalConfig() {
   crystalConfig.baseModel = document.getElementById('crystalBaseModel').value;
   crystalConfig.saveDir = document.getElementById('crystalSaveDir').value || '/opt/crystal-model';
   
-  if (crystalConfig.provider && crystalConfig.ak) {
+  // Local mode doesn't need AK/SK
+  const prov = CRYSTAL_PROVIDERS.find(p => p.id === crystalConfig.provider);
+  if (crystalConfig.provider && (prov?.local || crystalConfig.ak)) {
     try {
       await fetch('/api/config/crystal', {
         method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
