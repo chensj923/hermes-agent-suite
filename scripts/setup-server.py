@@ -570,8 +570,141 @@ WantedBy=multi-user.target
         except Exception as e:
             results.append(['deps', f'pip error: {e}'])
         
-        # 5. Start services
+        # 4.5 Install service dependencies (models, OCR, etc.)
         modules = config.get('modules', [])
+        
+        # --- Ollama (needed for img-service / embodied AI) ---
+        if 'embodied' in modules or 'knowledge' in modules:
+            ollama_path = self._which('ollama')
+            if not ollama_path:
+                results.append(['deps', 'Installing Ollama...'])
+                try:
+                    r = subprocess.run(['curl', '-fsSL', 'https://ollama.com/install.sh'],
+                                      capture_output=True, timeout=120)
+                    if r.returncode == 0:
+                        # Pipe to bash
+                        r2 = subprocess.run(['bash'], input=r.stdout, capture_output=True, timeout=180)
+                        if r2.returncode == 0:
+                            results.append(['deps', 'Ollama installed'])
+                        else:
+                            results.append(['deps', f'Ollama install failed: {r2.stderr.decode().strip()[:100]}'])
+                    else:
+                        results.append(['deps', 'Ollama download failed'])
+                except Exception as e:
+                    results.append(['deps', f'Ollama install error: {e}'])
+            else:
+                results.append(['deps', f'Ollama found: {ollama_path}'])
+            
+            # Ensure Ollama is running
+            try:
+                r = subprocess.run(['curl', '-sf', 'http://127.0.0.1:11434/api/tags'],
+                                  capture_output=True, timeout=5)
+                if r.returncode != 0:
+                    subprocess.Popen(['ollama', 'serve'], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, start_new_session=True)
+                    import time; time.sleep(2)
+                    results.append(['deps', 'Ollama serve started'])
+            except: pass
+            
+            # Pull vision models if missing
+            for model_name in ['moondream', 'minicpm-v']:
+                try:
+                    r = subprocess.run(['ollama', 'list'], capture_output=True, timeout=10)
+                    if model_name not in r.stdout.decode():
+                        results.append(['deps', f'Pulling {model_name} (this may take a few minutes)...'])
+                        r2 = subprocess.run(['ollama', 'pull', model_name],
+                                           capture_output=True, timeout=600)
+                        if r2.returncode == 0:
+                            results.append(['deps', f'{model_name} pulled'])
+                        else:
+                            results.append(['deps', f'{model_name} pull failed: {r2.stderr.decode().strip()[:80]}'])
+                    else:
+                        results.append(['deps', f'{model_name} already available'])
+                except Exception as e:
+                    results.append(['deps', f'{model_name} error: {e}'])
+        
+        # --- RapidOCR (needed for img-service) ---
+        if 'embodied' in modules:
+            try:
+                r = subprocess.run(['python3', '-c', 'from rapidocr_onnxruntime import RapidOCR'],
+                                  capture_output=True, timeout=10)
+                if r.returncode != 0:
+                    results.append(['deps', 'Installing rapidocr-onnxruntime...'])
+                    r2 = subprocess.run(['pip3', 'install', '-q', '--break-system-packages',
+                                        'rapidocr-onnxruntime'],
+                                       capture_output=True, timeout=120)
+                    if r2.returncode == 0:
+                        results.append(['deps', 'rapidocr-onnxruntime installed'])
+                    else:
+                        results.append(['deps', f'rapidocr install failed: {r2.stderr.decode().strip()[:100]}'])
+                else:
+                    results.append(['deps', 'rapidocr-onnxruntime already installed'])
+            except Exception as e:
+                results.append(['deps', f'rapidocr check error: {e}'])
+        
+        # --- Qwen3-0.6B model for crystal-reflex ---
+        if 'crystal' in modules:
+            model_dir = Path(config.get('crystal_model_path', '/opt/crystal-model/qwen3-06b-deploy'))
+            if not model_dir.exists() or not any(model_dir.glob('*.safetensors')) and not any(model_dir.glob('*.bin')):
+                results.append(['deps', 'Downloading Qwen3-0.6B base model from ModelScope...'])
+                try:
+                    model_dir.parent.mkdir(parents=True, exist_ok=True)
+                    # Try modelscope first (faster in China)
+                    dl_script = f"""
+import os
+os.environ['MODELSCOPE_CACHE'] = '{model_dir.parent}'
+try:
+    from modelscope import snapshot_download
+    path = snapshot_download('Qwen/Qwen3-0.6B', cache_dir='{model_dir.parent}')
+    print(f'DOWNLOADED:{{path}}')
+except Exception as e:
+    print(f'MODELSCOPE_FAIL:{{e}}')
+    # Fallback to huggingface
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-0.6B', cache_dir='{model_dir.parent}')
+        print('DOWNLOADED:hf_fallback')
+    except Exception as e2:
+        print(f'HF_FAIL:{{e2}}')
+"""
+                    r = subprocess.run(['python3', '-c', dl_script],
+                                      capture_output=True, timeout=600)
+                    output = r.stdout.decode().strip()
+                    if 'DOWNLOADED:' in output:
+                        dl_path = output.split('DOWNLOADED:')[-1].strip()
+                        results.append(['deps', f'Qwen3-0.6B downloaded to {dl_path}'])
+                        # Update config with actual path
+                        config['crystal_model_path'] = dl_path
+                    else:
+                        err = r.stderr.decode().strip()[:200]
+                        results.append(['deps', f'Qwen3-0.6B download failed: {err}'])
+                        results.append(['deps', '⚠️ Crystal reflex will use fallback mode without model'])
+                except Exception as e:
+                    results.append(['deps', f'Qwen3-0.6B download error: {e}'])
+            else:
+                results.append(['deps', f'Qwen3-0.6B model found at {model_dir}'])
+        
+        # --- Python deps for crystal-reflex (transformers, torch) ---
+        if 'crystal' in modules:
+            try:
+                r = subprocess.run(['python3', '-c', 'import transformers, torch'],
+                                  capture_output=True, timeout=10)
+                if r.returncode != 0:
+                    results.append(['deps', 'Installing transformers + torch...'])
+                    r2 = subprocess.run(['pip3', 'install', '-q', '--break-system-packages',
+                                        'transformers', 'torch', '--index-url',
+                                        'https://download.pytorch.org/whl/cpu'],
+                                       capture_output=True, timeout=300)
+                    if r2.returncode == 0:
+                        results.append(['deps', 'transformers + torch (CPU) installed'])
+                    else:
+                        results.append(['deps', f'torch install failed: {r2.stderr.decode().strip()[:100]}'])
+                else:
+                    results.append(['deps', 'transformers + torch already installed'])
+            except Exception as e:
+                results.append(['deps', f'torch check error: {e}'])
+        
+        # 5. Start services
         
         # hermes-gateway: generate systemd unit dynamically then start
         if has_systemd:
@@ -643,29 +776,73 @@ WantedBy=multi-user.target
         else:
             results.append(['workbuddy', 'skipped (node not found)'])
         
-        # crystal-reflex
+        # crystal-reflex: generate systemd unit dynamically then start
         cr_dir = INSTALL_DIR / 'crystallization'
         cr_script = cr_dir / 'crystal_reflex.py'
         if cr_script.exists():
             if has_systemd:
-                r = subprocess.run(['systemctl', 'start', 'crystal-reflex'], capture_output=True, timeout=15)
-                if r.returncode == 0:
-                    results.append(['crystal-reflex', 'started'])
-                else:
-                    # Fallback to nohup
-                    try:
+                # Generate crystal-reflex.service dynamically
+                cr_unit = Path('/etc/systemd/system/crystal-reflex.service')
+                try:
+                    model_path = config.get('crystal_model_path', '')
+                    env_lines = ''
+                    if model_path:
+                        env_lines += f'Environment="CRYSTAL_MODEL_PATH={model_path}"\n'
+                    # Read API key from .env if available
+                    env_file = INSTALL_DIR / '.hermes' / '.env'
+                    if not env_file.exists():
+                        env_file = Path.home() / '.hermes' / '.env'
+                    if env_file.exists():
+                        for line in env_file.read_text().splitlines():
+                            if '=' in line and not line.startswith('#'):
+                                env_lines += f'Environment="{line.strip()}"\n'
+                    
+                    unit_content = f"""[Unit]
+Description=Crystal Reflex Engine (Hermes Agent Suite)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={INSTALL_DIR}
+ExecStart=/usr/bin/python3 {cr_script} --serve --port 9124
+{env_lines}Restart=on-failure
+RestartSec=5
+StandardOutput=append:{INSTALL_DIR}/data/crystal-reflex.log
+StandardError=append:{INSTALL_DIR}/data/crystal-reflex.log
+
+[Install]
+WantedBy=multi-user.target
+"""
+                    cr_unit.write_text(unit_content)
+                    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
+                    subprocess.run(['systemctl', 'enable', 'crystal-reflex'], capture_output=True, timeout=10)
+                    r = subprocess.run(['systemctl', 'start', 'crystal-reflex'], capture_output=True, timeout=15)
+                    if r.returncode == 0:
+                        results.append(['crystal-reflex', 'started (systemd)'])
+                    else:
+                        err = r.stderr.decode().strip()[:100]
+                        results.append(['crystal-reflex', f'systemd failed: {err}, trying nohup...'])
+                        # Fallback to nohup
                         log_f = open(str(INSTALL_DIR / 'data' / 'crystal-reflex.log'), 'w')
+                        env = os.environ.copy()
+                        if model_path:
+                            env['CRYSTAL_MODEL_PATH'] = model_path
                         subprocess.Popen(['python3', str(cr_script), '--serve', '--port', '9124'],
                                         stdout=log_f, stderr=subprocess.STDOUT,
-                                        start_new_session=True)
-                        results.append(['crystal-reflex', 'started (nohup)'])
-                    except Exception as e:
-                        results.append(['crystal-reflex', f'nohup failed: {e}'])
+                                        start_new_session=True, env=env)
+                        results.append(['crystal-reflex', 'started (nohup fallback)'])
+                except Exception as e:
+                    results.append(['crystal-reflex', f'unit generation error: {e}'])
             else:
                 try:
+                    model_path = config.get('crystal_model_path', '')
+                    env = os.environ.copy()
+                    if model_path:
+                        env['CRYSTAL_MODEL_PATH'] = model_path
+                    log_f = open(str(INSTALL_DIR / 'data' / 'crystal-reflex.log'), 'w')
                     subprocess.Popen(['python3', str(cr_script), '--serve', '--port', '9124'],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    start_new_session=True)
+                                    stdout=log_f, stderr=subprocess.STDOUT,
+                                    start_new_session=True, env=env)
                     results.append(['crystal-reflex', 'started (nohup, no systemd)'])
                 except Exception as e:
                     results.append(['crystal-reflex', f'error: {e}'])

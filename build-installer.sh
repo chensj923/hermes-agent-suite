@@ -4,7 +4,7 @@
 # Usage: bash hermes-suite-v1.0.0-linux-x86_64.sh
 # ============================================================
 
-VERSION="0.2.0"
+VERSION="1.1.0"
 INSTALL_DIR="/opt/hermes-suite"
 DATA_DIR="$INSTALL_DIR/data"
 SERVICE_NAME="hermes-suite-setup"

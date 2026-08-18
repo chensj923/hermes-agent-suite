@@ -663,35 +663,52 @@ async function detectDevices() {
     if (resp.ok) detected = await resp.json();
   } catch(e) { console.warn('Device detection failed:', e); }
   
-  const devices = [];
-  (detected.cameras || []).forEach(d => devices.push({ type:'camera', icon:'📷', name:d.name||'Camera', path:d.path||'', available:true }));
-  (detected.microphones || []).forEach(d => devices.push({ type:'mic', icon:'🎤', name:d.name||'Microphone', path:d.path||'', available:true }));
-  (detected.speakers || []).forEach(d => devices.push({ type:'speaker', icon:'🔊', name:d.name||'Speaker', path:d.path||'', available:true }));
-  (detected.gpu || []).forEach(d => devices.push({ type:'gpu', icon:'🖥️', name:d.name||'GPU', path:d.type||'unknown', available:true }));
+  // Build three dropdown selects: camera, microphone, speaker
+  const categories = [
+    { key: 'cameras', label: '📷 摄像头 Camera', icon: '📷' },
+    { key: 'microphones', label: '🎤 麦克风 Microphone', icon: '🎤' },
+    { key: 'speakers', label: '🔊 扬声器 Speaker', icon: '🔊' },
+  ];
   
-  if (devices.length === 0) {
-    c.innerHTML = '<p style="color:#64748b;">未检测到设备。确保摄像头/麦克风已连接。</p>';
-    config.devices = [];
-    return;
+  let html = '';
+  config.devices = {};
+  
+  categories.forEach(cat => {
+    const items = detected[cat.key] || [];
+    html += `<div style="margin-bottom:12px;">`;
+    html += `<label style="display:block;font-size:13px;color:#94a3b8;margin-bottom:4px;">${cat.label}</label>`;
+    html += `<select id="dev_${cat.key}" onchange="updateDeviceSelection('${cat.key}', this.value)" style="width:100%;padding:10px 14px;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:14px;">`;
+    html += `<option value="">-- 不选择 / None --</option>`;
+    items.forEach(d => {
+      const name = d.name || cat.key.slice(0,-1);
+      const path = d.path || '';
+      html += `<option value="${path}">${name} (${path})</option>`;
+    });
+    html += `</select>`;
+    if (items.length === 0) {
+      html += `<div style="font-size:11px;color:#64748b;margin-top:2px;">未检测到${cat.label.split(' ')[1]}设备</div>`;
+    }
+    html += `</div>`;
+    // Default: select first device if available
+    config.devices[cat.key] = items.length > 0 ? items[0].path : '';
+  });
+  
+  // GPU info (read-only display)
+  const gpus = detected.gpu || [];
+  if (gpus.length > 0) {
+    html += `<div style="margin-bottom:12px;">`;
+    html += `<label style="display:block;font-size:13px;color:#94a3b8;margin-bottom:4px;">🖥️ GPU</label>`;
+    html += `<div style="padding:10px 14px;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:14px;">`;
+    gpus.forEach(g => { html += `${g.name || 'GPU'} (${g.type || ''})<br>`; });
+    html += `</div></div>`;
   }
   
-  c.innerHTML = '<ul class="device-list">' + devices.map((d,i) => `
-    <li class="device-item selected" onclick="toggleDevice(this,${i})">
-      <input type="checkbox" checked>
-      <span class="device-icon">${d.icon}</span>
-      <div class="device-info">
-        <div class="device-name">${d.name}</div>
-        <div class="device-path">${d.path}</div>
-      </div>
-    </li>
-  `).join('') + '</ul>';
-  config.devices = devices;
+  c.innerHTML = html;
 }
 
-function toggleDevice(el, idx) {
-  el.classList.toggle('selected');
-  const cb = el.querySelector('input');
-  cb.checked = !cb.checked;
+function updateDeviceSelection(category, value) {
+  if (!config.devices) config.devices = {};
+  config.devices[category] = value;
 }
 
 // Modules
