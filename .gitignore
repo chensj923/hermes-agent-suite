@@ -3,6 +3,7 @@ dist/
 *.sh
 !build-installer.sh
 !install.sh
+!scripts/detect-devices.sh
 
 # Runtime data
 data/
