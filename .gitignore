@@ -2,6 +2,7 @@
 dist/
 *.sh
 !build-installer.sh
+!install.sh
 
 # Runtime data
 data/
