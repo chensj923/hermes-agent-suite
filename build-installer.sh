@@ -244,8 +244,27 @@ else
 fi
 
 # ============================================================
-# 6. Done
+# 6. Done — show credentials
 # ============================================================
+# Wait for service to generate credentials
+sleep 2
+
+# Read credentials from file or log
+CRED_FILE="$DATA_DIR/.setup_credentials"
+ADMIN_USER=""
+ADMIN_PASS=""
+
+if [ -f "$CRED_FILE" ]; then
+    ADMIN_USER=$(python3 -c "import json; c=json.load(open('$CRED_FILE')); print(c.get('username',''))" 2>/dev/null)
+    ADMIN_PASS=$(python3 -c "import json; c=json.load(open('$CRED_FILE')); print(c.get('password',''))" 2>/dev/null)
+fi
+
+# Fallback: parse from service log
+if [ -z "$ADMIN_PASS" ] && [ -f "$DATA_DIR/setup.log" ]; then
+    ADMIN_USER=$(grep -oP 'Username:\s+\K\S+' "$DATA_DIR/setup.log" 2>/dev/null | head -1)
+    ADMIN_PASS=$(grep -oP 'Password:\s+\K\S+' "$DATA_DIR/setup.log" 2>/dev/null | head -1)
+fi
+
 echo ""
 echo "========================================================"
 echo "  Installation Complete!"
@@ -258,6 +277,12 @@ LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 if [ -n "$LOCAL_IP" ]; then
     echo "  Or from another machine:"
     echo "    http://${LOCAL_IP}:${PORT}"
+    echo ""
+fi
+if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
+    echo "  🔑 Login Credentials:"
+    echo "     Username: $ADMIN_USER"
+    echo "     Password: $ADMIN_PASS"
     echo ""
 fi
 echo "  Follow the web wizard to complete configuration."
