@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>HermesBuddy 初始配置</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+         color: #e2e8f0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px;
+          padding: 40px; width: 480px; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  .sub { color: #94a3b8; font-size: 13px; margin-bottom: 28px; }
+  label { display: block; font-size: 13px; color: #94a3b8; margin: 16px 0 6px; }
+  input { width: 100%; padding: 10px 12px; background: #0f172a; border: 1px solid #334155;
+          border-radius: 8px; color: #e2e8f0; font-size: 14px; }
+  input:focus { outline: none; border-color: #6366f1; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button { width: 100%; margin-top: 24px; padding: 12px; background: #6366f1; color: #fff;
+           border: none; border-radius: 8px; font-size: 15px; cursor: pointer; }
+  button:hover { background: #4f46e5; }
+  .hint { font-size: 12px; color: #64748b; margin-top: 4px; }
+  #err { color: #f87171; font-size: 13px; margin-top: 12px; min-height: 18px; }
+  #ok { color: #4ade80; font-size: 13px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🤖 HermesBuddy 桌面版</h1>
+  <div class="sub">连接你的 Hermes Agent 服务器（首次使用配置一次即可）</div>
+
+  <label>Hermes 服务器地址（IP 或域名）</label>
+  <div style="display:flex;gap:8px;">
+    <input id="host" placeholder="例如 192.168.0.246" style="flex:1;">
+    <button onclick="scanLAN()" style="width:auto;margin-top:0;padding:10px 16px;font-size:13px;white-space:nowrap;" id="scanBtn">🔍 扫描局域网</button>
+  </div>
+  <div class="hint">运行 hermes-gateway 的机器，或点击扫描自动发现</div>
+  <div id="scanResult" style="font-size:12px;color:#4ade80;margin-top:4px;min-height:16px;"></div>
+
+  <div class="row">
+    <div>
+      <label>Agent API 端口</label>
+      <input id="win_port" value="22124">
+      <div class="hint">win profile gateway</div>
+    </div>
+    <div>
+      <label>管理端口</label>
+      <input id="mgmt_port" value="8700">
+      <div class="hint">HermesBuddy server</div>
+    </div>
+  </div>
+
+  <label>API Key</label>
+  <input id="api_key" type="password" placeholder="API_SERVER_KEY">
+  <div class="hint">服务器 ~/.hermes/.env 中的 API_SERVER_KEY</div>
+
+  <button onclick="save()">保存并连接</button>
+  <div id="err"></div>
+  <div id="ok"></div>
+</div>
+<script>
+// LAN scan: try common ports on local subnet
+async function scanLAN() {
+  const btn = document.getElementById('scanBtn');
+  const result = document.getElementById('scanResult');
+  btn.disabled = true;
+  btn.textContent = '⏳ 扫描中...';
+  result.textContent = '';
+  
+  // Get local IP to determine subnet
+  let subnet = '192.168.0';
+  try {
+    // Try to get local IP via WebRTC (works in Electron)
+    const pc = new RTCPeerConnection({iceServers:[]});
+    pc.createDataChannel('');
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    pc.onicecandidate = (e) => {
+      if (e.candidate && e.candidate.candidate) {
+        const match = e.candidate.candidate.match(/(\d+\.\d+\.\d+)\.\d+/);
+        if (match) subnet = match[1];
+      }
+    };
+    await new Promise(r => setTimeout(r, 500));
+    pc.close();
+  } catch(e) {}
+  
+  // Scan common IPs on the subnet for Hermes setup wizard (port 9800)
+  const ports = [9800, 8700, 22122, 22124];
+  const ips = [];
+  for (let i = 1; i <= 254; i++) {
+    ips.push(`${subnet}.${i}`);
+  }
+  
+  let found = null;
+  const batchSize = 20;
+  
+  for (let b = 0; b < ips.length; b += batchSize) {
+    const batch = ips.slice(b, b + batchSize);
+    const promises = batch.map(ip => {
+      return Promise.race([
+        fetch(`http://${ip}:9800/api/status`, {method:'GET'}).then(r => {
+          if (r.ok) return r.json().then(d => ({ip, port: 9800, data: d}));
+          return null;
+        }),
+        new Promise(r => setTimeout(() => r(null), 800))
+      ]).catch(() => null);
+    });
+    
+    const results = await Promise.all(promises);
+    for (const r of results) {
+      if (r && r.data) {
+        found = r;
+        break;
+      }
+    }
+    if (found) break;
+    
+    result.textContent = `已扫描 ${Math.min(b + batchSize, 254)}/254 ...`;
+  }
+  
+  if (found) {
+    document.getElementById('host').value = found.ip;
+    result.textContent = `✅ 发现 Hermes 服务器: ${found.ip}:${found.port}`;
+    
+    // Try to fetch connection info
+    try {
+      const connResp = await fetch(`http://${found.ip}:${found.port}/api/connection-info`);
+      if (connResp.ok) {
+        const connInfo = await connResp.json();
+        if (connInfo.gateway_port) document.getElementById('win_port').value = connInfo.gateway_port;
+        if (connInfo.mgmt_port) document.getElementById('mgmt_port').value = connInfo.mgmt_port;
+        if (connInfo.api_key) document.getElementById('api_key').value = connInfo.api_key;
+        result.textContent = `✅ 已自动填充: ${found.ip} | 端口 ${connInfo.gateway_port}/${connInfo.mgmt_port} | API Key ✓`;
+      }
+    } catch(e) {}
+  } else {
+    result.textContent = '❌ 未发现 Hermes 服务器，请手动输入地址';
+    result.style.color = '#f87171';
+  }
+  
+  btn.disabled = false;
+  btn.textContent = '🔍 扫描局域网';
+}
+
+async function save() {
+  const err = document.getElementById('err');
+  const ok = document.getElementById('ok');
+  err.textContent = ''; ok.textContent = '';
+  const body = {
+    host: document.getElementById('host').value,
+    win_port: document.getElementById('win_port').value,
+    mgmt_port: document.getElementById('mgmt_port').value,
+    api_key: document.getElementById('api_key').value,
+  };
+  try {
+    const r = await fetch('/setup/save', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok || d.error) { err.textContent = d.error || '保存失败'; return; }
+    ok.textContent = '✓ 已保存，正在连接…';
+    setTimeout(() => location.href = '/', 600);
+  } catch (e) { err.textContent = String(e); }
+}
+fetch('/setup/status').then(r => r.json()).then(d => {
+  if (d.host) document.getElementById('host').value = d.host;
+}).catch(() => {});
+</script>
+</body>
+</html>

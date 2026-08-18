@@ -863,10 +863,49 @@ async function startInstall() {
       addLog('');
       addLog('Hermes Agent Suite is ready.');
       addLog('');
+      
+      // Fetch and display connection info
+      try {
+        const connResp = await fetch('/api/connection-info', {
+          headers: {'Authorization': 'Bearer ' + config.token}
+        });
+        const connInfo = await connResp.json();
+        
+        addLog('');
+        addLog('📡 Connection Info for HermesBuddy:');
+        addLog('  Host:       ' + connInfo.host);
+        addLog('  Gateway:    ' + connInfo.gateway_port);
+        addLog('  Management: ' + connInfo.mgmt_port);
+        addLog('  API Key:    ' + (connInfo.api_key ? connInfo.api_key.substring(0,8) + '...' : '(not set)'));
+        addLog('');
+        
+        // Show connection info card
+        const card = document.createElement('div');
+        card.style.cssText = 'background:#0f291e;border:1px solid #22c55e33;border-radius:12px;padding:20px;margin-top:16px;';
+        card.innerHTML = `
+          <h3 style="color:#22c55e;margin:0 0 12px;font-size:16px;">🔗 HermesBuddy 连接信息</h3>
+          <p style="color:#94a3b8;font-size:13px;margin-bottom:12px;">下载 HermesBuddy 客户端后，填入以下信息即可连接：</p>
+          <div style="display:grid;grid-template-columns:auto 1fr;gap:8px 16px;font-size:14px;">
+            <span style="color:#94a3b8;">服务器地址：</span>
+            <code style="color:#e2e8f0;background:#1e293b;padding:2px 8px;border-radius:4px;user-select:all;">${connInfo.host}</code>
+            <span style="color:#94a3b8;">Agent API 端口：</span>
+            <code style="color:#e2e8f0;background:#1e293b;padding:2px 8px;border-radius:4px;user-select:all;">${connInfo.gateway_port}</code>
+            <span style="color:#94a3b8;">管理端口：</span>
+            <code style="color:#e2e8f0;background:#1e293b;padding:2px 8px;border-radius:4px;user-select:all;">${connInfo.mgmt_port}</code>
+            <span style="color:#94a3b8;">API Key：</span>
+            <code style="color:#e2e8f0;background:#1e293b;padding:2px 8px;border-radius:4px;user-select:all;">${connInfo.api_key || '(请在 .env 中设置 API_SERVER_KEY)'}</code>
+          </div>
+          <p style="color:#64748b;font-size:12px;margin-top:12px;">💡 提示：HermesBuddy 支持局域网自动发现，也可点击"扫描局域网"按钮自动填充。</p>
+        `;
+        document.querySelector('.log-box').parentNode.appendChild(card);
+      } catch(e) {
+        addLog('(Could not fetch connection info: ' + e.message + ')');
+      }
+      
       addLog('Next steps:');
-      addLog('  1. Run: hermes start');
-      addLog('  2. Download HermesBuddy desktop client');
-      addLog('  3. Connect to this server');
+      addLog('  1. Download HermesBuddy desktop client');
+      addLog('  2. Enter the connection info above');
+      addLog('  3. Start chatting with your Agent!');
       addLog('');
 
       btn.textContent = 'Go to Dashboard';

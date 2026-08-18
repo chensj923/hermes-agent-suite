@@ -101,6 +101,50 @@ class SetupHandler(http.server.BaseHTTPRequestHandler):
             })
             return
         
+        # API: Connection info for HermesBuddy client
+        if path == '/api/connection-info':
+            import socket
+            # Detect local IP
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(('8.8.8.8', 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+            except:
+                local_ip = 'localhost'
+            
+            # Read API key from .env
+            api_key = ''
+            env_path = Path(INSTALL_DIR) / '.hermes' / '.env'
+            if not env_path.exists():
+                env_path = Path.home() / '.hermes' / '.env'
+            if env_path.exists():
+                for line in env_path.read_text().splitlines():
+                    if line.startswith('API_SERVER_KEY='):
+                        api_key = line.split('=', 1)[1].strip()
+                        break
+            
+            # Detect hermes-gateway port
+            gw_port = 22122  # default
+            try:
+                r = subprocess.run(['ss', '-tlnp'], capture_output=True, timeout=5)
+                output = r.stdout.decode()
+                for p in [22122, 22124, 8700]:
+                    if f':{p} ' in output:
+                        gw_port = p
+                        break
+            except: pass
+            
+            self._json_response({
+                'host': local_ip,
+                'gateway_port': gw_port,
+                'mgmt_port': 8700,
+                'api_key': api_key,
+                'setup_complete': SETUP_DONE.exists(),
+                'services': self._check_services(),
+            })
+            return
+        
         # API: Check environment
         if path == '/api/env-check':
             checks = {
