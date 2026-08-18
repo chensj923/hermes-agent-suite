@@ -34,7 +34,9 @@ sudo ./hermes-suite-linux-x86_64.sh
 git clone https://github.com/chensj923/hermes-agent-suite.git
 cd hermes-agent-suite
 chmod +x install.sh
-sudo ./install.sh
+./install.sh
+# Then run the generated installer:
+sudo ./hermes-suite-linux-x86_64.sh
 ```
 
 After installation, open http://localhost:9800 to follow the web wizard. / 安装完成后打开 http://localhost:9800 跟随向导完成配置。
@@ -153,7 +155,9 @@ sudo ./hermes-suite-linux-x86_64.sh
 git clone https://github.com/chensj923/hermes-agent-suite.git
 cd hermes-agent-suite
 chmod +x install.sh
-sudo ./install.sh
+./install.sh
+# 然后运行生成的安装包：
+sudo ./hermes-suite-linux-x86_64.sh
 ```
 
 安装完成后打开 http://localhost:9800 跟随向导完成配置。
