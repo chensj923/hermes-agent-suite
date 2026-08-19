@@ -1003,6 +1003,139 @@ WantedBy=multi-user.target
             except Exception as e:
                 results.append(['iot', f'install error: {e}'])
         
+        # Create crystallization & knowledge base cronjobs
+        hermes_bin = shutil.which('hermes') or '/usr/local/bin/hermes'
+        if os.path.exists(hermes_bin):
+            try:
+                # Daily reflection (crystallization evolution)
+                cr_script = INSTALL_DIR / 'crystallization' / 'daily_reflection.py'
+                if cr_script.exists():
+                    subprocess.run([hermes_bin, 'cron', 'create',
+                        '--name', '每日反思（结晶进化）',
+                        '--schedule', '30 2 * * *',
+                        '--script', str(cr_script),
+                        '--no-agent',
+                        '--deliver', 'local'],
+                        capture_output=True, timeout=15)
+                    results.append(['cronjob', '✅ 每日反思（结晶进化）— 每天 02:30'])
+                
+                # Knowledge base incremental indexing
+                kb_index_script = INSTALL_DIR / 'knowledge-base' / 'kb_index_cron.sh'
+                if kb_index_script.exists():
+                    subprocess.run([hermes_bin, 'cron', 'create',
+                        '--name', '知识库增量索引',
+                        '--schedule', 'every 360m',
+                        '--script', str(kb_index_script),
+                        '--no-agent',
+                        '--deliver', 'local'],
+                        capture_output=True, timeout=15)
+                    results.append(['cronjob', '✅ 知识库增量索引 — 每 6 小时'])
+                
+                # Weekly session screener
+                screen_script = INSTALL_DIR / 'knowledge-base' / 'screen_sessions.py'
+                if screen_script.exists():
+                    subprocess.run([hermes_bin, 'cron', 'create',
+                        '--name', 'Weekly Session Screener',
+                        '--schedule', '0 3 * * 0',
+                        '--prompt', f'Run the session screener: python3 {screen_script}',
+                        '--deliver', 'local'],
+                        capture_output=True, timeout=15)
+                    results.append(['cronjob', '✅ 每周会话筛选 — 每周日 03:00'])
+                
+                # Memory maintenance
+                subprocess.run([hermes_bin, 'cron', 'create',
+                    '--name', 'Daily Memory Maintenance',
+                    '--schedule', '0 3 * * *',
+                    '--skill', 'memory-tiering',
+                    '--prompt', '执行记忆整理：读取三层记忆文件，归档过时条目，合并重复项。',
+                    '--deliver', 'local',
+                    '--toolsets', 'file,skills'],
+                    capture_output=True, timeout=15)
+                results.append(['cronjob', '✅ 每日记忆维护 — 每天 03:00'])
+                
+            except Exception as e:
+                results.append(['cronjob', f'⚠️ cronjob creation error: {e}'])
+        else:
+            results.append(['cronjob', '⚠️ hermes CLI not found, skip cronjob creation'])
+        
+        # Deploy system architecture knowledge docs
+        kb_data_dir = Path.home() / '.hermes' / 'knowledge-base' / 'kb_data'
+        kb_data_dir.mkdir(parents=True, exist_ok=True)
+        
+        arch_docs = {
+            'system-architecture.md': """# Hermes Agent Suite 系统架构
+
+## 整体架构
+Hermes Agent Suite 是一个自组织认知智能体平台，核心组件：
+
+### 1. Gateway API Server (端口 22122)
+- OpenAI 兼容 API，供客户端（HermesBuddy）调用
+- 模型路由、会话管理、工具调度
+
+### 2. 结晶体系 (Crystal Reflex)
+- **形成期**: 从交互中提取行为模式，计算 importance = confidence × severity
+- **使用期**: playbook 规则匹配 + facet 分拆，实时注入上下文
+- **回顾期**: 追踪复发率，准确率 <0.4 降权 / <0.2 退役 / ≥0.6 恢复
+- 服务端口: 9124，模型: Qwen3-0.6B 本地推理
+
+### 3. 三层知识库
+- **L1 Memory**: ~/.hermes/memory/ — 热记忆，直接注入 prompt
+- **L2 FAISS**: ~/.hermes/knowledge-base/ — 向量检索，语义搜索
+- **L2.5 AnythingLLM**: 共享知识中枢，MCP 接入，REST API 采集
+
+### 4. WorkBuddy API (端口 8700)
+- 文件读写、Office 文档解析、工作空间管理
+
+### 5. 视觉服务 (端口 9121)
+- OCR + AI 图像理解，moondream 模型
+
+## Cronjob 自动化
+- 每日反思: 分析交互，提取/更新结晶模式
+- 知识库索引: 增量向量化新文档
+- 记忆维护: 三层记忆归档与清理
+- 会话筛选: 高价值对话归档到知识库
+""",
+            'crystallization-guide.md': """# 结晶体系运行原理
+
+## 什么是结晶？
+结晶是从日常交互中自动提取的行为模式和解决方案，让智能体"越用越聪明"。
+
+## 三阶段生命周期
+
+### 形成期 (Stage 1 → 2)
+- 从交互日志中识别重复模式
+- 计算重要性: importance = confidence × severity
+- 达到阈值后升级为活跃结晶
+
+### 使用期 (Stage 2)
+- 18 条 playbook 规则 regex 匹配
+- facet 分拆: 将复杂模式拆解为可组合的子模式
+- 实时注入到 agent 上下文中
+
+### 回顾期 (Stage 3)
+- crystal_injections 表追踪每次注入的效果
+- 同 session 再命中 = fail（说明没解决问题）
+- 准确率 <0.4 → 降权, <0.2 → 退役, ≥0.6 → 恢复
+
+## KV Cache 优化
+固定前缀预计算 KV Cache，后续请求复用，实测 2x 加速。
+
+## 相关文件
+- crystal_reflex.py: 核心推理引擎
+- daily_reflection.py: 每日反思脚本
+- playbook.json: 匹配规则库
+- crystallization.db: SQLite 存储
+"""
+        }
+        
+        for fname, content in arch_docs.items():
+            fpath = kb_data_dir / fname
+            if not fpath.exists():
+                fd = os.open(str(fpath), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                os.write(fd, content.encode())
+                os.close(fd)
+        results.append(['knowledge', '✅ 系统架构文档已部署到知识库'])
+        
         # Mark complete
         SETUP_DONE.write_text(json.dumps({
             'completed_at': __import__('datetime').datetime.now().isoformat(),
