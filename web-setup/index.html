@@ -955,7 +955,7 @@ function renderSummary() {
   s.innerHTML = `
     <strong>安装摘要：</strong><br>
     模型：${config.provider || '未配置'} / ${config.model || '-'}<br>
-    设备：${config.devices.length} 个已选择<br>
+    设备：${Object.values(config.devices).filter(v=>v).length} 个已选择<br>
     模块：${config.modules.join(', ')}
   `;
 }
