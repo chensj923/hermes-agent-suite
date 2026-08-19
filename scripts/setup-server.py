@@ -742,6 +742,7 @@ Type=simple
 User=root
 ExecStart={python3_path} -m hermes_cli.main gateway run
 WorkingDirectory={INSTALL_DIR}
+EnvironmentFile={DATA_DIR}/.env
 Environment=HOME={Path.home()}
 Environment=HERMES_HOME={hermes_home}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
