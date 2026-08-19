@@ -117,7 +117,13 @@ fi
 if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
     warn "Port $PORT is already in use!"
     ss -tlnp 2>/dev/null | grep ":${PORT} "
-    read -p "Kill existing process and continue? [y/N] " yn
+    # Auto-kill in non-interactive mode (SSH/piped), otherwise ask
+    if [ -t 0 ]; then
+        read -p "Kill existing process and continue? [y/N] " yn
+    else
+        yn="y"
+        info "Non-interactive mode: auto-killing existing process"
+    fi
     if [ "$yn" = "y" ] || [ "$yn" = "Y" ]; then
         # Stop systemd service first to prevent auto-restart (fast timeout)
         if [ "$HAS_SYSTEMD" = true ]; then
@@ -177,7 +183,12 @@ if [ -d "$INSTALL_DIR" ]; then
     echo "  1) Clean install (remove everything, reinstall)"
     echo "  2) Upgrade (keep data/credentials, replace code)"
     echo "  3) Cancel"
-    read -p "Choose [1/2/3]: " choice
+    if [ -t 0 ]; then
+        read -p "Choose [1/2/3]: " choice
+    else
+        choice="1"
+        info "Non-interactive mode: clean install"
+    fi
 
     case "$choice" in
         1)
