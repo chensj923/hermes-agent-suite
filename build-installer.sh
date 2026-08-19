@@ -255,34 +255,71 @@ EOF
     systemctl enable "$SERVICE_NAME" 2>/dev/null
     systemctl start "$SERVICE_NAME"
 
-    sleep 1
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
+    # Poll until service is active or timeout
+    SVC_OK=false
+    for i in $(seq 1 15); do
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            SVC_OK=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$SVC_OK" = true ]; then
         info "Setup service started"
     else
         warn "Service failed to start, trying nohup..."
         nohup python3 "$INSTALL_DIR/scripts/setup-server.py" > "$DATA_DIR/setup.log" 2>&1 &
-        info "Setup service started (nohup)"
+        # Poll nohup process
+        for i in $(seq 1 10); do
+            if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+                SVC_OK=true
+                break
+            fi
+            sleep 1
+        done
+        if [ "$SVC_OK" = true ]; then
+            info "Setup service started (nohup)"
+        else
+            fail "Service failed to start. Check logs: journalctl -u $SERVICE_NAME or $DATA_DIR/setup.log"
+        fi
     fi
 else
     nohup python3 "$INSTALL_DIR/scripts/setup-server.py" > "$DATA_DIR/setup.log" 2>&1 &
-    info "Setup service started (nohup, no systemd)"
+    # Poll nohup process
+    SVC_OK=false
+    for i in $(seq 1 10); do
+        if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+            SVC_OK=true
+            break
+        fi
+        sleep 1
+    done
+    if [ "$SVC_OK" = true ]; then
+        info "Setup service started (no systemd)"
+    else
+        fail "Service failed to start. Check log: $DATA_DIR/setup.log"
+    fi
 fi
 
 # ============================================================
 # 6. Done — show credentials
 # ============================================================
-# Wait for service to generate credentials
-sleep 2
-
-# Read credentials from file or log
+# Poll until credentials file appears or port is listening
 CRED_FILE="$DATA_DIR/.setup_credentials"
 ADMIN_USER=""
 ADMIN_PASS=""
 
-if [ -f "$CRED_FILE" ]; then
-    ADMIN_USER=$(python3 -c "import json; c=json.load(open('$CRED_FILE')); print(c.get('username',''))" 2>/dev/null)
-    ADMIN_PASS=$(python3 -c "import json; c=json.load(open('$CRED_FILE')); print(c.get('password',''))" 2>/dev/null)
-fi
+for i in $(seq 1 15); do
+    if [ -f "$CRED_FILE" ]; then
+        ADMIN_USER=$(python3 -c "import json; c=json.load(open('$CRED_FILE')); print(c.get('username',''))" 2>/dev/null)
+        ADMIN_PASS=$(python3 -c "import json; c=json.load(open('$CRED_FILE')); print(c.get('password',''))" 2>/dev/null)
+        if [ -n "$ADMIN_PASS" ]; then
+            break
+        fi
+    fi
+    sleep 1
+done
 
 # Fallback: parse from service log
 if [ -z "$ADMIN_PASS" ] && [ -f "$DATA_DIR/setup.log" ]; then
