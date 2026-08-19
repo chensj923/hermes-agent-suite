@@ -222,8 +222,13 @@ input::placeholder { color:#475569; }
         <strong>安装说明：</strong><br>
         <b>Windows:</b> 下载 .exe 安装包，双击运行，按提示完成安装。<br>
         <b>Linux:</b> <code style="background:#334155;padding:2px 6px;border-radius:4px;">chmod +x HermesBuddy.AppImage && ./HermesBuddy.AppImage</code><br>
-        <b>macOS:</b> 打开 .dmg，拖入 Applications 文件夹。首次运行需在「系统设置 → 隐私与安全」中允许。<br><br>
-        <span style="color:#64748b;">安装后打开 HermesBuddy，输入服务器地址 <code style="background:#334155;padding:2px 6px;border-radius:4px;" id="serverAddr"></code> 即可连接。</span>
+        <b>macOS:</b> 打开 .dmg，拖入 Applications 文件夹。首次运行需在「系统设置 → 隐私与安全」中允许。
+      </div>
+      
+      <!-- Connection Info Card -->
+      <div id="buddyConnInfo" style="background:linear-gradient(135deg,#1e3a5f,#1e293b);border:1px solid #3b82f6;border-radius:10px;padding:18px;margin-top:12px;">
+        <div style="font-weight:700;color:#60a5fa;margin-bottom:12px;font-size:14px;">🔗 HermesBuddy 连接信息</div>
+        <div id="connInfoContent" style="font-size:13px;color:#94a3b8;">加载中...</div>
       </div>
       
       <div class="btn-row">
@@ -397,10 +402,55 @@ async function saveCrystalConfig() {
 }
 
 // Init server address for Buddy page
-function initBuddyPage() {
-  const addr = location.hostname + ':' + location.port;
-  const el = document.getElementById('serverAddr');
-  if (el) el.textContent = addr;
+async function initBuddyPage() {
+  const el = document.getElementById('connInfoContent');
+  if (!el) return;
+  
+  try {
+    const resp = await fetch('/api/connection-info', {headers:{'Authorization':'Bearer '+config.token}});
+    if (!resp.ok) { el.textContent = '无法获取连接信息'; return; }
+    const info = await resp.json();
+    
+    let html = '<table style="width:100%;border-collapse:collapse;">';
+    
+    // Server address
+    html += `<tr><td style="padding:6px 8px;color:#94a3b8;width:120px;">服务器地址</td>
+      <td style="padding:6px 8px;"><code style="background:#334155;padding:3px 8px;border-radius:4px;color:#e2e8f0;user-select:all;">${info.host || location.hostname}</code></td></tr>`;
+    
+    // Gateway port
+    const gwPort = info.gateway_port || '未检测到';
+    const gwColor = info.gateway_port ? '#4ade80' : '#fbbf24';
+    html += `<tr><td style="padding:6px 8px;color:#94a3b8;">Gateway 端口</td>
+      <td style="padding:6px 8px;"><code style="background:#334155;padding:3px 8px;border-radius:4px;color:${gwColor};user-select:all;">${gwPort}</code></td></tr>`;
+    
+    // Management port
+    const mgmtPort = info.mgmt_port || '未检测到';
+    const mgmtColor = info.mgmt_port ? '#4ade80' : '#fbbf24';
+    html += `<tr><td style="padding:6px 8px;color:#94a3b8;">管理端口</td>
+      <td style="padding:6px 8px;"><code style="background:#334155;padding:3px 8px;border-radius:4px;color:${mgmtColor};user-select:all;">${mgmtPort}</code></td></tr>`;
+    
+    // API Key
+    const apiKey = info.api_key || '未配置';
+    const keyColor = info.api_key ? '#4ade80' : '#f87171';
+    const maskedKey = info.api_key ? info.api_key.substring(0,8) + '...' : apiKey;
+    html += `<tr><td style="padding:6px 8px;color:#94a3b8;">API Key</td>
+      <td style="padding:6px 8px;"><code style="background:#334155;padding:3px 8px;border-radius:4px;color:${keyColor};user-select:all;" title="${info.api_key || ''}">${maskedKey}</code></td></tr>`;
+    
+    html += '</table>';
+    
+    // Hints
+    if (info.hints && info.hints.length > 0) {
+      html += '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #334155;">';
+      info.hints.forEach(h => {
+        html += `<div style="margin:3px 0;font-size:12px;">${h}</div>`;
+      });
+      html += '</div>';
+    }
+    
+    el.innerHTML = html;
+  } catch(e) {
+    el.textContent = '获取连接信息失败: ' + e.message;
+  }
 }
 
 async function startAllServices() {
