@@ -524,6 +524,9 @@ WantedBy=multi-user.target
         }
         if provider in env_map:
             key_name, key_val = env_map[provider]
+            # Local providers (custom/lmstudio) may not need a real key
+            if not key_val and provider in ('custom', 'lmstudio'):
+                key_val = 'sk-local'
             env_lines.append(f'{key_name}={key_val}\n')
         if base_url:
             env_lines.append(f'CUSTOM_BASE_URL={base_url}\n')
