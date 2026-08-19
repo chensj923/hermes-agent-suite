@@ -130,23 +130,43 @@ class SetupHandler(http.server.BaseHTTPRequestHandler):
             try:
                 r = subprocess.run(['ss', '-tlnp'], capture_output=True, timeout=5)
                 output = r.stdout.decode()
-                # Check common gateway ports
                 for p in [22122, 22124]:
                     if f':{p} ' in output:
                         gw_port = p
                         break
-                # Check management port
                 if ':8700 ' in output:
                     mgmt_port = 8700
             except: pass
+            
+            # Build status messages
+            setup_done = SETUP_DONE.exists()
+            services = self._check_services()
+            
+            hints = []
+            if not setup_done:
+                hints.append('⚠️ 安装向导尚未完成，请先在浏览器中完成配置')
+            if not gw_port:
+                hints.append('⚠️ 未检测到 hermes-gateway，请确认已安装并启动 Hermes Agent')
+            else:
+                hints.append(f'✅ Gateway 端口: {gw_port}')
+            if not mgmt_port:
+                hints.append('ℹ️ 未检测到管理端口 (8700)，HermesBuddy 部分功能可能不可用')
+            else:
+                hints.append(f'✅ 管理端口: {mgmt_port}')
+            if not api_key:
+                hints.append('⚠️ 未找到 API Key，请在服务器 ~/.hermes/.env 中配置 API_SERVER_KEY')
+            else:
+                hints.append('✅ API Key 已配置')
             
             self._json_response({
                 'host': local_ip,
                 'gateway_port': gw_port,
                 'mgmt_port': mgmt_port,
                 'api_key': api_key,
-                'setup_complete': SETUP_DONE.exists(),
-                'services': self._check_services(),
+                'setup_complete': setup_done,
+                'services': services,
+                'hints': hints,
+                'server_address': f'{local_ip}:9800',
             })
             return
         
