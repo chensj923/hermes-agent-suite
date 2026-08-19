@@ -113,16 +113,21 @@ class SetupHandler(http.server.BaseHTTPRequestHandler):
             except:
                 local_ip = 'localhost'
             
-            # Read API key from .env
+            # Read API key from .env (check multiple locations)
             api_key = ''
-            env_path = Path(INSTALL_DIR) / '.hermes' / '.env'
-            if not env_path.exists():
-                env_path = Path.home() / '.hermes' / '.env'
-            if env_path.exists():
-                for line in env_path.read_text().splitlines():
-                    if line.startswith('API_SERVER_KEY='):
-                        api_key = line.split('=', 1)[1].strip()
-                        break
+            env_paths = [
+                Path(INSTALL_DIR) / 'data' / '.env',
+                Path(INSTALL_DIR) / '.hermes' / '.env',
+                Path.home() / '.hermes' / '.env',
+            ]
+            for env_path in env_paths:
+                if env_path.exists():
+                    for line in env_path.read_text().splitlines():
+                        if line.startswith('API_SERVER_KEY='):
+                            api_key = line.split('=', 1)[1].strip()
+                            break
+                if api_key:
+                    break
             
             # Detect hermes-gateway port by scanning actual listening ports
             gw_port = None
@@ -524,6 +529,11 @@ WantedBy=multi-user.target
             env_lines.append(f'CUSTOM_BASE_URL={base_url}\n')
         env_lines.append(f'DEFAULT_MODEL={model}\n')
         env_lines.append(f'MODEL_PROVIDER={provider}\n')
+        
+        # Generate API_SERVER_KEY for HermesBuddy connections
+        import secrets
+        api_server_key = secrets.token_urlsafe(24)
+        env_lines.append(f'API_SERVER_KEY={api_server_key}\n')
         
         env_file = DATA_DIR / '.env'
         env_file.write_text(''.join(env_lines))
