@@ -119,9 +119,23 @@ if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
     ss -tlnp 2>/dev/null | grep ":${PORT} "
     read -p "Kill existing process and continue? [y/N] " yn
     if [ "$yn" = "y" ] || [ "$yn" = "Y" ]; then
+        # Stop systemd service first to prevent auto-restart
+        if [ "$HAS_SYSTEMD" = true ]; then
+            systemctl stop ${SERVICE_NAME} 2>/dev/null
+            systemctl disable ${SERVICE_NAME} 2>/dev/null
+        fi
         PIDS=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | grep -oP 'pid=\K\d+')
-        for pid in $PIDS; do kill $pid 2>/dev/null; done
-        sleep 1
+        for pid in $PIDS; do kill -9 $pid 2>/dev/null; done
+        # Wait for port to actually be released
+        for i in $(seq 1 10); do
+            if ! ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+                break
+            fi
+            sleep 1
+        done
+        if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+            fail "Port $PORT still in use after cleanup. Please check manually."
+        fi
         info "Port $PORT freed"
     else
         echo "Cancelled."
