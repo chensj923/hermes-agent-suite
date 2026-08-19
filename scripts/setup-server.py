@@ -534,38 +534,14 @@ WantedBy=multi-user.target
         import secrets
         api_server_key = secrets.token_urlsafe(24)
         env_lines.append(f'API_SERVER_KEY={api_server_key}\n')
+        env_lines.append('API_SERVER_ENABLED=true\n')
+        env_lines.append('API_SERVER_HOST=0.0.0.0\n')
+        env_lines.append('API_SERVER_PORT=22122\n')
         
         env_file = DATA_DIR / '.env'
         env_file.write_text(''.join(env_lines))
         os.chmod(str(env_file), 0o600)
         results.append(['config', 'env file created'])
-        
-        # Generate minimal config.yaml for gateway API server
-        hermes_home = Path.home() / '.hermes'
-        hermes_home.mkdir(parents=True, exist_ok=True)
-        config_yaml = hermes_home / 'config.yaml'
-        if not config_yaml.exists():
-            import yaml
-            gw_config = {
-                'api_server': {
-                    'enabled': True,
-                    'host': '0.0.0.0',
-                    'port': 22122,
-                    'api_key_env': 'API_SERVER_KEY',
-                },
-                'model': {
-                    'provider': provider,
-                    'default_model': model,
-                },
-            }
-            if base_url:
-                gw_config['model']['base_url'] = base_url
-            try:
-                with open(config_yaml, 'w') as f:
-                    yaml.dump(gw_config, f, default_flow_style=False, allow_unicode=True)
-                results.append(['config', 'config.yaml generated (api_server on port 22122)'])
-            except Exception as e:
-                results.append(['config', f'config.yaml failed: {e}'])
         
         # 1.5 Configure China mirrors (pip/apt/npm)
         mirror_results = self._configure_china_mirrors()
