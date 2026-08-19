@@ -98,18 +98,6 @@ After installation, open http://localhost:9800 to follow the web wizard. / 安�
 
 > **Note:** The installer auto-detects hardware and adjusts module availability. Systems without GPU will use CPU-only vision (slower but functional). China mainland users: the installer configures pip/npm/apt mirrors automatically.
 
-### Building from Source
-
-```bash
-# Clone
-git clone https://github.com/chensj923/hermes-agent-suite.git
-cd hermes-suite
-
-# Build installer
-./build-installer.sh
-
-# Output: dist/hermes-suite-v{VERSION}-linux-x86_64.sh
-```
 
 ### Requirements
 
@@ -219,18 +207,6 @@ sudo ./hermes-suite-linux-x86_64.sh
 
 > **提示：** 安装程序自动检测硬件并调整可用模块。无 GPU 时使用 CPU 视觉（较慢但可用）。中国大陆用户：安装程序自动配置 pip/npm/apt 国内镜像源。
 
-### 从源码构建
-
-```bash
-# 克隆
-git clone https://github.com/chensj923/hermes-agent-suite.git
-cd hermes-suite
-
-# 构建安装包
-./build-installer.sh
-
-# 产物: dist/hermes-suite-v{VERSION}-linux-x86_64.sh
-```
 
 ### 系统要求
 
