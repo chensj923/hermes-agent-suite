@@ -548,12 +548,13 @@ WantedBy=multi-user.target
         for mr in mirror_results:
             results.append(['mirrors', mr])
         
-        # 2. Sync .env to ~/.hermes/ if it exists
+        # 2. Sync .env to ~/.hermes/ (create dir if needed)
         hermes_dir = Path.home() / '.hermes'
-        if hermes_dir.exists():
-            import shutil
-            shutil.copy2(str(env_file), str(hermes_dir / '.env'))
-            results.append(['config', '~/.hermes/.env synced'])
+        hermes_dir.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copy2(str(env_file), str(hermes_dir / '.env'))
+        os.chmod(str(hermes_dir / '.env'), 0o600)
+        results.append(['config', '~/.hermes/.env synced'])
         
         # 3. Install Node.js if missing (needed for workbuddy)
         node_path = self._which('node')
