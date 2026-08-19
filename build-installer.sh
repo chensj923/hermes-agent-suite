@@ -217,33 +217,6 @@ pip3 install -q flask pyyaml requests 2>/dev/null || \
 warn "Some pip packages may need manual install"
 
 # ============================================================
-# 4.5 Download HermesBuddy clients
-# ============================================================
-BUDDY_DIR="$INSTALL_DIR/buddy-dist"
-mkdir -p "$BUDDY_DIR"
-BUDDY_VERSION="1.4.2"
-BUDDY_BASE_URL="https://github.com/chensj923/hermes-agent-suite/releases/download/v0.3.0"
-
-if [ ! -f "$BUDDY_DIR/HermesBuddy-Setup-${BUDDY_VERSION}.exe" ]; then
-    info "Downloading HermesBuddy Windows EXE (~96MB)..."
-    curl -sL --max-time 300 -o "$BUDDY_DIR/HermesBuddy-Setup-${BUDDY_VERSION}.exe" \
-        "${BUDDY_BASE_URL}/HermesBuddy-Setup-${BUDDY_VERSION}.exe" && \
-    info "Windows EXE downloaded" || warn "Failed to download Windows EXE (skip)"
-else
-    info "Windows EXE already present"
-fi
-
-if [ ! -f "$BUDDY_DIR/HermesBuddy-${BUDDY_VERSION}.AppImage" ]; then
-    info "Downloading HermesBuddy Linux AppImage (~122MB)..."
-    curl -sL --max-time 300 -o "$BUDDY_DIR/HermesBuddy-${BUDDY_VERSION}.AppImage" \
-        "${BUDDY_BASE_URL}/HermesBuddy-${BUDDY_VERSION}.AppImage" && \
-    chmod +x "$BUDDY_DIR/HermesBuddy-${BUDDY_VERSION}.AppImage" && \
-    info "Linux AppImage downloaded" || warn "Failed to download Linux AppImage (skip)"
-else
-    info "Linux AppImage already present"
-fi
-
-# ============================================================
 # 5. Register and start setup service
 # ============================================================
 if [ "$HAS_SYSTEMD" = true ]; then

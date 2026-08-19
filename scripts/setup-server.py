@@ -218,37 +218,22 @@ class SetupHandler(http.server.BaseHTTPRequestHandler):
                 self._json_response({})
             return
         
-        # API: Download HermesBuddy
+        # API: Download HermesBuddy — redirect to GitHub Release
         if path.startswith('/api/download/buddy/'):
             platform = path.split('/')[-1]
-            filenames = {
-                'win': 'HermesBuddy-Setup-1.4.2.exe',
-                'linux': 'HermesBuddy-1.4.2.AppImage',
-                'mac': 'HermesBuddy-1.4.2.dmg',
+            release_base = 'https://github.com/chensj923/hermes-agent-suite/releases/download/v0.3.0'
+            download_urls = {
+                'win': f'{release_base}/HermesBuddy-Setup-1.4.2.exe',
+                'linux': f'{release_base}/HermesBuddy-1.4.2.AppImage',
             }
-            fname = filenames.get(platform)
-            if not fname:
-                self._json_response({'error': 'Unknown platform'}, 400)
+            url = download_urls.get(platform)
+            if not url:
+                self._json_response({'error': 'Unknown platform', 'available': list(download_urls.keys())}, 400)
                 return
-            fpath = INSTALL_DIR / 'buddy-dist' / fname
-            if fpath.exists():
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/octet-stream')
-                self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
-                self.send_header('Content-Length', str(fpath.stat().st_size))
-                self.end_headers()
-                with open(fpath, 'rb') as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk: break
-                        self.wfile.write(chunk)
-            else:
-                # Return placeholder info if file not bundled
-                self._json_response({
-                    'error': 'File not bundled in installer',
-                    'hint': f'Download from GitHub releases or build locally',
-                    'expected_path': str(fpath),
-                }, 404)
+            # 302 redirect to GitHub
+            self.send_response(302)
+            self.send_header('Location', url)
+            self.end_headers()
             return
         
         # API: Status
