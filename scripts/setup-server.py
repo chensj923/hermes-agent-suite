@@ -124,21 +124,26 @@ class SetupHandler(http.server.BaseHTTPRequestHandler):
                         api_key = line.split('=', 1)[1].strip()
                         break
             
-            # Detect hermes-gateway port
-            gw_port = 22122  # default
+            # Detect hermes-gateway port by scanning actual listening ports
+            gw_port = None
+            mgmt_port = None
             try:
                 r = subprocess.run(['ss', '-tlnp'], capture_output=True, timeout=5)
                 output = r.stdout.decode()
-                for p in [22122, 22124, 8700]:
+                # Check common gateway ports
+                for p in [22122, 22124]:
                     if f':{p} ' in output:
                         gw_port = p
                         break
+                # Check management port
+                if ':8700 ' in output:
+                    mgmt_port = 8700
             except: pass
             
             self._json_response({
                 'host': local_ip,
                 'gateway_port': gw_port,
-                'mgmt_port': 8700,
+                'mgmt_port': mgmt_port,
                 'api_key': api_key,
                 'setup_complete': SETUP_DONE.exists(),
                 'services': self._check_services(),
