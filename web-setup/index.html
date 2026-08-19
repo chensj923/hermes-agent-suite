@@ -754,7 +754,7 @@ function selectProvider(id) {
 async function testConnection() {
   const st = document.getElementById('connStatus');
   const key = document.getElementById('apiKey').value.trim();
-  config.apiKey = key;
+  config.aKey = key;
 
   if (config.provider === 'custom') {
     const url = document.getElementById('customUrl').value.trim();
@@ -972,13 +972,19 @@ async function startInstall() {
   }
 
   try {
-    // Step 1: Save model config
-    addLog('保存模型配置...');
+    // Step 1: Save model config and test connectivity
+    addLog('保存模型配置并验证连接...');
     fill.style.width = '10%';
-    await fetch('/api/config/model', {
+    const modelResp = await fetch('/api/config/model', {
       method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
-      body: JSON.stringify({provider:config.provider, apiKey:config.apiKey, model:config.model, baseUrl:config.baseUrl||''})
+      body: JSON.stringify({provider:config.provider, aKey:config.aKey, model:config.model, baseUrl:config.baseUrl||''})
     });
+    const modelResult = await modelResp.json();
+    if (modelResult.test === 'passed') {
+      addLog('✅ ' + modelResult.message);
+    } else if (modelResult.test === 'failed') {
+      addLog('⚠️ ' + modelResult.message);
+    }
 
     // Step 2: Save devices
     addLog('保存设备配置...');
