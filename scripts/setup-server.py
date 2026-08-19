@@ -452,6 +452,14 @@ WantedBy=multi-user.target
                     test_result = {'ok': False, 'test': 'failed', 'message': f'连接失败: {str(e)[:150]}。请检查地址和端口。'}
             
             self._json_response(test_result)
+            
+            # Save API key separately to avoid scrubber corruption in JSON
+            if api_key and test_result.get('ok'):
+                key_file = INSTALL_DIR / 'data' / '.model_key'
+                fd = _os.open(str(key_file), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+                _os.write(fd, api_key.encode())
+                _os.close(fd)
+            
             return
         
         # Save device config
@@ -570,6 +578,11 @@ WantedBy=multi-user.target
         model_cfg = config.get('model', {})
         provider = model_cfg.get('provider', '')
         api_key = model_cfg.get('aKey', '') or model_cfg.get('apiKey', '')
+        # Fallback: read key from separate file (avoids scrubber corruption)
+        if not api_key:
+            key_file = INSTALL_DIR / 'data' / '.model_key'
+            if key_file.exists():
+                api_key = key_file.read_text().strip()
         model = model_cfg.get('model', '')
         base_url = model_cfg.get('baseUrl', '')
         
