@@ -168,6 +168,25 @@ input::placeholder { color:#475569; }
     </div>
   </div>
 
+  <!-- Step 4.5: Skills & Experts Selection -->
+  <div class="page" id="page-skills">
+    <div class="card">
+      <h2><span class="icon">🧠</span> 技能与专家配置</h2>
+      <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">选择预置技能和专家角色，安装后自动加载到 Hermes。</p>
+      
+      <h3 style="color:#60a5fa;font-size:14px;margin:12px 0 8px;">📚 推荐技能</h3>
+      <div class="module-grid" id="skillGrid"></div>
+      
+      <h3 style="color:#60a5fa;font-size:14px;margin:16px 0 8px;">👤 专家角色</h3>
+      <div class="module-grid" id="expertGrid"></div>
+      
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="prevPage()">← 上一步</button>
+        <button class="btn btn-primary" onclick="nextPage()">下一步 →</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Step 5: Crystal System Config -->
   <div class="page" id="page-4">
     <div class="card">
@@ -248,9 +267,27 @@ input::placeholder { color:#475569; }
 </div>
 
 <script>
-const PAGES = 7;
+const PAGES = 8;
 let currentPage = 0;
-const config = { provider:'', apiKey:'', model:'', baseUrl:'', devices:[], modules:[] };
+const config = { provider:'', aKey:'', model:'', baseUrl:'', devices:{}, modules:[], skills:[], experts:[] };
+
+// Preset skills and experts
+const PRESET_SKILLS = [
+  {id:'web-search', name:'网页搜索', desc:'搜索引擎查询与信息提取', icon:'🔍'},
+  {id:'code-assist', name:'代码助手', desc:'代码生成、审查与调试', icon:'💻'},
+  {id:'doc-writer', name:'文档写作', desc:'技术文档、报告自动生成', icon:'📝'},
+  {id:'data-analysis', name:'数据分析', desc:'CSV/Excel 数据处理与可视化', icon:'📊'},
+  {id:'git-ops', name:'Git 运维', desc:'仓库管理、PR 审查、CI/CD', icon:'🔧'},
+  {id:'smart-home', name:'智能家居', desc:'IoT 设备控制与场景联动', icon:'🏠'},
+];
+const PRESET_EXPERTS = [
+  {id:'devops', name:'运维专家', desc:'服务器管理、部署、监控', icon:'🖥️'},
+  {id:'backend', name:'后端开发', desc:'API 设计、数据库、微服务', icon:'⚙️'},
+  {id:'frontend', name:'前端开发', desc:'UI/UX、React/Vue、响应式', icon:'🎨'},
+  {id:'ai-engineer', name:'AI 工程师', desc:'模型训练、推理优化、RAG', icon:'🤖'},
+  {id:'pm', name:'产品经理', desc:'需求分析、项目管理、用户研究', icon:'📋'},
+  {id:'security', name:'安全专家', desc:'渗透测试、漏洞修复、合规', icon:'🔒'},
+];
 
 // Login
 async function doLogin() {
@@ -700,16 +737,50 @@ function showPage(n) {
   document.querySelectorAll('.page').forEach((p,i) => p.classList.toggle('active', i===n));
   currentPage = n;
   renderStepDots();
-  if (n === 4) initCrystalProviders();
-  if (n === 5) initBuddyPage();
-  if (n === 6) renderSummary();
+  if (n === 4) initSkillsPage();
+  if (n === 5) initCrystalProviders();
+  if (n === 6) initBuddyPage();
+  if (n === 7) renderSummary();
 }
 function nextPage() {
-  // Save crystal config when leaving page 4
-  if (currentPage === 4) saveCrystalConfig();
+  // Save configs when leaving pages
+  if (currentPage === 4) saveSkillsConfig();
+  if (currentPage === 5) saveCrystalConfig();
   if (currentPage < PAGES-1) showPage(currentPage+1);
 }
 function prevPage() { if (currentPage > 0) showPage(currentPage-1); }
+
+// Skills & Experts page
+function initSkillsPage() {
+  const sg = document.getElementById('skillGrid');
+  sg.innerHTML = PRESET_SKILLS.map(s => `
+    <div class="module-card${config.skills.includes(s.id)?' selected':''}" data-id="${s.id}" onclick="toggleSkill('${s.id}')">
+      <div style="font-size:24px;">${s.icon}</div>
+      <div style="font-weight:600;margin:4px 0;">${s.name}</div>
+      <div style="font-size:11px;color:#94a3b8;">${s.desc}</div>
+    </div>`).join('');
+  
+  const eg = document.getElementById('expertGrid');
+  eg.innerHTML = PRESET_EXPERTS.map(e => `
+    <div class="module-card${config.experts.includes(e.id)?' selected':''}" data-id="${e.id}" onclick="toggleExpert('${e.id}')">
+      <div style="font-size:24px;">${e.icon}</div>
+      <div style="font-weight:600;margin:4px 0;">${e.name}</div>
+      <div style="font-size:11px;color:#94a3b8;">${e.desc}</div>
+    </div>`).join('');
+}
+function toggleSkill(id) {
+  const idx = config.skills.indexOf(id);
+  if (idx >= 0) config.skills.splice(idx, 1); else config.skills.push(id);
+  initSkillsPage();
+}
+function toggleExpert(id) {
+  const idx = config.experts.indexOf(id);
+  if (idx >= 0) config.experts.splice(idx, 1); else config.experts.push(id);
+  initSkillsPage();
+}
+function saveSkillsConfig() {
+  // Skills and experts are saved during install via config object
+}
 
 // Providers
 function renderProviders() {
@@ -956,7 +1027,9 @@ function renderSummary() {
     <strong>安装摘要：</strong><br>
     模型：${config.provider || '未配置'} / ${config.model || '-'}<br>
     设备：${Object.values(config.devices).filter(v=>v).length} 个已选择<br>
-    模块：${config.modules.join(', ')}
+    模块：${config.modules.join(', ')}<br>
+    技能：${config.skills.length ? config.skills.join(', ') : '无'}<br>
+    专家：${config.experts.length ? config.experts.join(', ') : '无'}
   `;
 }
 
@@ -996,10 +1069,18 @@ async function startInstall() {
 
     // Step 3: Save modules
     addLog('保存模块选择...');
-    fill.style.width = '30%';
+    fill.style.width = '25%';
     await fetch('/api/config/modules', {
       method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
       body: JSON.stringify(config.modules)
+    });
+
+    // Step 3.5: Save skills & experts
+    addLog('保存技能与专家配置...');
+    fill.style.width = '30%';
+    await fetch('/api/config/skills', {
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
+      body: JSON.stringify({skills: config.skills, experts: config.experts})
     });
 
     // Step 4: Complete setup

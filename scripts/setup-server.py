@@ -465,6 +465,18 @@ WantedBy=multi-user.target
             self._json_response({'ok': True})
             return
         
+        # Save skills & experts config
+        if path == '/api/config/skills':
+            body = self._read_body()
+            config = {}
+            if CONFIG_FILE.exists():
+                config = json.loads(CONFIG_FILE.read_text())
+            config['skills'] = body.get('skills', [])
+            config['experts'] = body.get('experts', [])
+            CONFIG_FILE.write_text(json.dumps(config, indent=2))
+            self._json_response({'ok': True})
+            return
+        
         # Save modules selection
         if path == '/api/config/modules':
             body = self._read_body()
@@ -745,7 +757,7 @@ WantedBy=multi-user.target
                 results.append(['deps', f'rapidocr check error: {e}'])
         
         # --- Qwen3-0.6B model for crystal-reflex ---
-        if 'crystal' in modules:
+        if 'crystal' in modules or 'embodied' in modules:
             model_dir = Path(config.get('crystal_model_path', '/opt/crystal-model/qwen3-06b-deploy'))
             if not model_dir.exists() or not any(model_dir.glob('*.safetensors')) and not any(model_dir.glob('*.bin')):
                 results.append(['deps', 'Downloading Qwen3-0.6B base model from ModelScope...'])
@@ -787,7 +799,7 @@ except Exception as e:
                 results.append(['deps', f'Qwen3-0.6B model found at {model_dir}'])
         
         # --- Python deps for crystal-reflex (transformers, torch) ---
-        if 'crystal' in modules:
+        if 'crystal' in modules or 'embodied' in modules:
             try:
                 r = subprocess.run(['python3', '-c', 'import transformers, torch'],
                                   capture_output=True, timeout=10)

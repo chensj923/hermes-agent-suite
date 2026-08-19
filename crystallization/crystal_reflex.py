@@ -61,7 +61,24 @@ def load_model():
         
         print(f"Loading model from {model_path}...")
         t0 = time.time()
-        _tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        
+        # Try loading with ModelScope fallback for China mainland
+        load_kwargs = {"trust_remote_code": True}
+        try:
+            _tokenizer = AutoTokenizer.from_pretrained(model_path, **load_kwargs)
+        except OSError:
+            # HuggingFace unreachable, try ModelScope mirror
+            ms_model = model_path.replace("Qwen/", "Qwen/")
+            print(f"HuggingFace unreachable, trying ModelScope: {ms_model}")
+            try:
+                from modelscope import snapshot_download
+                model_path = snapshot_download(ms_model)
+                print(f"Downloaded from ModelScope to {model_path}")
+            except ImportError:
+                # Try setting HF endpoint to mirror
+                os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+                print(f"Using HF mirror: {os.environ['HF_ENDPOINT']}")
+            _tokenizer = AutoTokenizer.from_pretrained(model_path, **load_kwargs)
         _model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
