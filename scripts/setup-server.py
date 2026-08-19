@@ -593,6 +593,15 @@ WantedBy=multi-user.target
         except Exception as e:
             results.append(['deps', f'pip error: {e}'])
         
+        # 4.1 Install aiohttp (required for gateway API server)
+        try:
+            r = subprocess.run(['pip3', 'install', '-q', '--break-system-packages', 'aiohttp'],
+                              capture_output=True, timeout=60)
+            if r.returncode == 0:
+                results.append(['deps', 'aiohttp installed (gateway API server)'])
+        except Exception as e:
+            results.append(['deps', f'aiohttp install failed: {e}'])
+        
         # 4.5 Install service dependencies (models, OCR, etc.)
         modules = config.get('modules', [])
         
