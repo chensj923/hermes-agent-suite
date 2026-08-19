@@ -529,7 +529,7 @@ WantedBy=multi-user.target
                 key_val = 'sk-local'
             env_lines.append(f'{key_name}={key_val}\n')
         if base_url:
-            env_lines.append(f'CUSTOM_BASE_URL={base_url}\n')
+            env_lines.append(f'OPENAI_BASE_URL={base_url}\n')
         env_lines.append(f'DEFAULT_MODEL={model}\n')
         env_lines.append(f'MODEL_PROVIDER={provider}\n')
         
