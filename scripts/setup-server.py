@@ -559,6 +559,20 @@ WantedBy=multi-user.target
         os.chmod(str(hermes_dir / '.env'), 0o600)
         results.append(['config', '~/.hermes/.env synced'])
         
+        # 2.5 Generate config.yaml for model provider (Hermes reads this, not just .env)
+        cfg_lines = ['model:\n']
+        cfg_lines.append(f'  provider: {provider}\n')
+        cfg_lines.append(f'  name: {model}\n')
+        if base_url:
+            cfg_lines.append(f'  base_url: {base_url}\n')
+        effective_key = api_key if api_key else ('sk-local' if provider in ('custom', 'lmstudio') else '')
+        if effective_key:
+            cfg_lines.append(f'  api_key: {effective_key}\n')
+        cfg_path = hermes_dir / 'config.yaml'
+        cfg_path.write_text(''.join(cfg_lines))
+        os.chmod(str(cfg_path), 0o600)
+        results.append(['config', 'config.yaml generated'])
+        
         # 3. Install Node.js if missing (needed for workbuddy)
         node_path = self._which('node')
         if not node_path:
