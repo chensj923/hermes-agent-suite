@@ -540,6 +540,33 @@ WantedBy=multi-user.target
         os.chmod(str(env_file), 0o600)
         results.append(['config', 'env file created'])
         
+        # Generate minimal config.yaml for gateway API server
+        hermes_home = Path.home() / '.hermes'
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        config_yaml = hermes_home / 'config.yaml'
+        if not config_yaml.exists():
+            import yaml
+            gw_config = {
+                'api_server': {
+                    'enabled': True,
+                    'host': '0.0.0.0',
+                    'port': 22122,
+                    'api_key_env': 'API_SERVER_KEY',
+                },
+                'model': {
+                    'provider': provider,
+                    'default_model': model,
+                },
+            }
+            if base_url:
+                gw_config['model']['base_url'] = base_url
+            try:
+                with open(config_yaml, 'w') as f:
+                    yaml.dump(gw_config, f, default_flow_style=False, allow_unicode=True)
+                results.append(['config', 'config.yaml generated (api_server on port 22122)'])
+            except Exception as e:
+                results.append(['config', f'config.yaml failed: {e}'])
+        
         # 1.5 Configure China mirrors (pip/apt/npm)
         mirror_results = self._configure_china_mirrors()
         for mr in mirror_results:
