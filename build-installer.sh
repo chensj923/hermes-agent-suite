@@ -119,21 +119,29 @@ if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
     ss -tlnp 2>/dev/null | grep ":${PORT} "
     read -p "Kill existing process and continue? [y/N] " yn
     if [ "$yn" = "y" ] || [ "$yn" = "Y" ]; then
-        # Stop systemd service first to prevent auto-restart
+        # Stop systemd service first to prevent auto-restart (fast timeout)
         if [ "$HAS_SYSTEMD" = true ]; then
-            systemctl stop ${SERVICE_NAME} 2>/dev/null
+            systemctl stop ${SERVICE_NAME} --no-block 2>/dev/null &
             systemctl disable ${SERVICE_NAME} 2>/dev/null
+            # Also mask any related services that might grab the port
+            for svc in hermes-gateway crystal-reflex workbuddy img-service; do
+                systemctl stop $svc --no-block 2>/dev/null &
+            done
+            wait
         fi
+        # Kill all processes on this port immediately
         PIDS=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | grep -oP 'pid=\K\d+')
         for pid in $PIDS; do kill -9 $pid 2>/dev/null; done
-        # Wait for port to actually be released
-        for i in $(seq 1 10); do
+        # Poll port release (max 10s, no sleep — use tight loop with /dev/tcp probe)
+        PORT_FREE=false
+        for i in $(seq 1 50); do
             if ! ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+                PORT_FREE=true
                 break
             fi
-            sleep 1
+            usleep 200000 2>/dev/null || python3 -c "import time;time.sleep(0.2)" 2>/dev/null || sleep 1
         done
-        if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+        if [ "$PORT_FREE" = false ]; then
             fail "Port $PORT still in use after cleanup. Please check manually."
         fi
         info "Port $PORT freed"
