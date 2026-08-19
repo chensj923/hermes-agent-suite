@@ -438,9 +438,9 @@ async function initBuddyPage() {
     // API Key
     const apiKey = info.api_key || '未配置';
     const keyColor = info.api_key ? '#4ade80' : '#f87171';
-    const maskedKey = info.api_key ? info.api_key.substring(0,8) + '...' : apiKey;
+    const displayKey = info.api_key || apiKey;
     html += `<tr><td style="padding:6px 8px;color:#94a3b8;">API Key</td>
-      <td style="padding:6px 8px;"><code style="background:#334155;padding:3px 8px;border-radius:4px;color:${keyColor};user-select:all;" title="${info.api_key || ''}">${maskedKey}</code></td></tr>`;
+      <td style="padding:6px 8px;"><code style="background:#334155;padding:3px 8px;border-radius:4px;color:${keyColor};user-select:all;">${displayKey}</code></td></tr>`;
     
     html += '</table>';
     
@@ -663,9 +663,9 @@ async function loadDashConnInfo() {
     
     const apiKey = info.api_key || '未配置';
     const keyColor = info.api_key ? '#4ade80' : '#f87171';
-    const maskedKey = info.api_key ? info.api_key.substring(0,8) + '...' : apiKey;
+    const displayKey = info.api_key || apiKey;
     html += `<tr><td style="padding:6px 8px;color:#94a3b8;">API Key</td>
-      <td style="padding:6px 8px;"><code style="background:#334155;padding:3px 8px;border-radius:4px;color:${keyColor};user-select:all;" title="${info.api_key || ''}">${maskedKey}</code></td></tr>`;
+      <td style="padding:6px 8px;"><code style="background:#334155;padding:3px 8px;border-radius:4px;color:${keyColor};user-select:all;">${displayKey}</code></td></tr>`;
     html += '</table>';
     
     if (info.hints && info.hints.length > 0) {
@@ -1035,7 +1035,7 @@ async function startInstall() {
         addLog('  Host:       ' + connInfo.host);
         addLog('  Gateway:    ' + connInfo.gateway_port);
         addLog('  Management: ' + connInfo.mgmt_port);
-        addLog('  API Key:    ' + (connInfo.api_key ? connInfo.api_key.substring(0,8) + '...' : '(not set)'));
+        addLog('  API Key:    ' + (connInfo.api_key || '(not set)'));
         addLog('');
         
         // Show connection info card
