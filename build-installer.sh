@@ -10,6 +10,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGING_DIR="/tmp/hermes-pkg-staging"
 OUTPUT="${SCRIPT_DIR}/hermes-suite-linux-x86_64.sh"
 
+# --- Color helpers ---
+if [ -t 1 ]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+else
+    RED=''; GREEN=''; YELLOW=''; NC=''
+fi
+
+info()  { echo -e "${GREEN}[OK]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[!!]${NC} $1"; }
+fail()  { echo -e "${RED}[ERR]${NC} $1"; exit 1; }
+
 echo "Building Hermes Agent Suite v${VERSION} installer..."
 
 # ============================================================
