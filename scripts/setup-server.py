@@ -519,12 +519,12 @@ WantedBy=multi-user.target
             'qwen': ('QWEN_API_KEY', api_key),
             'deepseek': ('DEEPSEEK_API_KEY', api_key),
             'volcengine': ('VOLCANO_ACCESS_TOKEN', api_key),
-            'lmstudio': ('LM_API_KEY', api_key),
-            'custom': ('CUSTOM_API_KEY', api_key),
+            'lmstudio': ('OPENAI_API_KEY', api_key),
+            'custom': ('OPENAI_API_KEY', api_key),
         }
         if provider in env_map:
             key_name, key_val = env_map[provider]
-            # Local providers (custom/lmstudio) may not need a real key
+            # Local providers may not need a real key, but Hermes requires one
             if not key_val and provider in ('custom', 'lmstudio'):
                 key_val = 'sk-local'
             env_lines.append(f'{key_name}={key_val}\n')
