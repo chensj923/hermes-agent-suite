@@ -1149,6 +1149,104 @@ Hermes Agent Suite 是一个自组织认知智能体平台，核心组件：
                 os.close(fd)
         results.append(['knowledge', '✅ 系统架构文档已部署到知识库'])
         
+        # Create default Hermes skills and profiles
+        hermes_dir = Path.home() / '.hermes'
+        skills_dir = hermes_dir / 'skills'
+        profiles_dir = hermes_dir / 'profiles'
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        profiles_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Read selected skills/experts from config
+        selected_skills = config.get('skills', [])
+        selected_experts = config.get('experts', [])
+        
+        # Default skill templates
+        skill_templates = {
+            'web-search': {'name': 'web-search', 'description': 'Use when searching the web for information. Performs web searches and extracts relevant content.', 'category': 'research'},
+            'code-assistant': {'name': 'code-assistant', 'description': 'Use when writing, reviewing, or debugging code. Provides code generation, review, and debugging assistance.', 'category': 'software-development'},
+            'doc-writer': {'name': 'doc-writer', 'description': 'Use when creating technical documentation, reports, or articles. Generates well-structured documents.', 'category': 'productivity'},
+            'data-analyst': {'name': 'data-analyst', 'description': 'Use when analyzing CSV, Excel, or database data. Performs data processing and visualization.', 'category': 'data-science'},
+            'git-ops': {'name': 'git-ops', 'description': 'Use when managing Git repositories, PRs, and CI/CD pipelines. Handles branch management and code review.', 'category': 'github'},
+            'smart-home': {'name': 'smart-home', 'description': 'Use when controlling IoT devices and home automation. Manages device control and scene linkage.', 'category': 'smart-home'},
+        }
+        
+        created_skills = 0
+        for skill_name in selected_skills:
+            if skill_name in skill_templates:
+                tmpl = skill_templates[skill_name]
+                skill_path = skills_dir / tmpl.get('category', 'general') / tmpl['name']
+                skill_path.mkdir(parents=True, exist_ok=True)
+                skill_md = skill_path / 'SKILL.md'
+                if not skill_md.exists():
+                    content = f"""---
+name: {tmpl['name']}
+description: "{tmpl['description']}"
+version: 1.0.0
+author: hermes-suite
+---
+
+# {tmpl['name'].replace('-', ' ').title()}
+
+{tmpl['description']}
+
+## When to Use
+{tmpl['description']}
+
+## Instructions
+This skill is ready for customization. Add your specific instructions here.
+"""
+                    fd = os.open(str(skill_md), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                    os.write(fd, content.encode())
+                    os.close(fd)
+                    created_skills += 1
+        
+        if created_skills > 0:
+            results.append(['skills', f'✅ 创建了 {created_skills} 个技能'])
+        
+        # Default expert/profile templates
+        profile_templates = {
+            'devops': {'name': '运维专家', 'role': 'DevOps Engineer', 'focus': '服务器管理、部署、监控、CI/CD'},
+            'backend': {'name': '后端开发', 'role': 'Backend Developer', 'focus': 'API 设计、数据库、微服务架构'},
+            'frontend': {'name': '前端开发', 'role': 'Frontend Developer', 'focus': 'UI/UX、React/Vue、响应式设计'},
+            'ai-engineer': {'name': 'AI 工程师', 'role': 'AI Engineer', 'focus': '模型训练、推理优化、RAG 系统'},
+            'product-manager': {'name': '产品经理', 'role': 'Product Manager', 'focus': '需求分析、项目管理、用户研究'},
+            'security': {'name': '安全专家', 'role': 'Security Expert', 'focus': '渗透测试、漏洞修复、合规审计'},
+        }
+        
+        created_profiles = 0
+        for expert_key in selected_experts:
+            if expert_key in profile_templates:
+                tmpl = profile_templates[expert_key]
+                profile_path = profiles_dir / expert_key
+                profile_path.mkdir(parents=True, exist_ok=True)
+                soul_md = profile_path / 'SOUL.md'
+                if not soul_md.exists():
+                    content = f"""# {tmpl['name']}
+
+你是{tmpl['name']}（{tmpl['role']}）。
+
+## 专长领域
+{tmpl['focus']}
+
+## 工作风格
+- 专业、严谨、注重实践
+- 给出可执行的建议，不说空话
+- 遇到问题先分析根因再给方案
+- 用中文沟通，技术术语保留英文
+
+## 原则
+- 安全第一，生产环境操作必须谨慎
+- 代码质量优先于速度
+- 文档和测试是交付物的一部分
+"""
+                    fd = os.open(str(soul_md), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                    os.write(fd, content.encode())
+                    os.close(fd)
+                    created_profiles += 1
+        
+        if created_profiles > 0:
+            results.append(['profiles', f'✅ 创建了 {created_profiles} 个专家角色'])
+        
         # Mark complete
         SETUP_DONE.write_text(json.dumps({
             'completed_at': __import__('datetime').datetime.now().isoformat(),
