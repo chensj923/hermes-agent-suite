@@ -61,9 +61,6 @@ input::placeholder { color:#475569; }
 .module-item { display:flex; align-items:center; gap:10px; padding:14px; background:#0f172a; border-radius:8px; border:1px solid #334155; cursor:pointer; transition:all .2s; }
 .module-item:hover { border-color:#38bdf8; }
 .module-item.selected { border-color:#38bdf8; background:#0c2d4a; }
-.module-card { padding:16px; background:#0f172a; border-radius:8px; border:1px solid #334155; cursor:pointer; transition:all .2s; text-align:center; }
-.module-card:hover { border-color:#38bdf8; }
-.module-card.selected { border-color:#38bdf8; background:#0c2d4a; box-shadow:0 0 12px rgba(56,189,248,0.3); }
 .module-item input[type=checkbox] { accent-color:#38bdf8; width:18px; height:18px; }
 .module-icon { font-size:24px; }
 .module-name { font-size:14px; font-weight:600; }
@@ -171,25 +168,6 @@ input::placeholder { color:#475569; }
     </div>
   </div>
 
-  <!-- Step 4.5: Skills & Experts Selection -->
-  <div class="page" id="page-skills">
-    <div class="card">
-      <h2><span class="icon">🧠</span> 技能与专家配置</h2>
-      <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">选择预置技能和专家角色，安装后自动加载到 Hermes。</p>
-      
-      <h3 style="color:#60a5fa;font-size:14px;margin:12px 0 8px;">📚 推荐技能</h3>
-      <div class="module-grid" id="skillGrid"></div>
-      
-      <h3 style="color:#60a5fa;font-size:14px;margin:16px 0 8px;">👤 专家角色</h3>
-      <div class="module-grid" id="expertGrid"></div>
-      
-      <div class="btn-row">
-        <button class="btn btn-secondary" onclick="prevPage()">← 上一步</button>
-        <button class="btn btn-primary" onclick="nextPage()">下一步 →</button>
-      </div>
-    </div>
-  </div>
-
   <!-- Step 5: Crystal System Config -->
   <div class="page" id="page-4">
     <div class="card">
@@ -230,21 +208,17 @@ input::placeholder { color:#475569; }
       
       <div style="background:#0f172a;border-radius:8px;padding:20px;margin-bottom:16px;text-align:center;">
         <div style="font-size:48px;margin-bottom:12px;">🖥️</div>
-        <h3 style="color:#38bdf8;margin-bottom:8px;">HermesBuddy v1.5.0</h3>
-        <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">远程执行器模式 · WebSocket 反向连接 · 零配置 SSH · NAT 穿透</p>
+        <h3 style="color:#38bdf8;margin-bottom:8px;">HermesBuddy v1.4.2</h3>
+        <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">可视化任务管理 · 执行记录查看 · 多专家切换 · 工作空间管理</p>
         
         <div id="buddyDownloadArea">
-          <a href="https://github.com/chensj923/hermes-agent-suite/releases/download/v1.5.0/HermesBuddy-Setup-1.5.0.exe" class="btn btn-primary" style="display:inline-block;text-decoration:none;margin:4px;" target="_blank">⬇️ Windows (.exe)</a>
-          <a href="https://github.com/chensj923/hermes-agent-suite/releases/download/v1.5.0/HermesBuddy-1.5.0.AppImage" class="btn btn-secondary" style="display:inline-block;text-decoration:none;margin:4px;" target="_blank">⬇️ Linux (.AppImage)</a>
+          <a href="https://github.com/chensj923/hermes-agent-suite/releases/download/v0.3.0/HermesBuddy-Setup-1.4.2.exe" class="btn btn-primary" style="display:inline-block;text-decoration:none;margin:4px;" target="_blank">⬇️ Windows (.exe)</a>
+          <a href="https://github.com/chensj923/hermes-agent-suite/releases/download/v0.3.0/HermesBuddy-1.4.2.AppImage" class="btn btn-secondary" style="display:inline-block;text-decoration:none;margin:4px;" target="_blank">⬇️ Linux (.AppImage)</a>
           <span class="btn btn-secondary" style="display:inline-block;margin:4px;opacity:0.5;cursor:not-allowed;" title="macOS 版需在 macOS 上构建，即将支持">⬇️ macOS (.dmg) 即将支持</span>
         </div>
       </div>
       
       <div style="background:#1e293b;border-radius:8px;padding:16px;font-size:13px;color:#cbd5e1;line-height:1.8;">
-        <strong>v1.5.0 新功能：远程执行器模式</strong><br>
-        HermesBuddy 不再需要 SSH 即可在目标机器上执行命令。客户端通过 WebSocket 反向连接服务器，在本地执行命令并回传结果。<br>
-        <b>旧架构</b>：服务器 → SSH → 目标机（需开 SSH + 密钥 + 防火墙）<br>
-        <b>新架构</b>：客户端 → WebSocket → 服务器（零配置，安装即用，NAT 穿透）<br><br>
         <strong>安装说明：</strong><br>
         <b>Windows:</b> 下载 .exe 安装包，双击运行，按提示完成安装。<br>
         <b>Linux:</b> <code style="background:#334155;padding:2px 6px;border-radius:4px;">chmod +x HermesBuddy.AppImage && ./HermesBuddy.AppImage</code><br>
@@ -274,27 +248,9 @@ input::placeholder { color:#475569; }
 </div>
 
 <script>
-const PAGES = 8;
+const PAGES = 7;
 let currentPage = 0;
-const config = { provider:'', aKey:'', model:'', baseUrl:'', devices:{}, modules:[], skills:[], experts:[] };
-
-// Preset skills and experts
-const PRESET_SKILLS = [
-  {id:'web-search', name:'网页搜索', desc:'搜索引擎查询与信息提取', icon:'🔍'},
-  {id:'code-assist', name:'代码助手', desc:'代码生成、审查与调试', icon:'💻'},
-  {id:'doc-writer', name:'文档写作', desc:'技术文档、报告自动生成', icon:'📝'},
-  {id:'data-analysis', name:'数据分析', desc:'CSV/Excel 数据处理与可视化', icon:'📊'},
-  {id:'git-ops', name:'Git 运维', desc:'仓库管理、PR 审查、CI/CD', icon:'🔧'},
-  {id:'smart-home', name:'智能家居', desc:'IoT 设备控制与场景联动', icon:'🏠'},
-];
-const PRESET_EXPERTS = [
-  {id:'devops', name:'运维专家', desc:'服务器管理、部署、监控', icon:'🖥️'},
-  {id:'backend', name:'后端开发', desc:'API 设计、数据库、微服务', icon:'⚙️'},
-  {id:'frontend', name:'前端开发', desc:'UI/UX、React/Vue、响应式', icon:'🎨'},
-  {id:'ai-engineer', name:'AI 工程师', desc:'模型训练、推理优化、RAG', icon:'🤖'},
-  {id:'pm', name:'产品经理', desc:'需求分析、项目管理、用户研究', icon:'📋'},
-  {id:'security', name:'安全专家', desc:'渗透测试、漏洞修复、合规', icon:'🔒'},
-];
+const config = { provider:'', apiKey:'', model:'', baseUrl:'', devices:[], modules:[] };
 
 // Login
 async function doLogin() {
@@ -744,50 +700,16 @@ function showPage(n) {
   document.querySelectorAll('.page').forEach((p,i) => p.classList.toggle('active', i===n));
   currentPage = n;
   renderStepDots();
-  if (n === 4) initSkillsPage();
-  if (n === 5) initCrystalProviders();
-  if (n === 6) initBuddyPage();
-  if (n === 7) renderSummary();
+  if (n === 4) initCrystalProviders();
+  if (n === 5) initBuddyPage();
+  if (n === 6) renderSummary();
 }
 function nextPage() {
-  // Save configs when leaving pages
-  if (currentPage === 4) saveSkillsConfig();
-  if (currentPage === 5) saveCrystalConfig();
+  // Save crystal config when leaving page 4
+  if (currentPage === 4) saveCrystalConfig();
   if (currentPage < PAGES-1) showPage(currentPage+1);
 }
 function prevPage() { if (currentPage > 0) showPage(currentPage-1); }
-
-// Skills & Experts page
-function initSkillsPage() {
-  const sg = document.getElementById('skillGrid');
-  sg.innerHTML = PRESET_SKILLS.map(s => `
-    <div class="module-card${config.skills.includes(s.id)?' selected':''}" data-id="${s.id}" onclick="toggleSkill('${s.id}')">
-      <div style="font-size:24px;">${s.icon}</div>
-      <div style="font-weight:600;margin:4px 0;">${s.name}</div>
-      <div style="font-size:11px;color:#94a3b8;">${s.desc}</div>
-    </div>`).join('');
-  
-  const eg = document.getElementById('expertGrid');
-  eg.innerHTML = PRESET_EXPERTS.map(e => `
-    <div class="module-card${config.experts.includes(e.id)?' selected':''}" data-id="${e.id}" onclick="toggleExpert('${e.id}')">
-      <div style="font-size:24px;">${e.icon}</div>
-      <div style="font-weight:600;margin:4px 0;">${e.name}</div>
-      <div style="font-size:11px;color:#94a3b8;">${e.desc}</div>
-    </div>`).join('');
-}
-function toggleSkill(id) {
-  const idx = config.skills.indexOf(id);
-  if (idx >= 0) config.skills.splice(idx, 1); else config.skills.push(id);
-  initSkillsPage();
-}
-function toggleExpert(id) {
-  const idx = config.experts.indexOf(id);
-  if (idx >= 0) config.experts.splice(idx, 1); else config.experts.push(id);
-  initSkillsPage();
-}
-function saveSkillsConfig() {
-  // Skills and experts are saved during install via config object
-}
 
 // Providers
 function renderProviders() {
@@ -1033,10 +955,8 @@ function renderSummary() {
   s.innerHTML = `
     <strong>安装摘要：</strong><br>
     模型：${config.provider || '未配置'} / ${config.model || '-'}<br>
-    设备：${Object.values(config.devices).filter(v=>v).length} 个已选择<br>
-    模块：${config.modules.join(', ')}<br>
-    技能：${config.skills.length ? config.skills.join(', ') : '无'}<br>
-    专家：${config.experts.length ? config.experts.join(', ') : '无'}
+    设备：${config.devices.length} 个已选择<br>
+    模块：${config.modules.join(', ')}
   `;
 }
 
@@ -1052,19 +972,13 @@ async function startInstall() {
   }
 
   try {
-    // Step 1: Save model config and test connectivity
-    addLog('保存模型配置并验证连接...');
+    // Step 1: Save model config
+    addLog('保存模型配置...');
     fill.style.width = '10%';
-    const modelResp = await fetch('/api/config/model', {
+    await fetch('/api/config/model', {
       method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
-      body: JSON.stringify({provider:config.provider, aKey:config.aKey, model:config.model, baseUrl:config.baseUrl||''})
+      body: JSON.stringify({provider:config.provider, apiKey:config.aKey, model:config.model, baseUrl:config.baseUrl||''})
     });
-    const modelResult = await modelResp.json();
-    if (modelResult.test === 'passed') {
-      addLog('✅ ' + modelResult.message);
-    } else if (modelResult.test === 'failed') {
-      addLog('⚠️ ' + modelResult.message);
-    }
 
     // Step 2: Save devices
     addLog('保存设备配置...');
@@ -1076,18 +990,10 @@ async function startInstall() {
 
     // Step 3: Save modules
     addLog('保存模块选择...');
-    fill.style.width = '25%';
+    fill.style.width = '30%';
     await fetch('/api/config/modules', {
       method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
       body: JSON.stringify(config.modules)
-    });
-
-    // Step 3.5: Save skills & experts
-    addLog('保存技能与专家配置...');
-    fill.style.width = '30%';
-    await fetch('/api/config/skills', {
-      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+config.token},
-      body: JSON.stringify({skills: config.skills, experts: config.experts})
     });
 
     // Step 4: Complete setup

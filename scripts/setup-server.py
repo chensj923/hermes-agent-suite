@@ -614,6 +614,10 @@ WantedBy=multi-user.target
         env_lines.append('API_SERVER_HOST=0.0.0.0\n')
         env_lines.append('API_SERVER_PORT=22122\n')
         
+        # v1.5.0: Remote Executor mode (WebSocket, no SSH needed)
+        env_lines.append('TERMINAL_ENV=executor\n')
+        env_lines.append('EXECUTOR_URL=http://localhost:8700/api/executor/run\n')
+        
         env_file = DATA_DIR / '.env'
         # Use os-level write to bypass secret scrubber on API keys
         fd = os.open(str(env_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -643,6 +647,16 @@ WantedBy=multi-user.target
         effective_key = api_key if api_key else ('sk-local' if provider in ('custom', 'lmstudio') else '')
         if effective_key:
             cfg_lines.append(f'  api_key: {effective_key}\n')
+        # v1.5.0: Remote Executor terminal backend (WebSocket, no SSH)
+        cfg_lines.append('\nterminal:\n')
+        cfg_lines.append('  backend: executor\n')
+        cfg_lines.append('\nplatforms:\n')
+        cfg_lines.append('  api_server:\n')
+        cfg_lines.append('    enabled: true\n')
+        cfg_lines.append('    extra:\n')
+        cfg_lines.append('      host: 0.0.0.0\n')
+        cfg_lines.append(f'      port: {config.get("api_port", 22122)}\n')
+        cfg_lines.append(f'      model_name: {model}\n')
         cfg_path = hermes_dir / 'config.yaml'
         # Use os-level write to bypass secret scrubber
         fd = os.open(str(cfg_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -687,6 +701,102 @@ WantedBy=multi-user.target
                 results.append(['deps', f'pip install warning: {r.stderr.decode().strip()[:100]}'])
         except Exception as e:
             results.append(['deps', f'pip error: {e}'])
+        
+        # 4.1 Patch executor.py into hermes-agent (v1.5.0: Remote Executor)
+        try:
+            import site as _site
+            site_pkgs = _site.getsitepackages()[0] if _site.getsitepackages() else '/usr/lib/python3/dist-packages'
+            envs_dir = Path(site_pkgs) / 'tools' / 'environments'
+            executor_src = INSTALL_DIR / 'patches' / 'executor.py'
+            terminal_tool_src = INSTALL_DIR / 'patches' / 'terminal_tool_executor.py'
+            if not executor_src.exists():
+                # Try alternate location
+                executor_src = Path(__file__).parent / 'patches' / 'executor.py'
+            if executor_src.exists() and envs_dir.exists():
+                import shutil as _sh
+                _sh.copy2(str(executor_src), str(envs_dir / 'executor.py'))
+                results.append(['deps', 'executor.py patched into hermes-agent'])
+            else:
+                # Inline patch: write executor.py directly
+                executor_code = '''"""Remote executor environment - runs commands on a connected HermesBuddy client."""
+import logging, os, threading, time
+from tools.environments.base import BaseEnvironment
+logger = logging.getLogger(__name__)
+
+class _ExecutorProcessHandle:
+    def __init__(self, url, command, timeout, cwd):
+        self._stdout = b""; self._stderr = b""; self._returncode = None; self._done = threading.Event()
+        def _run():
+            try:
+                import requests
+                resp = requests.post(url, json={"command": command, "timeout": timeout, "workdir": cwd or ""}, timeout=timeout + 10)
+                data = resp.json()
+                self._stdout = (data.get("output") or "").encode("utf-8", errors="replace")
+                self._stderr = (data.get("error") or "").encode("utf-8", errors="replace")
+                self._returncode = data.get("exit_code", 0)
+            except Exception as e:
+                self._stderr = str(e).encode("utf-8", errors="replace"); self._returncode = 1
+            finally:
+                self._done.set()
+        self._thread = threading.Thread(target=_run, daemon=True); self._thread.start()
+    @property
+    def stdout(self): return self._stdout
+    @property
+    def stderr(self):
+        class _S:
+            def __init__(self, d): self._d = d
+            def read(self, n=-1): return self._d if n < 0 else self._d[:n]
+            def read1(self, n=-1): return self.read(n)
+        return _S(self._stderr)
+    @property
+    def stdin(self): return None
+    def poll(self): return self._returncode if self._done.is_set() else None
+    def kill(self): pass
+    def terminate(self): pass
+    def wait(self, timeout=None): self._done.wait(timeout); return self._returncode or 0
+
+class ExecutorEnvironment(BaseEnvironment):
+    def __init__(self, url, cwd="~", timeout=120, **kw):
+        super().__init__(cwd=cwd, timeout=timeout, env={})
+        self._url = url; self._snapshot_ready = True; self._prefer_nonlogin = True
+    def get_temp_dir(self): return "/tmp"
+    def _run_bash(self, cmd_string, *, login=False, timeout=120, stdin_data=None):
+        return _ExecutorProcessHandle(self._url, cmd_string, timeout, self.cwd)
+    def _before_execute(self): pass
+    def cleanup(self): pass
+'''
+                envs_dir = Path(site_pkgs) / 'tools' / 'environments'
+                envs_dir.mkdir(parents=True, exist_ok=True)
+                fd2 = os.open(str(envs_dir / 'executor.py'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                os.write(fd2, executor_code.encode())
+                os.close(fd2)
+                results.append(['deps', 'executor.py written inline'])
+                # Patch terminal_tool.py to add executor backend
+                tt_path = Path(site_pkgs) / 'tools' / 'terminal_tool.py'
+                if tt_path.exists():
+                    tt_text = tt_path.read_text()
+                    if 'env_type == "executor"' not in tt_text:
+                        # Add executor import after LocalEnvironment import
+                        tt_text = tt_text.replace(
+                            'from tools.environments.local import LocalEnvironment',
+                            'from tools.environments.local import LocalEnvironment\n\ntry:\n    from tools.environments.executor import ExecutorEnvironment\nexcept Exception:\n    ExecutorEnvironment = None'
+                        )
+                        # Add executor branch before the else clause
+                        tt_text = tt_text.replace(
+                            "    else:\n        raise ValueError(\n            f\"Unknown environment type",
+                            '    elif env_type == "executor":\n        _url = os.getenv("EXECUTOR_URL", "")\n        if not _url:\n            raise ValueError("Executor environment requires EXECUTOR_URL")\n        if ExecutorEnvironment is None:\n            raise ValueError("ExecutorEnvironment not available")\n        return ExecutorEnvironment(url=_url, cwd=cwd, timeout=timeout)\n\n    else:\n        raise ValueError(\n            f"Unknown environment type'
+                        )
+                        # Update error message
+                        tt_text = tt_text.replace(
+                            "'singularity', 'modal', 'daytona', 'vercel_sandbox', or 'ssh'",
+                            "'singularity', 'modal', 'daytona', 'vercel_sandbox', 'ssh', or 'executor'"
+                        )
+                        fd3 = os.open(str(tt_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                        os.write(fd3, tt_text.encode())
+                        os.close(fd3)
+                        results.append(['deps', 'terminal_tool.py patched for executor'])
+        except Exception as e:
+            results.append(['deps', f'executor patch skipped: {e}'])
         
         # 4.1 Install aiohttp (required for gateway API server)
         try:
@@ -892,6 +1002,21 @@ WantedBy=multi-user.target
         wb_dir = INSTALL_DIR / 'workbuddy'
         node_cmd = self._which('node')
         if (wb_dir / 'server.js').exists() and node_cmd:
+            # v1.5.0: Install ws dependency for WebSocket executor
+            try:
+                wb_pkg = wb_dir / 'package.json'
+                if wb_pkg.exists():
+                    import json as _json
+                    pkg = _json.loads(wb_pkg.read_text())
+                    deps = pkg.get('dependencies', {})
+                    ws_installed = (wb_dir / 'node_modules' / 'ws' / 'package.json').exists()
+                    if 'ws' not in deps and not ws_installed:
+                        npm_cmd = self._which('npm') or 'npm'
+                        subprocess.run([npm_cmd, 'install', '--prefix', str(wb_dir), 'ws'],
+                                     capture_output=True, timeout=30)
+                        results.append(['workbuddy', 'ws dependency installed'])
+            except Exception as e:
+                results.append(['workbuddy', f'ws install skipped: {e}'])
             try:
                 subprocess.Popen([node_cmd, str(wb_dir / 'server.js')],
                                 cwd=str(wb_dir), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
