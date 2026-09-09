@@ -13,6 +13,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // Office 文件解析
 let XLSX, mammoth;
@@ -153,6 +154,58 @@ function updateProfileSoul(name, soul) {
   if (!fs.existsSync(dir)) return { error: 'profile 不存在' };
   fs.writeFileSync(path.join(dir, 'SOUL.md'), soul);
   return { ok: true };
+}
+
+// ---------- 产品部署（供独立 Windows 安装包调用） ----------
+const PRODUCT_DEFINITIONS = Object.freeze({
+  buddy: {
+    profile: 'buddy',
+    skills: ['hermes-buddy-desktop'],
+    capabilities: ['chat', 'desktop-tools'],
+    soul: '# Hermes Buddy\n\n你是用户的桌面助手。优先在用户明确授权的工作空间中行动。\n'
+  },
+  home: {
+    profile: 'home-manager',
+    skills: ['smart-assistant-body', 'smart-home'],
+    capabilities: ['voice', 'vision', 'home-control'],
+    soul: '# Hermes Home\n\n你是家庭管家。涉及设备控制、录音或录像时必须遵循已配对设备和用户权限。\n'
+  }
+});
+
+function normalizeDeploymentDevices(value) {
+  if (!Array.isArray(value) || value.length > 32) throw new Error('devices 必须是最多 32 项的数组');
+  return value.map((device, index) => {
+    if (!device || typeof device !== 'object') throw new Error(`devices[${index}] 无效`);
+    const type = String(device.type || '').trim();
+    const endpoint = String(device.endpoint || '').trim();
+    if (!/^[a-z0-9_-]{1,32}$/i.test(type)) throw new Error(`devices[${index}].type 无效`);
+    // Device passwords/tokens belong in a dedicated secret store, never in this deployment manifest.
+    if (endpoint && (!/^([a-z][a-z0-9+.-]*):\/\//i.test(endpoint) || /@|[?&](token|key|password)=/i.test(endpoint))) {
+      throw new Error(`devices[${index}].endpoint 不能包含凭据`);
+    }
+    return { id: String(device.id || `${type}-${index + 1}`).replace(/[^a-z0-9_-]/ig, '').slice(0, 64), type, endpoint };
+  });
+}
+
+function provisionProduct(body) {
+  const product = PRODUCT_DEFINITIONS[body?.product];
+  const deployment = body?.deployment;
+  if (!product) return { error: '未知产品' };
+  if (!['windows', 'server', 'hybrid'].includes(deployment)) return { error: '未知部署位置' };
+  let devices;
+  try { devices = normalizeDeploymentDevices(body.devices || []); } catch (e) { return { error: e.message }; }
+  const dir = profileDir(product.profile);
+  try {
+    fs.mkdirSync(path.join(dir, 'skills'), { recursive: true });
+    if (!fs.existsSync(path.join(dir, 'SOUL.md'))) fs.writeFileSync(path.join(dir, 'SOUL.md'), product.soul);
+    if (!fs.existsSync(path.join(dir, 'config.yaml'))) fs.writeFileSync(path.join(dir, 'config.yaml'), 'model:\n  default: hermes-agent\n');
+    const deploymentsDir = path.join(HERMES_HOME, 'deployments');
+    fs.mkdirSync(deploymentsDir, { recursive: true });
+    const manifest = { schema_version: 1, product: body.product, profile: product.profile, deployment, capabilities: product.capabilities, skills: product.skills, devices, updated_at: new Date().toISOString() };
+    fs.writeFileSync(path.join(deploymentsDir, `${body.product}.json`), JSON.stringify(manifest, null, 2) + '\n');
+    const missingSkills = product.skills.filter(skill => !fs.existsSync(path.join(HERMES_HOME, 'skills', skill)));
+    return { ok: true, profile: product.profile, capabilities: product.capabilities, skills: product.skills, missing_skills: missingSkills };
+  } catch (e) { return { error: '保存产品部署失败: ' + e.message }; }
 }
 
 // ---------- 项目管理 ----------
@@ -331,6 +384,13 @@ function checkUiToken(req) {
   return auth === UI_TOKEN;
 }
 
+function hasGatewayBearer(req) {
+  const value = String(req.headers.authorization || '');
+  const expected = 'Bea' + 'rer ' + HERMES_KEY;
+  if (!HERMES_KEY || value.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(value), Buffer.from(expected));
+}
+
 // ---------- 静态文件 ----------
 function serveStatic(req, res, pathname) {
   let rel = pathname === '/' ? '/index.html' : pathname;
@@ -417,7 +477,8 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 401, { error: '令牌错误' });
     }
 
-    if (!checkUiToken(req)) return sendJson(res, 401, { error: 'unauthorized' });
+    const productProvisioning = p === '/api/provisioning/products' && req.method === 'POST';
+    if (!checkUiToken(req) && !(productProvisioning && hasGatewayBearer(req))) return sendJson(res, 401, { error: 'unauthorized' });
 
     // Hermes 代理: /hb-api/<path...>
     if (p.startsWith('/hb-api/')) {
@@ -523,6 +584,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Session Log API
+    if (productProvisioning) {
+      const body = JSON.parse(await readBody(req) || '{}');
+      const result = provisionProduct(body);
+      return sendJson(res, result.error ? 400 : 200, result);
+    }
+
     if (p === '/api/session-logs' && req.method === 'GET') {
       return sendJson(res, 200, { logs: listSessionLogs() });
     }

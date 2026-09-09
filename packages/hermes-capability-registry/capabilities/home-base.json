@@ -1,0 +1,8 @@
+{
+  "id": "home-base",
+  "displayName": "家庭管家基础能力",
+  "requires": ["voice", "vision"],
+  "skills": ["hermes-home-manager"],
+  "mcp": [],
+  "deployment": ["windows", "server", "hybrid"]
+}

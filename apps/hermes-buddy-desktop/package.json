@@ -1,0 +1,23 @@
+{
+  "name": "@hermes/buddy-desktop",
+  "version": "2.0.0-dev",
+  "description": "Windows desktop client and guided provisioning for Hermes Buddy",
+  "author": "Hermes Agent Suite",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "build:win": "electron-builder --win nsis --x64"
+  },
+  "dependencies": { "@hermes/connection": "*", "@hermes/provisioning": "*" },
+  "devDependencies": { "electron": "35.7.5", "electron-builder": "26.15.3" },
+  "build": {
+    "appId": "com.hermes.buddy",
+    "productName": "Hermes Buddy",
+    "artifactName": "hermes-suite-windows-x86_64.${ext}",
+    "directories": { "output": "dist" },
+    "files": ["src/**/*", "package.json"],
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+  }
+}

@@ -1,5 +1,7 @@
 # Build artifacts
 dist/
+apps/*/dist/
+node_modules/
 *.sh
 !build-installer.sh
 

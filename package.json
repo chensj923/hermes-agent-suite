@@ -1,0 +1,12 @@
+{
+  "name": "hermes-agent-suite",
+  "private": true,
+  "version": "2.0.0-dev",
+  "description": "Composable desktop products and deployment modules for Hermes",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "start:buddy": "npm run start --workspace=@hermes/buddy-desktop",
+    "build:buddy:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-buddy-windows.ps1"
+  }
+}
