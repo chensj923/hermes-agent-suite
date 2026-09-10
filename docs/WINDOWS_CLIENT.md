@@ -181,6 +181,32 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 3. 登记 Gateway（可选）：如果用户填了 baseUrl 就做健康检查 + 创建会话 + 部署清单；任一失败或没填都降级继续。
 4. 加密保存凭据。
 
+### 8.2 服务端一次性准备 / Server-side one-time prep
+
+**关键事实**：Hermes 服务端默认**不**对外监听 gateway / LLM 端口，且 `API_SERVER_KEY` 只在服务端 `/root/.hermes/.api_server_key` 或 `data/.env` 里。Buddy 是客户端，必须服务端配合。
+
+服务端至少要给三样：
+
+| 项 | 默认状态 | 需要做什么 |
+|----|----------|-----------|
+| LLM 端点 `:8800` 对外 | 通常绑 `127.0.0.1` 或 Unix socket | Hermes 启动参数加 `--host 0.0.0.0` 或修改 `config.yaml` |
+| API Key | 服务端随机生成 | 用户需要从服务端取：`cat /root/.hermes/.api_server_key` 或 `grep API_SERVER_KEY /root/.hermes/data/.env` |
+| Gateway `:22122` 对外（可选） | 通常绑 `127.0.0.1` | 同上；不通 Buddy 仍能干活（降级模式） |
+
+**最省事的做法**：
+
+1. 在 Buddy 连接页填推理端点（必填），其他留空也行。
+2. 点「先诊断 Hermes 是否可达」 —— Buddy 会同时探 `:8800` / `:22122` / `:8700`，每个端口给出具体原因与建议（端口未监听 / 鉴权失败 / 网络层失败 / 协议错误 …）。
+3. 如果端口未监听，点「生成服务端准备脚本」 —— Buddy 会基于你填的端点生成一份 shell 脚本，复制到 Hermes 主机以 root 身份执行：
+   - 检查 Hermes 进程状态 + pid 文件
+   - 看 `config.yaml` 里的 `host` / `bind` 字段，提醒 127.0.0.1 改成 0.0.0.0
+   - 重启 gateway（优先 systemd，回落 `hermes gateway run`）
+   - 打印当前 API Key
+4. 把脚本最后一行打印的 Key 复制回 Buddy 的 API Key 字段。
+5. 重新点「先诊断」确认 `8800` 现在显示 ✓，再点「验证并配置 Buddy」。
+
+> If the Hermes Linux server has gateway / LLM ports bound to `127.0.0.1` (the default), Buddy cannot reach them. Use **"先诊断"** to see which ports are blocked, then **"生成服务端准备脚本"** to get a copy-paste script that fixes the bind address and prints the API key. The whole loop runs from the Buddy connect screen — no SSH skills required on the Buddy user side.
+
 ## 9. 日常使用 / Day-to-day
 
 - **顶部状态条**：左侧显示当前 LLM 端点 + profile；中间状态点（绿=就绪、黄=忙、红=错）；右侧权限徽章显示当前档位。

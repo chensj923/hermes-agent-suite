@@ -467,6 +467,50 @@ form small { display: block; margin-top: 4px; color: #7d8fae; font-size: 11px; }
 .confirm-reason { font-size: 11px; color: var(--muted); margin: 4px 0 8px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
+.modal-card.wide { width: min(720px, 95%); }
+.modal-card.wide pre { max-height: 360px; font-size: 11px; }
+
+.diagnose-actions { display: flex; gap: 10px; align-items: center; margin: 12px 0 4px; }
+.diagnose-report {
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+.diagnose-report[hidden] { display: none; }
+.diagnose-report .dr-title { font-weight: 600; margin-bottom: 6px; color: var(--muted); }
+.diagnose-report ul { margin: 0; padding: 0; list-style: none; }
+.diagnose-report li {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px dashed var(--border);
+}
+.diagnose-report li:first-child { border-top: none; }
+.diagnose-report .dr-key { font-weight: 600; }
+.diagnose-report .dr-reason { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.diagnose-report li[data-state="ok"] .dr-key::before { content: '✓ '; color: var(--ok); }
+.diagnose-report li[data-state="ok"] .dr-key { color: var(--ok); }
+.diagnose-report li[data-state="unauthorized"] .dr-key { color: var(--warn); }
+.diagnose-report li[data-state="unauthorized"] .dr-key::before { content: '🔑 '; }
+.diagnose-report li[data-state="refused"] .dr-key,
+.diagnose-report li[data-state="unreachable"] .dr-key,
+.diagnose-report li[data-state="timeout"] .dr-key { color: var(--danger); }
+.diagnose-report li[data-state="refused"] .dr-key::before { content: '✕ '; }
+.diagnose-report li[data-state="unreachable"] .dr-key::before { content: '✕ '; }
+.diagnose-report li[data-state="timeout"] .dr-key::before { content: '⏱ '; }
+.diagnose-report li[data-state="no_endpoint"] .dr-key { color: var(--muted); }
+.diagnose-report li[data-state="no_endpoint"] .dr-key::before { content: '· '; }
+.diagnose-report li[data-state="not_found"] .dr-key { color: var(--warn); }
+.diagnose-report li[data-state="not_found"] .dr-key::before { content: '? '; }
+.diagnose-report li[data-state="wrong_protocol"] .dr-key { color: var(--danger); }
+.diagnose-report li[data-state="wrong_protocol"] .dr-key::before { content: '✕ '; }
+.diagnose-report .dr-summary { margin-top: 8px; font-size: 11px; color: var(--muted); }
+
 .foot {
   padding: 5px 18px;
   font-size: 10px;

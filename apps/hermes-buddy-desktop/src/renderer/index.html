@@ -142,6 +142,21 @@
     </div>
   </div>
 
+  <!-- 服务端准备脚本弹窗 -->
+  <div class="modal" id="bootstrap-dialog" hidden>
+    <div class="modal-card wide">
+      <h3>Hermes 服务端一次性准备脚本</h3>
+      <p class="hint">在 Hermes 主机（通常是 Linux）以 root 身份执行下面的脚本，它会检查端口监听、提醒改绑定地址、打印 API Key。<br>复制或导出后，SSH 到 Hermes 主机粘贴执行。</p>
+      <pre id="bootstrap-script" class="report-pre" tabindex="0"></pre>
+      <div class="modal-actions">
+        <button class="ghost" id="btn-bootstrap-copy" type="button">复制到剪贴板</button>
+        <button class="ghost" id="btn-bootstrap-export" type="button">导出为 .sh</button>
+        <button class="primary" id="btn-bootstrap-close" type="button">关闭</button>
+      </div>
+      <div class="status-line" id="bootstrap-status" role="status"></div>
+    </div>
+  </div>
+
   <footer class="foot" id="foot"></footer>
   <script src="app.js"></script>
 </body>

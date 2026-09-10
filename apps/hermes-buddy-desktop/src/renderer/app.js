@@ -517,6 +517,138 @@ el.btnOpenWorkspace.addEventListener('click', async () => {
   }
 });
 
+// ============================================================ 诊断 + 服务端脚本
+
+function diagnosePayload() {
+  // 提取用户在表单里填的三个端点。诊断时 Key 不下发，所以不传。
+  return {
+    llmUrl: el.fieldLlmUrl.value.trim(),
+    gatewayBaseUrl: el.fieldBaseUrl.value.trim(),
+    managementUrl: el.fieldManagementUrl.value.trim()
+  };
+}
+
+function renderDiagnose(report) {
+  if (!report || !Array.isArray(report.results)) {
+    el.diagnoseReport.hidden = true;
+    return;
+  }
+  el.diagnoseReport.hidden = false;
+  el.diagnoseReport.innerHTML = '';
+
+  const title = document.createElement('div');
+  title.className = 'dr-title';
+  title.textContent = report.ok
+    ? '推理端点可达，可以直接验证并连接。'
+    : `推理端点（LLM）当前不可用 —— Buddy 必须能连上 8800 才能干活。`;
+  el.diagnoseReport.appendChild(title);
+
+  const list = document.createElement('ul');
+  for (const r of report.results) {
+    const li = document.createElement('li');
+    li.dataset.state = r.reason;
+    const key = document.createElement('div');
+    key.className = 'dr-key';
+    key.textContent = r.label;
+    const detail = document.createElement('div');
+    const reason = document.createElement('div');
+    reason.className = 'dr-reason';
+    reason.textContent = `${r.label}：${r.userMessage}${r.value ? '  · ' + r.value : ''}`;
+    detail.appendChild(reason);
+    li.appendChild(key);
+    li.appendChild(detail);
+    list.appendChild(li);
+  }
+  el.diagnoseReport.appendChild(list);
+
+  if (report.blocking && report.blocking.actionHint === 'bootstrap_server') {
+    const hint = document.createElement('div');
+    hint.className = 'dr-summary';
+    hint.textContent = '提示：点上方"生成服务端准备脚本"按钮，复制脚本到 Hermes 主机执行。';
+    el.diagnoseReport.appendChild(hint);
+  } else if (report.blocking && report.blocking.actionHint === 'verify_key') {
+    const hint = document.createElement('div');
+    hint.className = 'dr-summary';
+    hint.textContent = '提示：去服务端跑 `cat /root/.hermes/.api_server_key` 取真实 Key 再回来填。';
+    el.diagnoseReport.appendChild(hint);
+  }
+}
+
+el.btnDiagnose.addEventListener('click', async () => {
+  el.diagnoseReport.hidden = true;
+  setConnectStatus('正在探测 Hermes 三个端点…');
+  try {
+    const report = await api.diagnose(diagnosePayload());
+    renderDiagnose(report);
+    setConnectStatus(report.ok ? '诊断通过，可以进入连接步骤。' : '诊断发现阻塞项，先修服务端再连接。', report.ok ? 'ok' : 'warn');
+  } catch (error) {
+    setConnectStatus(`诊断失败：${error.message}`, 'error');
+  }
+});
+
+let lastBootstrapScript = '';
+let lastBootstrapHost = '';
+
+function hostFromLlmUrl() {
+  // 用 LLM 端点推一个 host 给脚本头部提示（不会真的去连，只是给人看）
+  const raw = el.fieldLlmUrl.value.trim();
+  const m = raw.match(/(?:https?:\/\/)?([^/:]+)/);
+  return (m && m[1]) || '<hermes-host>';
+}
+
+el.btnBootstrap.addEventListener('click', async () => {
+  const llmUrl = el.fieldLlmUrl.value.trim();
+  if (!llmUrl) {
+    setConnectStatus('先填推理端点，我才知道服务端脚本该监听哪个端口。', 'warn');
+    el.fieldLlmUrl.focus();
+    return;
+  }
+  const llmPort = portOf(llmUrl) || 8800;
+  const gatewayPort = el.fieldBaseUrl.value.trim() ? (portOf(el.fieldBaseUrl.value) || 22122) : 0;
+  const managementPort = el.fieldManagementUrl.value.trim() ? (portOf(el.fieldManagementUrl.value) || 8700) : 0;
+  el.bootstrapStatus.textContent = '生成中…';
+  el.bootstrapDialog.hidden = false;
+  try {
+    const result = await api.bootstrapScript({ host: hostFromLlmUrl(), llmPort, gatewayPort, managementPort });
+    lastBootstrapScript = result.script;
+    lastBootstrapHost = hostFromLlmUrl();
+    el.bootstrapScript.textContent = result.script;
+    el.bootstrapStatus.textContent = '脚本就绪。建议 SSH 到 Hermes 主机粘贴执行。';
+  } catch (error) {
+    el.bootstrapScript.textContent = '';
+    el.bootstrapStatus.textContent = `生成失败：${error.message}`;
+  }
+});
+
+function portOf(url) {
+  const m = String(url || '').match(/:(\d{1,5})(?:\/|$)/);
+  return m ? Number(m[1]) : 0;
+}
+
+el.bootstrapCopy.addEventListener('click', async () => {
+  if (!lastBootstrapScript) return;
+  try {
+    await navigator.clipboard.writeText(lastBootstrapScript);
+    el.bootstrapStatus.textContent = '已复制到剪贴板。';
+  } catch (error) {
+    el.bootstrapStatus.textContent = `复制失败：${error.message}`;
+  }
+});
+
+el.bootstrapExport.addEventListener('click', async () => {
+  if (!lastBootstrapScript) return;
+  try {
+    const result = await api.exportBootstrap({ script: lastBootstrapScript, host: lastBootstrapHost });
+    el.bootstrapStatus.textContent = `已导出到：${result.path}`;
+  } catch (error) {
+    el.bootstrapStatus.textContent = `导出失败：${error.message}`;
+  }
+});
+
+el.bootstrapClose.addEventListener('click', () => {
+  el.bootstrapDialog.hidden = true;
+});
+
 // ============================================================ 聊天交互
 
 el.composer.addEventListener('submit', (event) => { event.preventDefault(); sendMessage(); });

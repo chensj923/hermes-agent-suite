@@ -66,6 +66,11 @@ const api = {
   toolchain: () => invoke('buddy:toolchain'),
   installTool: (id) => invoke('buddy:toolchain:install', id),
 
+  // ---- 诊断 + 服务端准备脚本 ----
+  diagnose: (options) => invoke('buddy:diagnose', options || {}),
+  bootstrapScript: (options) => invoke('buddy:bootstrap-script', options || {}),
+  exportBootstrap: (payload) => invoke('buddy:bootstrap-export', payload || {}),
+
   // ---- 其它 ----
   update: () => invoke('buddy:update'),
   openExternal: (url) => invoke('buddy:open-external', url)

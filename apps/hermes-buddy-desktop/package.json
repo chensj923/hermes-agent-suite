@@ -26,6 +26,8 @@
       { "from": "skills", "to": "skills" }
     ],
     "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
     "nsis": {
       "oneClick": false,
       "perMachine": false,

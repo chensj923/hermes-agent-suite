@@ -131,6 +131,20 @@ function registerIpc() {
   handle('buddy:clear-history', () => manager.clearHistory());
   handle('buddy:provisioning-status', () => manager.provisioningStatus());
 
+  // ---- 诊断 + 服务端准备脚本（连接前给用户一个清晰的"哪步没配"清单） ----
+  handle('buddy:diagnose', async (_event, options = {}) => {
+    return diagnose({ llmUrl: options.llmUrl, gatewayBaseUrl: options.gatewayBaseUrl, managementUrl: options.managementUrl });
+  });
+  handle('buddy:bootstrap-script', (_event, options = {}) => {
+    return { script: generateBootstrapScript(options), generatedAt: new Date().toISOString() };
+  });
+  handle('buddy:bootstrap-export', async (_event, { script, host } = {}) => {
+    const safeName = String(host || 'hermes-bootstrap').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 60);
+    const filePath = path.join(app.getPath('downloads'), `${safeName}.sh`);
+    await fs.promises.writeFile(filePath, String(script || ''), { encoding: 'utf8', mode: 0o600 });
+    return { path: filePath };
+  });
+
   // ---- 对话 ----
   handle('buddy:chat', async (event, request) => {
     const requestId = String((request && request.requestId) || `req-${Date.now()}`);
