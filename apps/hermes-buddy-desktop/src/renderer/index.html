@@ -86,6 +86,11 @@
           </fieldset>
           <button class="primary" id="btn-connect" type="submit">验证并配置 Buddy</button>
         </form>
+        <div class="diagnose-actions">
+          <button class="ghost" id="btn-diagnose" type="button">先诊断 Hermes 是否可达</button>
+          <button class="ghost" id="btn-bootstrap" type="button">生成服务端准备脚本</button>
+        </div>
+        <div class="diagnose-report" id="diagnose-report" hidden></div>
         <div class="status-line" id="connect-status" role="status"></div>
         <ul class="checklist" id="connect-steps" hidden>
           <li data-step="llm">验证推理端点</li>

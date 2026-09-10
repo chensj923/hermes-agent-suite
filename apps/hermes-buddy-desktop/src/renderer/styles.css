@@ -511,6 +511,21 @@ form small { display: block; margin-top: 4px; color: #7d8fae; font-size: 11px; }
 .diagnose-report li[data-state="wrong_protocol"] .dr-key::before { content: '✕ '; }
 .diagnose-report .dr-summary { margin-top: 8px; font-size: 11px; color: var(--muted); }
 
+.diagnose-actions {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0 12px 0;
+}
+.diagnose-actions .ghost { flex: 0 0 auto; }
+
+.diagnose-report {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
 .foot {
   padding: 5px 18px;
   font-size: 10px;

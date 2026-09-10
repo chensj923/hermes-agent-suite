@@ -46,6 +46,11 @@ const el = {
   connectSteps: $('connect-steps'),
   toolchainReport: $('toolchain-report'),
 
+  // 诊断 + 服务端脚本
+  btnDiagnose: $('btn-diagnose'),
+  btnBootstrap: $('btn-bootstrap'),
+  diagnoseReport: $('diagnose-report'),
+
   // 聊天页
   chatLog: $('chat-log'),
   composer: $('composer'),
@@ -62,6 +67,14 @@ const el = {
   confirmDetail: $('confirm-detail'),
   confirmApprove: $('btn-confirm-approve'),
   confirmDeny: $('btn-confirm-deny'),
+
+  // 服务端脚本弹窗
+  bootstrapDialog: $('bootstrap-dialog'),
+  bootstrapScript: $('bootstrap-script'),
+  bootstrapCopy: $('btn-bootstrap-copy'),
+  bootstrapExport: $('btn-bootstrap-export'),
+  bootstrapClose: $('btn-bootstrap-close'),
+  bootstrapStatus: $('bootstrap-status'),
 
   // 设置
   settingsTabs: $('settings-tabs'),
