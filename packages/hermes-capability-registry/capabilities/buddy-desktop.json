@@ -1,0 +1,8 @@
+{
+  "id": "buddy-desktop",
+  "displayName": "桌面助手基础能力",
+  "requires": ["chat", "desktop-tools"],
+  "skills": ["hermes-buddy-desktop"],
+  "mcp": [],
+  "deployment": ["windows", "hybrid"]
+}

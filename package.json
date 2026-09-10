@@ -7,6 +7,8 @@
   "scripts": {
     "test": "npm run test --workspaces --if-present",
     "start:buddy": "npm run start --workspace=@hermes/buddy-desktop",
+    "start:buddy:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-buddy.ps1",
+    "smoke:buddy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-buddy.ps1",
     "build:buddy:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-buddy-windows.ps1"
   }
 }

@@ -1,6 +1,10 @@
 {
   "name": "@hermes/provisioning",
   "version": "0.1.0",
+  "description": "Product pairing and deployment manifest contract for Hermes installers",
   "main": "src/index.js",
-  "dependencies": { "@hermes/connection": "*" }
+  "files": ["src"],
+  "scripts": { "test": "node --test" },
+  "dependencies": { "@hermes/connection": "*" },
+  "devDependencies": { "@hermes/capability-registry": "*" }
 }

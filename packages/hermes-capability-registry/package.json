@@ -1,0 +1,8 @@
+{
+  "name": "@hermes/capability-registry",
+  "version": "0.1.0",
+  "description": "Skill/MCP capability manifests and deployment resolution for Hermes products",
+  "main": "src/index.js",
+  "files": ["src", "capabilities"],
+  "scripts": { "test": "node --test" }
+}

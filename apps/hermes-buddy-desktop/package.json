@@ -7,17 +7,33 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test",
+    "smoke": "electron . --smoke-test --no-sandbox --disable-gpu --disable-gpu-sandbox --use-gl=disabled",
     "build:win": "electron-builder --win nsis --x64"
   },
-  "dependencies": { "@hermes/connection": "*", "@hermes/provisioning": "*" },
+  "dependencies": {
+    "@hermes/connection": "*",
+    "@hermes/provisioning": "*",
+    "@hermes/capability-registry": "*"
+  },
   "devDependencies": { "electron": "35.7.5", "electron-builder": "26.15.3" },
   "build": {
     "appId": "com.hermes.buddy",
     "productName": "Hermes Buddy",
     "artifactName": "hermes-suite-windows-x86_64.${ext}",
     "directories": { "output": "dist" },
-    "files": ["src/**/*", "package.json"],
+    "files": ["src/**/*", "package.json", "!test/**", "!dist/**"],
+    "extraResources": [
+      { "from": "skills", "to": "skills" }
+    ],
     "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Hermes Buddy"
+    },
+    "publish": [{ "provider": "github", "owner": "chensj923", "repo": "hermes-agent-suite", "releaseType": "release" }]
   }
 }

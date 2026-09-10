@@ -1,1 +1,148 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Hermes Buddy</title><style>body{font:16px 'Segoe UI','Microsoft YaHei',sans-serif;background:#101827;color:#eef2ff;margin:0}.wrap{max-width:620px;margin:70px auto;padding:36px;background:#1e293b;border-radius:16px}h1{margin-top:0}p,label{color:#cbd5e1}input{box-sizing:border-box;width:100%;margin:6px 0 18px;padding:12px;border:1px solid #475569;border-radius:8px;background:#0f172a;color:white}button{padding:12px 20px;border:0;border-radius:8px;background:#6366f1;color:white;font-weight:600;cursor:pointer}#status{min-height:24px;margin-top:18px;color:#93c5fd}.err{color:#fca5a5!important}</style></head><body><main class="wrap"><h1>Hermes Buddy</h1><p>连接你自己的 Hermes。密钥仅以 Windows 加密凭据形式保存在本机。</p><label>Windows Gateway 地址（246 默认使用 22124）<input id="url" placeholder="http://192.168.0.246:22124"></label><label>部署管理地址（默认同主机 :8700）<input id="managementUrl" placeholder="http://192.168.0.246:8700"></label><label>API Key<input id="key" type="password" autocomplete="off"></label><button id="connect">验证并配置 Buddy</button><div id="status"></div></main><script>const s=document.querySelector('#status');document.querySelector('#connect').onclick=async()=>{s.className='';s.textContent='正在验证 Gateway、创建会话并下发 Buddy 配置…';try{const result=await window.hermesBuddy.connect({baseUrl:url.value,managementUrl:managementUrl.value,apiKey:key.value});s.textContent=`配置完成。会话：${result.session.id||'已创建'}`;key.value=''}catch(e){s.className='err';s.textContent=e.message||String(e)}};window.hermesBuddy.connection().then(x=>{if(x.configured)s.textContent='此设备已配置过 Hermes；可重新连接以更新。'});</script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <!-- 渲染层不发任何网络请求，一切经主进程 IPC，所以 connect-src 直接锁死。 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+  <title>Hermes Buddy</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top-bar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">H</span>
+      <div>
+        <div class="brand-name">Hermes Buddy</div>
+        <div class="brand-sub" id="gateway-label">未连接</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span class="status-dot" id="status-dot" data-state="offline" title="连接状态"></span>
+      <label class="model-picker" for="model-select">模型
+        <select id="model-select" disabled></select>
+      </label>
+      <span class="perm-badge" id="perm-badge" data-level="read-write" title="工具权限档位">读 + 写</span>
+      <button class="ghost" id="btn-reconnect" type="button" hidden>重连</button>
+      <button class="ghost" id="btn-update" type="button">检查更新</button>
+      <button class="ghost" id="btn-settings" type="button">设置</button>
+      <button class="ghost danger" id="btn-disconnect" type="button" hidden>断开</button>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" hidden>
+    <span id="banner-text"></span>
+    <button class="link" id="banner-action" type="button" hidden></button>
+    <button class="link dismiss" id="banner-dismiss" type="button" aria-label="关闭">×</button>
+  </div>
+
+  <main>
+    <!-- 视图 1：连接与配置 -->
+    <section class="view" id="view-connect">
+      <div class="card">
+        <h1>连接你自己的 Hermes</h1>
+        <p class="hint">Buddy 把决策权交给远端 Hermes，把执行权留在本机工作目录。<br>
+          API Key 只以 Windows 加密凭据（DPAPI）保存在本机，不会写入普通配置文件，也不会进入渲染进程。</p>
+        <form id="connect-form" autocomplete="off">
+          <label>Hermes Gateway 地址
+            <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22124" spellcheck="false" required>
+            <small>用于会话登记与部署清单，可不在时也能干活。安装向导默认 22124 或 22122。</small>
+          </label>
+          <div class="row">
+            <label>推理端点（LLM）
+              <input id="field-llmUrl" name="llmUrl" placeholder="留空按同主机 :8800 推导" spellcheck="false">
+              <small>Hermes 模型服务的 OpenAI 兼容端点；为必填。</small>
+            </label>
+            <label>部署管理地址
+              <input id="field-managementUrl" name="managementUrl" placeholder="留空按同主机 :8700 推导" spellcheck="false">
+              <small>用于服务端部署清单；不通也能降级使用。</small>
+            </label>
+          </div>
+          <label>API Key
+            <input id="field-apiKey" name="apiKey" type="password" autocomplete="new-password" required>
+            <small>服务端 ~/.hermes/data/.env 中的 API_SERVER_KEY。</small>
+          </label>
+          <div class="row">
+            <label>Profile
+              <input id="field-profile" name="profile" value="buddy" spellcheck="false">
+            </label>
+            <label>默认模型
+              <input id="field-model" name="model" value="hermes-agent" spellcheck="false">
+            </label>
+          </div>
+          <label>工作目录（Hermes 只能在它之下动手）
+            <div class="workspace-row">
+              <input id="field-workspace" name="workspace" placeholder="D:\\work\\buddy" spellcheck="false" required>
+              <button class="ghost" id="btn-pick-workspace" type="button">浏览…</button>
+              <button class="ghost" id="btn-open-workspace" type="button">打开</button>
+            </div>
+            <small>首次使用会按这个路径建好目录与 .hermes 子目录。</small>
+          </label>
+          <fieldset class="perm-fieldset">
+            <legend>工具权限档位</legend>
+            <label class="perm-option"><input type="radio" name="permission" value="read"><span><strong>只读</strong> · 禁止写文件、改文件、删除文件、执行命令</span></label>
+            <label class="perm-option"><input type="radio" name="permission" value="read-write" checked><span><strong>读 + 写</strong> · 可读写文件、可执行大部分命令，删除与系统级操作需要确认（推荐）</span></label>
+            <label class="perm-option"><input type="radio" name="permission" value="full"><span><strong>完全控制</strong> · 不再拦截任何命令（仅在你信任环境时使用）</span></label>
+          </fieldset>
+          <button class="primary" id="btn-connect" type="submit">验证并配置 Buddy</button>
+        </form>
+        <div class="status-line" id="connect-status" role="status"></div>
+        <ul class="checklist" id="connect-steps" hidden>
+          <li data-step="llm">验证推理端点</li>
+          <li data-step="workspace">初始化工作目录</li>
+          <li data-step="gateway">登记 Gateway 与部署</li>
+          <li data-step="save">保存本机凭据</li>
+        </ul>
+        <details class="report">
+          <summary>本机工具检测</summary>
+          <pre id="toolchain-report" class="report-pre">点击展开进行检测…</pre>
+        </details>
+      </div>
+    </section>
+
+    <!-- 视图 2：对话 -->
+    <section class="view" id="view-chat" hidden>
+      <div class="chat-log" id="chat-log" aria-live="polite"></div>
+      <form class="composer" id="composer">
+        <textarea id="input" rows="2" placeholder="和 Hermes 说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <div class="composer-actions">
+          <span class="workdir-tag" id="workdir-tag" hidden></span>
+          <button class="ghost" id="btn-stop" type="button" hidden>停止</button>
+          <button class="primary" id="btn-send" type="submit">发送</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 视图 3：设置 -->
+    <section class="view" id="view-settings" hidden>
+      <div class="settings">
+        <aside class="settings-tabs" id="settings-tabs">
+          <button data-tab="persona" type="button">角色设定</button>
+          <button data-tab="memory" type="button">记忆</button>
+          <button data-tab="skills" type="button">技能</button>
+          <button data-tab="toolchain" type="button">本机工具</button>
+          <button data-tab="workspace" type="button">工作区</button>
+          <button id="btn-settings-close" type="button" class="ghost">回到对话</button>
+        </aside>
+        <main class="settings-body" id="settings-body"></main>
+      </div>
+    </section>
+  </main>
+
+  <!-- 危险操作确认弹窗 -->
+  <div class="modal" id="confirm-dialog" hidden>
+    <div class="modal-card">
+      <h3 id="confirm-title">需要你确认一个危险操作</h3>
+      <p id="confirm-body"></p>
+      <pre id="confirm-detail"></pre>
+      <div class="modal-actions">
+        <button class="ghost" id="btn-confirm-deny" type="button">拒绝</button>
+        <button class="primary danger" id="btn-confirm-approve" type="button">允许本次</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="foot" id="foot"></footer>
+  <script src="app.js"></script>
+</body>
+</html>
