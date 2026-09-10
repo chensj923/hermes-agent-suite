@@ -154,22 +154,31 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 
 打开 Buddy，看到「连接你自己的 Hermes」表单：
 
-| 字段 | 填什么 | 备注 |
-|------|--------|------|
-| Hermes Gateway 地址 | `http://192.168.0.246:22124` | 安装向导默认端口；不通也能降级干活 |
-| 推理端点（LLM） | 留空按 Gateway 同主机 `:8800` 推导 | 这是 Hermes 模型服务的 OpenAI 兼容端点，**必须能通** |
-| 部署管理地址 | 留空按 `:8700` 推导 | 不通不影响本地工具链路 |
-| API Key | `~/.hermes/data/.env` 中的 `API_SERVER_KEY` | 走 Windows DPAPI 加密保存 |
-| Profile | 默认 `buddy` | Gateway 会话用的名字 |
-| 默认模型 | `hermes-agent` | 留空时是 hermes-agent |
-| 工作目录 | `D:\work\buddy` | 强制绝对路径，首次使用会建好 |
-| 权限档位 | `读 + 写`（推荐） | 控制工具集是否启用危险动作 |
+| 字段 | 必填 | 填什么 | 备注 |
+|------|------|--------|------|
+| 推理端点（LLM） | **是** | `http://192.168.0.246:8800/v1/chat/completions` | Hermes 模型服务的 OpenAI 兼容端点。Buddy 真正在用这个，必须能通。 |
+| Hermes Gateway 地址 | 否 | `http://192.168.0.246:22122` | **Hermes 服务端默认端口是 22122，不是 22124**。用于会话登记与部署清单；留空 Buddy 仍能干活（降级模式）。 |
+| 部署管理地址 | 否 | 留空按 Gateway 同主机 `:8700` 推导 | 不通不影响本地工具链路 |
+| API Key | **是** | `~/.hermes/data/.env` 中的 `API_SERVER_KEY` | 走 Windows DPAPI 加密保存 |
+| Profile | 否 | 默认 `buddy` | Gateway 会话用的名字 |
+| 默认模型 | 否 | `hermes-agent` | 留空时是 hermes-agent |
+| 工作目录 | **是** | `D:\work\buddy` | 强制绝对路径，首次使用会建好 |
+| 权限档位 | 否 | `读 + 写`（推荐） | 控制工具集是否启用危险动作 |
+
+### 8.1 端口约定
+
+- **22122**：Hermes Linux 服务端的 Gateway API 默认端口（`POST /api/sessions`）
+- **8800**：Hermes LLM router（`POST /v1/chat/completions`，OpenAI 兼容 + function calling）
+- **8700**：Hermes 部署管理服务（`/api/provisioning/products`）
+- **22124**：仅 Windows 端 Buddy Gateway 端口（**非 Hermes 默认**，仅当你在 Windows 上跑了 hermes-buddy-gateway 时才用）
+
+> 旧版本文档把 22124 列为默认是错的——它只是 Windows 端 Buddy 自身的 gateway。Hermes Linux 服务端实际是 22122。Buddy 现在会在 Gateway 留空时自动从 LLM 端点推导到 :22122；不通也只是降级，不会阻塞。
 
 点「验证并配置 Buddy」后会发生：
 
 1. 验证 LLM 端点：`POST /v1/chat/completions` 探测；不通就拒绝进入。
 2. 初始化工作目录：建 `.hermes/`、写 AGENTS.md 模板、复制技能到 `.hermes/skills/`。
-3. 登记 Gateway（可选）：健康检查 + 创建会话 + 部署清单；任一失败都降级继续。
+3. 登记 Gateway（可选）：如果用户填了 baseUrl 就做健康检查 + 创建会话 + 部署清单；任一失败或没填都降级继续。
 4. 加密保存凭据。
 
 ## 9. 日常使用 / Day-to-day

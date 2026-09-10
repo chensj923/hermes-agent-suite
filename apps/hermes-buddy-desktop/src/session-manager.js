@@ -142,23 +142,28 @@ class SessionManager {
     let session = null;
     let deployment = null;
     let gatewayWarning = null;
-    if (this.provisioning) {
+    if (this.provisioning && normalized.baseUrl) {
       try {
         const gateway = this.provisioning.createGateway({ baseUrl: normalized.baseUrl, apiKey: normalized.apiKey });
         health = await gateway.health();
         session = await gateway.createSession(normalized.profile);
-        const managementGateway = this.provisioning.createGateway({ baseUrl: normalized.managementUrl, apiKey: normalized.apiKey });
-        deployment = await this.provisioning.provision({
-          gateway: managementGateway,
-          product: this.product,
-          deployment: this.deployment,
-          registry: this.registry
-        });
+        if (normalized.managementUrl) {
+          const managementGateway = this.provisioning.createGateway({ baseUrl: normalized.managementUrl, apiKey: normalized.apiKey });
+          deployment = await this.provisioning.provision({
+            gateway: managementGateway,
+            product: this.product,
+            deployment: this.deployment,
+            registry: this.registry
+          });
+        }
       } catch (error) {
         // Gateway 不通只降级：本机工具链路不依赖它。
         gatewayWarning = describeGatewayError(error);
         this.logger.warn('gateway-unreachable', { baseUrl: normalized.baseUrl, error: error.message });
       }
+    } else if (!normalized.baseUrl) {
+      gatewayWarning = '未配置 Gateway，跳过会话登记与部署清单。';
+      this.logger.info('gateway-skipped', { reason: 'no_base_url' });
     }
 
     const saved = this.store.save(normalized);
@@ -442,6 +447,7 @@ class SessionManager {
   async provisioningStatus() {
     const stored = this.connection || this.store.load();
     if (!stored || !this.provisioning) return { configured: false, reason: 'not_configured' };
+    if (!stored.managementUrl) return { configured: false, reason: 'no_management_url' };
     const gateway = this.provisioning.createGateway({ baseUrl: stored.managementUrl, apiKey: stored.apiKey });
     return this.provisioning.fetchProvisioningStatus(gateway);
   }

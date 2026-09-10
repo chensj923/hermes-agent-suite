@@ -44,17 +44,17 @@
         <p class="hint">Buddy 把决策权交给远端 Hermes，把执行权留在本机工作目录。<br>
           API Key 只以 Windows 加密凭据（DPAPI）保存在本机，不会写入普通配置文件，也不会进入渲染进程。</p>
         <form id="connect-form" autocomplete="off">
-          <label>Hermes Gateway 地址
-            <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22124" spellcheck="false" required>
-            <small>用于会话登记与部署清单，可不在时也能干活。安装向导默认 22124 或 22122。</small>
+          <label>推理端点（LLM，必填）
+            <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8800/v1/chat/completions" spellcheck="false" required>
+            <small>Hermes 模型服务的 OpenAI 兼容端点。Budy 真正在用这个，必须能通。留空会自动用 Gateway 同主机的 :8800 推导。</small>
+          </label>
+          <label>Hermes Gateway 地址（可选）
+            <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22122" spellcheck="false">
+            <small>用于会话登记与部署清单。Hermes 服务端默认端口是 22122（不是 22124）。如果不知道怎么填，可以留空，Buddy 仍能正常工作。</small>
           </label>
           <div class="row">
-            <label>推理端点（LLM）
-              <input id="field-llmUrl" name="llmUrl" placeholder="留空按同主机 :8800 推导" spellcheck="false">
-              <small>Hermes 模型服务的 OpenAI 兼容端点；为必填。</small>
-            </label>
             <label>部署管理地址
-              <input id="field-managementUrl" name="managementUrl" placeholder="留空按同主机 :8700 推导" spellcheck="false">
+              <input id="field-managementUrl" name="managementUrl" placeholder="留空按 Gateway 同主机 :8700 推导" spellcheck="false">
               <small>用于服务端部署清单；不通也能降级使用。</small>
             </label>
           </div>

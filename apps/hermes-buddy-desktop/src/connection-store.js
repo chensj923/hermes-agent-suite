@@ -15,15 +15,16 @@ const PERMISSIONS = ['read', 'read-write', 'full'];
 
 /**
  * 校验并规范化用户在连接页填的内容。纯函数，方便单测覆盖各种脏输入。
- * 管理地址留空时按同主机 :8700 推导，推理端点留空时按同主机 :8800 推导——
- * 用户只需要知道一个 Hermes 地址，其余交给约定。
+ *
+ * 必填：llmUrl（或能由 Gateway 推导）、apiKey、workspace。
+ * Gateway baseUrl 是可选的——本机工具链路不依赖它，留空也能干活；
+ * Hermes 服务端默认端口是 22122。推导关系：
+ *   baseUrl 留空 → 由 llmUrl 同主机 + 端口 22122 推导
+ *   llmUrl 留空 → 由 baseUrl 同主机 + 端口 8800 推导
+ *   managementUrl 留空 → 由 baseUrl 同主机 + 端口 8700 推导
  */
 function normalizeConnectionInput(input) {
   const source = input && typeof input === 'object' ? input : {};
-  const baseUrl = normalizeGatewayUrl(source.baseUrl);
-  const rawManagement = String(source.managementUrl || '').trim();
-  const managementUrl = rawManagement ? normalizeGatewayUrl(rawManagement) : deriveManagementUrl(baseUrl);
-  const llmUrl = deriveLlmEndpoint(baseUrl, source.llmUrl);
   // 粘贴时首尾常带空白，先剪掉；剪完仍有空白说明复制串行了。
   const apiKey = String(source.apiKey || '').trim();
   if (!apiKey) throw new Error('API Key 不能为空');
@@ -35,7 +36,38 @@ function normalizeConnectionInput(input) {
   const workspace = String(source.workspace || workdir || '').trim() || defaultRoot();
   if (!path.isAbsolute(workspace)) throw new Error('工作目录必须是绝对路径');
   const permission = PERMISSIONS.includes(source.permission) ? source.permission : 'read-write';
+
+  // Gateway 可选：先尝试用用户填的，失败/留空就用 llmUrl 推导。
+  let baseUrl = '';
+  const rawBase = String(source.baseUrl || '').trim();
+  if (rawBase) {
+    try { baseUrl = normalizeGatewayUrl(rawBase); } catch (error) {
+      throw new Error(`Gateway 地址无效：${error.message}`);
+    }
+  }
+  // llmUrl 必填（核心决策端点）。这里先解析出来，下面用它推导缺失的 baseUrl。
+  const llmUrl = deriveLlmEndpoint(baseUrl, source.llmUrl);
+  if (!baseUrl) {
+    try { baseUrl = deriveGatewayFromLlm(llmUrl); } catch (_) { baseUrl = ''; }
+  }
+  // managementUrl 留空就由 baseUrl 推导；baseUrl 也没有就空串，主流程会跳过 Gateway。
+  const rawManagement = String(source.managementUrl || '').trim();
+  let managementUrl = '';
+  if (rawManagement) managementUrl = normalizeGatewayUrl(rawManagement);
+  else if (baseUrl) managementUrl = deriveManagementUrl(baseUrl);
+
   return { schemaVersion: SCHEMA_VERSION, baseUrl, managementUrl, llmUrl, apiKey, profile, model, workspace, permission };
+}
+
+/** 当用户没填 Gateway 时，按 LLM 端点同主机 + Hermes 默认 22122 推导。 */
+function deriveGatewayFromLlm(llmUrl) {
+  const url = new URL(/^https?:\/\//i.test(llmUrl) ? llmUrl : `http://${llmUrl}`);
+  if (!['http:', 'https:'].includes(url.protocol)) return '';
+  url.port = '22122';
+  url.pathname = '';
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/$/, '');
 }
 
 /** 渲染进程能看到的视图：只有连接元信息，永远不含 API Key 或其片段。 */
@@ -58,17 +90,21 @@ function publicView(connection) {
 /** 老版本（v1，无 schemaVersion）配置的就地升级，避免用户重新填一遍。 */
 function migrate(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  if (!raw.baseUrl || !raw.apiKey) return null;
+  if (!raw.apiKey) return null;
   if (raw.schemaVersion === SCHEMA_VERSION) return raw;
   // v1/v2 都没有本地工作区与推理端点，补默认值即可，不必让用户重填。
   let llmUrl = raw.llmUrl || '';
+  let baseUrl = raw.baseUrl || '';
   if (!llmUrl) {
-    try { llmUrl = deriveLlmEndpoint(raw.baseUrl); } catch (_) { llmUrl = ''; }
+    try { llmUrl = deriveLlmEndpoint(baseUrl); } catch (_) { llmUrl = ''; }
+  }
+  if (!baseUrl && llmUrl) {
+    try { baseUrl = deriveGatewayFromLlm(llmUrl); } catch (_) { baseUrl = ''; }
   }
   return {
     schemaVersion: SCHEMA_VERSION,
-    baseUrl: raw.baseUrl,
-    managementUrl: raw.managementUrl || deriveManagementUrl(raw.baseUrl),
+    baseUrl,
+    managementUrl: raw.managementUrl || (baseUrl ? deriveManagementUrl(baseUrl) : ''),
     llmUrl,
     apiKey: raw.apiKey,
     profile: raw.profile || DEFAULT_PROFILE,
