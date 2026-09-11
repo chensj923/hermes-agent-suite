@@ -10,27 +10,8 @@ const api = window.buddyApi || window.hermesBuddy;
 const $ = (id) => document.getElementById(id);
 
 const el = {
-  // 顶栏
-  gatewayLabel: $('gateway-label'),
-  statusDot: $('status-dot'),
-  modelSelect: $('model-select'),
-  btnReconnect: $('btn-reconnect'),
-  btnUpdate: $('btn-update'),
-  btnDisconnect: $('btn-disconnect'),
-  btnSettings: $('btn-settings'),
-
-  // 横幅
-  banner: $('banner'),
-  bannerText: $('banner-text'),
-  bannerAction: $('banner-action'),
-  bannerDismiss: $('banner-dismiss'),
-
-  // 视图
+  // 连接页
   viewConnect: $('view-connect'),
-  viewChat: $('view-chat'),
-  viewSettings: $('view-settings'),
-
-  // 连接表单
   connectForm: $('connect-form'),
   fieldHost: $('field-host'),
   fieldBaseUrl: $('field-baseUrl'),
@@ -49,7 +30,23 @@ const el = {
   btnBootstrap: $('btn-bootstrap'),
   diagnoseReport: $('diagnose-report'),
 
-  // 聊天页
+  // 主应用
+  app: $('app'),
+  gatewayLabel: $('gateway-label'),
+
+  // 左侧边栏
+  sidebar: $('sidebar'),
+  sessionList: $('session-list'),
+  btnNewChat: $('btn-new-chat'),
+  btnUpdate: $('btn-update'),
+  btnSettings: $('btn-settings'),
+  btnDisconnect: $('btn-disconnect'),
+
+  // 聊天区
+  chatTitle: $('chat-title'),
+  statusDot: $('status-dot'),
+  modelSelect: $('model-select'),
+  btnReconnect: $('btn-reconnect'),
   chatLog: $('chat-log'),
   composer: $('composer'),
   input: $('input'),
@@ -57,6 +54,19 @@ const el = {
   btnStop: $('btn-stop'),
   workdirTag: $('workdir-tag'),
   permBadge: $('perm-badge'),
+
+  // 右侧上下文面板（集成设置）
+  contextPanel: $('context-panel'),
+  contextTitle: $('context-title'),
+  contextTabs: $('context-tabs'),
+  contextBody: $('context-body'),
+  btnContextClose: $('btn-context-close'),
+
+  // 横幅
+  banner: $('banner'),
+  bannerText: $('banner-text'),
+  bannerAction: $('banner-action'),
+  bannerDismiss: $('banner-dismiss'),
 
   // 权限确认
   confirmDialog: $('confirm-dialog'),
@@ -73,11 +83,6 @@ const el = {
   bootstrapExport: $('btn-bootstrap-export'),
   bootstrapClose: $('btn-bootstrap-close'),
   bootstrapStatus: $('bootstrap-status'),
-
-  // 设置
-  settingsTabs: $('settings-tabs'),
-  settingsBody: $('settings-body'),
-  btnSettingsClose: $('btn-settings-close'),
 
   // 底部
   foot: $('foot')
@@ -118,17 +123,16 @@ function hideBanner() { el.banner.hidden = true; }
 function showView(name) {
   state.currentView = name;
   const isConnect = name === 'connect';
-  const isChat = name === 'chat';
   const isSettings = name === 'settings';
   el.viewConnect.hidden = !isConnect;
-  el.viewChat.hidden = !isChat;
-  el.viewSettings.hidden = !isSettings;
-  el.btnDisconnect.hidden = !isChat;
-  el.btnReconnect.hidden = !isChat;
-  el.btnSettings.hidden = !(isChat || isSettings);
-  el.modelSelect.disabled = !isChat;
-  el.btnSettings.textContent = isSettings ? '回到对话' : '设置';
-  if (isChat) el.input.focus();
+  el.app.hidden = isConnect;
+  el.contextPanel.hidden = !isSettings;
+  el.btnDisconnect.hidden = isConnect;
+  el.btnReconnect.hidden = isConnect;
+  el.btnSettings.classList.toggle('active', isSettings);
+  el.modelSelect.disabled = isConnect;
+  if (isSettings) renderSettings();
+  else if (name === 'chat') el.input.focus();
 }
 
 // ============================================================ 连接流程
@@ -458,9 +462,23 @@ function permLabel(level) {
   })[level] || level;
 }
 
+function renderSessionList() {
+  el.sessionList.innerHTML = '';
+  const item = document.createElement('button');
+  item.className = 'session-item';
+  item.dataset.active = 'true';
+  item.innerHTML = '<div>当前会话</div>';
+  item.addEventListener('click', () => {
+    el.sessionList.querySelectorAll('.session-item').forEach((n) => { n.dataset.active = 'false'; });
+    item.dataset.active = 'true';
+  });
+  el.sessionList.appendChild(item);
+}
+
 async function enterChat(status) {
   applyStatus(status);
   showView('chat');
+  renderSessionList();
   await loadModels(status && status.model);
   const history = await api.history().catch(() => []);
   el.chatLog.textContent = '';
@@ -684,15 +702,26 @@ el.btnDisconnect.addEventListener('click', async () => {
   showView('connect');
 });
 
+el.btnNewChat.addEventListener('click', async () => {
+  try {
+    await api.clearHistory();
+    el.chatLog.textContent = '';
+    showPlaceholder('已开启新会话。Hermes 在远端做决策，工具在本机执行。');
+    el.input.focus();
+  } catch (error) {
+    showBanner('无法清空历史：' + error.message, 'error');
+  }
+});
+
 // ============================================================ 设置面板
 
 el.btnSettings.addEventListener('click', () => {
   if (state.currentView === 'settings') showView('chat');
-  else openSettings();
+  else showView('settings');
 });
-el.btnSettingsClose.addEventListener('click', () => showView('chat'));
+el.btnContextClose.addEventListener('click', () => showView('chat'));
 
-el.settingsTabs.addEventListener('click', (event) => {
+el.contextTabs.addEventListener('click', (event) => {
   const tab = event.target.closest('[data-tab]');
   if (!tab) return;
   state.settingsTab = tab.dataset.tab;
@@ -706,10 +735,18 @@ async function openSettings() {
 
 async function renderSettings() {
   // 高亮当前 tab
-  el.settingsTabs.querySelectorAll('[data-tab]').forEach((node) => {
+  el.contextTabs.querySelectorAll('[data-tab]').forEach((node) => {
     node.dataset.active = node.dataset.tab === state.settingsTab ? 'true' : 'false';
   });
-  el.settingsBody.textContent = '加载中…';
+  const titles = {
+    persona: '角色设定',
+    memory: '记忆',
+    skills: '技能',
+    toolchain: '本机工具',
+    workspace: '工作区'
+  };
+  el.contextTitle.textContent = titles[state.settingsTab] || '设置';
+  el.contextBody.textContent = '加载中…';
   try {
     if (state.settingsTab === 'persona') await renderPersonaTab();
     else if (state.settingsTab === 'memory') await renderMemoryTab();
@@ -717,14 +754,14 @@ async function renderSettings() {
     else if (state.settingsTab === 'toolchain') await renderToolchainTab();
     else if (state.settingsTab === 'workspace') await renderWorkspaceTab();
   } catch (error) {
-    el.settingsBody.textContent = `加载失败：${error.message}`;
+    el.contextBody.textContent = `加载失败：${error.message}`;
   }
 }
 
 async function renderPersonaTab() {
   const result = await api.persona();
   const text = (result && result.persona) || '';
-  el.settingsBody.innerHTML = `
+  el.contextBody.innerHTML = `
     <h2>角色设定（System Prompt 开头）</h2>
     <p class="hint">告诉 Hermes 怎么称呼你、希望它用哪种语气、是否要在每轮回答前先复述目标。这是 Hermes Buddy 的核心"性格"文件。</p>
     <textarea id="persona-text" rows="14"></textarea>
@@ -752,7 +789,7 @@ async function renderMemoryTab() {
     api.memory('global').catch(() => ({ content: '' })),
     api.memory('project').catch(() => ({ content: '' }))
   ]);
-  el.settingsBody.innerHTML = `
+  el.contextBody.innerHTML = `
     <h2>记忆</h2>
     <p class="hint">Buddy 会自动把每天的工作摘要写进日志。这里集中管理"长期记忆"和"当前项目记忆"。</p>
     <section>
@@ -796,7 +833,7 @@ async function renderMemoryTab() {
 async function renderSkillsTab() {
   const result = await api.skills();
   const skills = (result && result.skills) || [];
-  el.settingsBody.innerHTML = `
+  el.contextBody.innerHTML = `
     <h2>技能（Skills）</h2>
     <p class="hint">技能是 Markdown 写成的"操作手册"，会作为上下文拼进系统提示词。Buddy 自带 windows-shell / file-editing / git-workflow 三个基础技能，你也可以写自己的。</p>
     <ul class="skill-list" id="skill-list"></ul>
@@ -872,7 +909,7 @@ async function renderSkillsTab() {
 async function renderToolchainTab() {
   const result = await api.toolchain();
   const tools = (result && result.tools) || [];
-  el.settingsBody.innerHTML = `
+  el.contextBody.innerHTML = `
     <h2>本机工具</h2>
     <p class="hint">Buddy 完全靠这些工具干活：缺哪个就装哪个；带"一键安装"的会用 PowerShell 包管理器装到系统里。</p>
     <div id="toolchain-list"></div>
@@ -916,7 +953,7 @@ async function renderToolchainTab() {
 
 async function renderWorkspaceTab() {
   const ws = await api.workspace();
-  el.settingsBody.innerHTML = `
+  el.contextBody.innerHTML = `
     <h2>工作区</h2>
     <p class="hint">所有工具调用都限制在这个目录之下。Hermes 看不到工作区外的文件，也执行不了工作区外的命令。</p>
     <div class="kv">
@@ -931,9 +968,9 @@ async function renderWorkspaceTab() {
     <h3>目录摘要</h3>
     <pre class="tree" id="tree"></pre>
   `;
-  el.settingsBody.querySelectorAll('.v')[0].textContent = ws.root || '未设置';
-  el.settingsBody.querySelectorAll('.v')[1].textContent = ws.exists ? '是' : '否（首次使用会创建）';
-  el.settingsBody.querySelectorAll('.v')[2].textContent = ws.hasAgents ? ws.agentsFile : '未生成';
+  el.contextBody.querySelectorAll('.v')[0].textContent = ws.root || '未设置';
+  el.contextBody.querySelectorAll('.v')[1].textContent = ws.exists ? '是' : '否（首次使用会创建）';
+  el.contextBody.querySelectorAll('.v')[2].textContent = ws.hasAgents ? ws.agentsFile : '未生成';
   $('tree').textContent = ws.tree || '（空目录）';
   $('change-workspace').addEventListener('click', async () => {
     try {

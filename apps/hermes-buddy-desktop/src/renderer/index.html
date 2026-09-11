@@ -9,113 +9,127 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="top-bar">
-    <div class="brand">
-      <span class="logo" aria-hidden="true">H</span>
-      <div>
-        <div class="brand-name">Hermes Buddy</div>
-        <div class="brand-sub" id="gateway-label">未连接</div>
-      </div>
-    </div>
-    <div class="top-actions">
-      <span class="status-dot" id="status-dot" data-state="offline" title="连接状态"></span>
-      <label class="model-picker" for="model-select">模型
-        <select id="model-select" disabled></select>
-      </label>
-      <span class="perm-badge" id="perm-badge" data-level="read-write" title="工具权限档位">读 + 写</span>
-      <button class="ghost" id="btn-reconnect" type="button" hidden>重连</button>
-      <button class="ghost" id="btn-update" type="button">检查更新</button>
-      <button class="ghost" id="btn-settings" type="button">设置</button>
-      <button class="ghost danger" id="btn-disconnect" type="button" hidden>断开</button>
-    </div>
-  </header>
-
-  <div class="banner" id="banner" hidden>
-    <span id="banner-text"></span>
-    <button class="link" id="banner-action" type="button" hidden></button>
-    <button class="link dismiss" id="banner-dismiss" type="button" aria-label="关闭">×</button>
-  </div>
-
-  <main>
-    <!-- 视图 1：连接与配置（极简 WorkBuddy 风格） -->
-    <section class="view" id="view-connect">
-      <div class="connect-card">
-        <div class="connect-brand">
-          <span class="logo" aria-hidden="true">H</span>
-          <div>
-            <div class="brand-name">连接 Hermes</div>
-            <div class="brand-sub">输入主机地址和 API Key，让 Hermes 开始控制本机</div>
-          </div>
+  <!-- 视图 1：连接配置（WorkBuddy 风格，居中卡片） -->
+  <section class="connect-overlay" id="view-connect">
+    <div class="connect-card">
+      <div class="connect-brand">
+        <span class="logo" aria-hidden="true">H</span>
+        <div>
+          <div class="brand-name">连接 Hermes</div>
+          <div class="brand-sub">输入主机地址和 API Key，让 Hermes 开始控制本机</div>
         </div>
+      </div>
 
-        <form id="connect-form" autocomplete="off">
-          <label class="connect-field">
-            <span>Hermes 主机</span>
-            <input id="field-host" name="host" placeholder="192.168.0.246" spellcheck="false" required>
-            <small>支持 IP、域名，或带端口的地址。会自动推导 LLM :8800、Gateway :22122、Management :8700。</small>
-          </label>
+      <form id="connect-form" autocomplete="off">
+        <label class="connect-field">
+          <span>Hermes 主机</span>
+          <input id="field-host" name="host" placeholder="192.168.0.246" spellcheck="false" required>
+          <small>支持 IP、域名，或带端口的地址。会自动推导 LLM :8800、Gateway :22122、Management :8700。</small>
+        </label>
 
-          <label class="connect-field">
-            <span>API Key</span>
-            <input id="field-apiKey" name="apiKey" type="password" autocomplete="new-password" required>
-            <small>服务端 ~/.hermes/.api_server_key 或 data/.env 中的 API_SERVER_KEY。</small>
-          </label>
+        <label class="connect-field">
+          <span>API Key</span>
+          <input id="field-apiKey" name="apiKey" type="password" autocomplete="new-password" required>
+          <small>服务端 ~/.hermes/.api_server_key 或 data/.env 中的 API_SERVER_KEY。</small>
+        </label>
 
-          <details class="advanced">
-            <summary>高级设置</summary>
-            <div class="advanced-body">
-              <label class="connect-field">
-                <span>推理端点（LLM）</span>
-                <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8800/v1/chat/completions" spellcheck="false">
+        <details class="advanced">
+          <summary>高级设置</summary>
+          <div class="advanced-body">
+            <label class="connect-field">
+              <span>推理端点（LLM）</span>
+              <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8800/v1/chat/completions" spellcheck="false">
+            </label>
+            <label class="connect-field">
+              <span>Gateway 地址</span>
+              <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22122" spellcheck="false">
+            </label>
+            <label class="connect-field">
+              <span>部署管理地址</span>
+              <input id="field-managementUrl" name="managementUrl" placeholder="http://192.168.0.246:8700" spellcheck="false">
+            </label>
+            <div class="row">
+              <label class="connect-field">Profile
+                <input id="field-profile" name="profile" value="buddy" spellcheck="false">
               </label>
-              <label class="connect-field">
-                <span>Gateway 地址</span>
-                <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22122" spellcheck="false">
+              <label class="connect-field">默认模型
+                <input id="field-model" name="model" value="hermes-agent" spellcheck="false">
               </label>
-              <label class="connect-field">
-                <span>部署管理地址</span>
-                <input id="field-managementUrl" name="managementUrl" placeholder="http://192.168.0.246:8700" spellcheck="false">
-              </label>
-              <div class="row">
-                <label class="connect-field">Profile
-                  <input id="field-profile" name="profile" value="buddy" spellcheck="false">
-                </label>
-                <label class="connect-field">默认模型
-                  <input id="field-model" name="model" value="hermes-agent" spellcheck="false">
-                </label>
-              </div>
-              <label class="connect-field">
-                <span>工作目录</span>
-                <div class="workspace-row">
-                  <input id="field-workspace" name="workspace" placeholder="D:\\work\\buddy" spellcheck="false">
-                  <button class="ghost" id="btn-pick-workspace" type="button">浏览…</button>
-                </div>
-              </label>
-              <fieldset class="perm-fieldset">
-                <legend>工具权限档位</legend>
-                <label class="perm-option"><input type="radio" name="permission" value="read"><span><strong>只读</strong> · 禁止写文件、改文件、删除文件、执行命令</span></label>
-                <label class="perm-option"><input type="radio" name="permission" value="read-write" checked><span><strong>读 + 写</strong> · 可读写文件、可执行大部分命令，删除与系统级操作需要确认（推荐）</span></label>
-                <label class="perm-option"><input type="radio" name="permission" value="full"><span><strong>完全控制</strong> · 不再拦截任何命令（仅在你信任环境时使用）</span></label>
-              </fieldset>
             </div>
-          </details>
+            <label class="connect-field">
+              <span>工作目录</span>
+              <div class="workspace-row">
+                <input id="field-workspace" name="workspace" placeholder="D:\\work\\buddy" spellcheck="false">
+                <button class="ghost" id="btn-pick-workspace" type="button">浏览…</button>
+              </div>
+            </label>
+            <fieldset class="perm-fieldset">
+              <legend>工具权限档位</legend>
+              <label class="perm-option"><input type="radio" name="permission" value="read"><span><strong>只读</strong> · 禁止写文件、改文件、删除文件、执行命令</span></label>
+              <label class="perm-option"><input type="radio" name="permission" value="read-write" checked><span><strong>读 + 写</strong> · 可读写文件、可执行大部分命令，删除与系统级操作需要确认（推荐）</span></label>
+              <label class="perm-option"><input type="radio" name="permission" value="full"><span><strong>完全控制</strong> · 不再拦截任何命令（仅在你信任环境时使用）</span></label>
+            </fieldset>
+          </div>
+        </details>
 
-          <button class="primary connect-submit" id="btn-connect" type="submit">连接</button>
-        </form>
+        <button class="primary connect-submit" id="btn-connect" type="submit">连接</button>
+      </form>
 
-        <div class="connect-actions">
-          <button class="ghost" id="btn-diagnose" type="button">探测</button>
-          <button class="ghost" id="btn-bootstrap" type="button">生成服务端准备脚本</button>
-        </div>
-
-        <div class="connect-status-line" id="connect-status" role="status"></div>
-        <div class="diagnose-report" id="diagnose-report" hidden></div>
+      <div class="connect-actions">
+        <button class="ghost" id="btn-diagnose" type="button">探测</button>
+        <button class="ghost" id="btn-bootstrap" type="button">生成服务端准备脚本</button>
       </div>
-    </section>
 
-    <!-- 视图 2：对话 -->
-    <section class="view" id="view-chat" hidden>
+      <div class="connect-status-line" id="connect-status" role="status"></div>
+      <div class="diagnose-report" id="diagnose-report" hidden></div>
+    </div>
+  </section>
+
+  <!-- 视图 2：主界面（WorkBuddy 风格：左会话/中聊天/右上下文） -->
+  <div class="app" id="app" hidden>
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <span class="logo" aria-hidden="true">H</span>
+        <div>
+          <div class="brand-name">Hermes Buddy</div>
+          <div class="brand-sub" id="gateway-label">未连接</div>
+        </div>
+      </div>
+
+      <button class="primary new-chat" id="btn-new-chat" type="button">+ 新对话</button>
+
+      <div class="session-list" id="session-list">
+        <div class="session-empty">暂无历史会话</div>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="ghost" id="btn-update" type="button">检查更新</button>
+        <button class="ghost" id="btn-settings" type="button">设置</button>
+        <button class="ghost danger" id="btn-disconnect" type="button" hidden>断开连接</button>
+      </div>
+    </aside>
+
+    <main class="chat-area">
+      <header class="chat-header">
+        <div class="chat-title" id="chat-title">当前会话</div>
+        <div class="chat-meta">
+          <span class="status-dot" id="status-dot" data-state="offline" title="连接状态"></span>
+          <span class="perm-badge" id="perm-badge" data-level="read-write" title="工具权限档位">读 + 写</span>
+          <label class="model-picker" for="model-select">模型
+            <select id="model-select" disabled></select>
+          </label>
+          <button class="ghost" id="btn-reconnect" type="button" hidden>重连</button>
+        </div>
+      </header>
+
+      <div class="banner" id="banner" hidden>
+        <span id="banner-text"></span>
+        <button class="link" id="banner-action" type="button" hidden></button>
+        <button class="link dismiss" id="banner-dismiss" type="button" aria-label="关闭">×</button>
+      </div>
+
       <div class="chat-log" id="chat-log" aria-live="polite"></div>
+
       <form class="composer" id="composer">
         <textarea id="input" rows="2" placeholder="和 Hermes 说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
         <div class="composer-actions">
@@ -124,23 +138,23 @@
           <button class="primary" id="btn-send" type="submit">发送</button>
         </div>
       </form>
-    </section>
+    </main>
 
-    <!-- 视图 3：设置 -->
-    <section class="view" id="view-settings" hidden>
-      <div class="settings">
-        <aside class="settings-tabs" id="settings-tabs">
-          <button data-tab="persona" type="button">角色设定</button>
-          <button data-tab="memory" type="button">记忆</button>
-          <button data-tab="skills" type="button">技能</button>
-          <button data-tab="toolchain" type="button">本机工具</button>
-          <button data-tab="workspace" type="button">工作区</button>
-          <button id="btn-settings-close" type="button" class="ghost">回到对话</button>
-        </aside>
-        <main class="settings-body" id="settings-body"></main>
+    <aside class="context-panel" id="context-panel" hidden>
+      <div class="context-header">
+        <div class="context-title" id="context-title">设置</div>
+        <button class="link dismiss" id="btn-context-close" type="button" aria-label="关闭">×</button>
       </div>
-    </section>
-  </main>
+      <div class="context-tabs" id="context-tabs">
+        <button data-tab="persona" type="button">角色设定</button>
+        <button data-tab="memory" type="button">记忆</button>
+        <button data-tab="skills" type="button">技能</button>
+        <button data-tab="toolchain" type="button">本机工具</button>
+        <button data-tab="workspace" type="button">工作区</button>
+      </div>
+      <div class="context-body" id="context-body"></div>
+    </aside>
+  </div>
 
   <!-- 危险操作确认弹窗 -->
   <div class="modal" id="confirm-dialog" hidden>
