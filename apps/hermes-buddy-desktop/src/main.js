@@ -10,6 +10,8 @@ const { ConnectionStore } = require('./connection-store');
 const { SessionManager } = require('./session-manager');
 const { checkForUpdates } = require('./update-checker');
 const { install: installTool } = require('./toolchain');
+const { diagnose } = require('./diagnostics');
+const { generateBootstrapScript } = require('./server-bootstrap');
 
 // 打包冒烟：启动 → 加载完成 → 退出，用于 CI 校验主进程与渲染层能起来。
 const SMOKE_TEST = process.argv.includes('--smoke-test');
