@@ -453,7 +453,12 @@ function applyStatus(status) {
     if (status.connected) {
       label = `${target} · ${profile}`;
     } else {
-      label = `${target} · LLM已连 / Gateway未就绪`;
+      // 有诊断信息就展示，没有就只说 Gateway 未就绪
+      if (status.gatewayError && status.gatewayError.message) {
+        label = `${target} · LLM已连 / Gateway诊断：${status.gatewayError.message}`;
+      } else {
+        label = `${target} · LLM已连 / Gateway未就绪`;
+      }
     }
   } else if (status.configured) {
     label = `${target}（未就绪）`;
@@ -764,7 +769,8 @@ async function renderSettings() {
     memory: '记忆',
     skills: '技能',
     toolchain: '本机工具',
-    workspace: '工作区'
+    workspace: '工作区',
+    'gateway-diag': 'Gateway 诊断'
   };
   el.contextTitle.textContent = titles[state.settingsTab] || '设置';
   el.contextBody.textContent = '加载中…';
@@ -774,6 +780,7 @@ async function renderSettings() {
     else if (state.settingsTab === 'skills') await renderSkillsTab();
     else if (state.settingsTab === 'toolchain') await renderToolchainTab();
     else if (state.settingsTab === 'workspace') await renderWorkspaceTab();
+    else if (state.settingsTab === 'gateway-diag') await renderGatewayDiagTab();
   } catch (error) {
     el.contextBody.textContent = `加载失败：${error.message}`;
   }
@@ -1024,6 +1031,72 @@ el.btnUpdate.addEventListener('click', async () => {
   showBanner(`发现新版本 ${result.latest}（当前 ${result.current}）`, 'info', url ? { label: '打开下载页', url } : null);
 });
 
+async function renderGatewayDiagTab() {
+  const status = await api.status().catch(() => ({}));
+  const gwError = status.gatewayError || null;
+  el.contextBody.innerHTML = `
+    <h2>Gateway 诊断</h2>
+    <p class="hint">Gateway 负责会话登记与部署清单，不影响聊天与本机工具。如果 Key 不对或端口不通，这里会显示具体原因。</p>
+    <div class="kv" id="gw-diag-kv">
+      <div class="k">状态</div><div class="v" id="gw-diag-status"></div>
+      <div class="k">错误码</div><div class="v" id="gw-diag-code"></div>
+      <div class="k">诊断信息</div><div class="v" id="gw-diag-msg"></div>
+      <div class="k">LLM 端点</div><div class="v" id="gw-diag-llm"></div>
+      <div class="k">Gateway 地址</div><div class="v" id="gw-diag-gw"></div>
+    </div>
+    <div class="settings-actions" id="gw-diag-actions" hidden>
+      <button class="ghost" id="gw-diag-copy-cmd">复制 Key 确认命令</button>
+      <button class="ghost" id="gw-diag-retry">重试连接 Gateway</button>
+    </div>
+    <div class="settings-status" id="gw-diag-status" role="status"></div>
+  `;
+  $('gw-diag-status').textContent = gwError ? '异常' : '未配置或从未失败';
+  $('gw-diag-status').dataset.tone = gwError ? 'error' : 'ok';
+  $('gw-diag-code').textContent = gwError ? gwError.code : (status.configured ? '无' : '未配置');
+  $('gw-diag-msg').textContent = gwError ? gwError.message : '当前无错误信息';
+  $('gw-diag-llm').textContent = status.llmUrl || '未配置';
+  $('gw-diag-gw').textContent = status.baseUrl || '未配置';
+  
+  if (gwError) $('gw-diag-actions').hidden = false;
+  
+  // 复制 Key 确认命令
+  $('gw-diag-copy-cmd').addEventListener('click', async () => {
+    const cmd = `cat /root/.hermes/.api_server_key 2>/dev/null || grep API_SERVER_KEY /root/.hermes/data/.env 2>/dev/null || echo "请在 ~/.hermes/ 目录下查找"`;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      $('gw-diag-status').textContent = '已复制到剪贴板';
+      $('gw-diag-status').dataset.tone = 'ok';
+    } catch (e) {
+      $('gw-diag-status').textContent = `复制失败：${e.message}`;
+      $('gw-diag-status').dataset.tone = 'error';
+    }
+  });
+  
+  // 重试连接 Gateway
+  $('gw-diag-retry').addEventListener('click', async () => {
+    $('gw-diag-status').textContent = '正在重试…';
+    $('gw-diag-status').dataset.tone = 'info';
+    try {
+      // 重新触发一次 Gateway 连接尝试（用已保存的凭据）
+      const result = await api.resume().catch(() => ({ ok: false, message: '重试失败' }));
+      if (result.ok && result.status && result.status.connected) {
+        $('gw-diag-status').textContent = 'Gateway 连接成功！';
+        $('gw-diag-status').dataset.tone = 'ok';
+        applyStatus(result.status);
+      } else if (result.gatewayWarning) {
+        $('gw-diag-status').textContent = `重试失败：${result.gatewayWarning}`;
+        $('gw-diag-status').dataset.tone = 'error';
+      } else {
+        $('gw-diag-status').textContent = `重试失败：Gateway 仍不可达。请确认服务端 Key 和端口。`;
+        $('gw-diag-status').dataset.tone = 'error';
+      }
+    } catch (e) {
+      $('gw-diag-status').textContent = `重试异常：${e.message}`;
+      $('gw-diag-status').dataset.tone = 'error';
+    }
+  });
+}
+
 el.modelSelect.addEventListener('change', () => {
   // 模型切换后下一次 send 会带入；不立即生效是符合预期的。
 });
@@ -1062,6 +1135,10 @@ el.modelSelect.addEventListener('change', () => {
   if (resumed.ok) {
     status = await api.status().catch(() => status);
     await enterChat(status);
+    // resume 后如果 Gateway 也降级，在聊天区留一条诊断提示（不含敏感信息）
+    if (resumed.gatewayWarning) {
+      renderNotice({ message: `Gateway 未就绪（${resumed.gatewayWarning}），聊天和本机工具不受影响。` });
+    }
   } else {
     showView('connect');
     setConnectStatus(`已有 Hermes 配置，但会话没能恢复：${resumed.message || '未知原因'}`, 'error');

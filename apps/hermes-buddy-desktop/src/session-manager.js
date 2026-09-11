@@ -52,6 +52,7 @@ class SessionManager {
     this.session = null;
     this.messages = [];       // OpenAI 格式历史（不含 system）
     this.controllers = new Map();
+    this.lastGatewayError = null; // { code, message, at }，仅用于 UI 诊断，不含密钥
 
     this.workspace = null;
     this.tools = null;
@@ -74,7 +75,11 @@ class SessionManager {
       workspaceExists: this.workspace ? this.workspace.exists() : null,
       encryptionAvailable: this.store.isEncryptionAvailable(),
       busy: this.controllers.size > 0,
-      permission: this.tools ? this.tools.permission : (this.connection && this.connection.permission) || 'read-write'
+      permission: this.tools ? this.tools.permission : (this.connection && this.connection.permission) || 'read-write',
+      gatewayError: this.lastGatewayError ? {
+        code: this.lastGatewayError.code || this.lastGatewayError.status,
+        message: describeGatewayError(this.lastGatewayError)
+      } : null
     };
   }
 
@@ -159,6 +164,7 @@ class SessionManager {
       } catch (error) {
         // Gateway 不通只降级：本机工具链路不依赖它。
         gatewayWarning = describeGatewayError(error);
+        this.lastGatewayError = error;
         this.logger.warn('gateway-unreachable', { baseUrl: normalized.baseUrl, error: error.message });
       }
     } else if (!normalized.baseUrl) {
@@ -215,6 +221,7 @@ class SessionManager {
           session = await gw.createSession(stored.profile);
           gateway = gw;
         } catch (error) {
+          this.lastGatewayError = error;
           this.logger.warn('resume-gateway-degraded', { baseUrl: stored.baseUrl, error: error.message });
         }
       }
@@ -225,7 +232,15 @@ class SessionManager {
       this.session = session;
       this.loop = new AgentLoop({ brain, tools: this.tools, workspace: this.workspace, logger: this.logger });
       this.logger.info('resumed', { llmUrl: stored.llmUrl, gateway: session ? 'ok' : 'degraded' });
-      return { ok: true, connection: publicView(stored), workspace: this.describeWorkspace() };
+      let gatewayWarning = null;
+      if (!session && stored.baseUrl) {
+        // resume 时只记录 warn，不返回 gatewayWarning——因为用户看不到。
+        // 这里从 this.lastGatewayError 取（如果有的话），否则给一个通用提示。
+        gatewayWarning = this.lastGatewayError
+          ? describeGatewayError(this.lastGatewayError)
+          : 'Gateway 未连通（重启时鉴权失败或不可达），聊天和本机工具不受影响。';
+      }
+      return { ok: true, connection: publicView(stored), workspace: this.describeWorkspace(), gatewayWarning };
     } catch (error) {
       this.logger.warn('resume-failed', { error: error.message, code: error.code });
       return { ok: false, reason: error.code || 'error', message: describeBrainError(error) };

@@ -5,6 +5,7 @@ const fs = require('fs');
 const { app, BrowserWindow, ipcMain, safeStorage, shell, dialog } = require('electron');
 const provisioning = require('@hermes/provisioning');
 const registry = require('@hermes/capability-registry');
+const { describeGatewayError } = require('@hermes/connection');
 const { createLogger } = require('./logger');
 const { ConnectionStore } = require('./connection-store');
 const { SessionManager } = require('./session-manager');
@@ -125,7 +126,7 @@ function registerIpc() {
   });
   handle('buddy:resume', async () => {
     const result = await manager.resume();
-    return { ...result, status: manager.status() };
+    return { ...result, status: manager.status(), gatewayWarning: manager.lastGatewayError ? describeGatewayError(manager.lastGatewayError) : null };
   });
   handle('buddy:disconnect', () => manager.disconnect());
   handle('buddy:models', () => manager.models());
