@@ -203,10 +203,28 @@ class SessionManager {
         fetchImpl: this.fetchImpl
       });
       await brain.assertReachable();
+
+      // 恢复时也尝试连 Gateway（和 connect 一样降级），这样重启后会话登记与部署清单能恢复，
+      // 不再每次重启都掉 Gateway。Key 不对或服务端没对外暴露就降级，不阻塞 LLM 链路。
+      let session = null;
+      let gateway = null;
+      if (this.provisioning && stored.baseUrl) {
+        try {
+          const gw = this.provisioning.createGateway({ baseUrl: stored.baseUrl, apiKey: stored.apiKey });
+          await gw.health();
+          session = await gw.createSession(stored.profile);
+          gateway = gw;
+        } catch (error) {
+          this.logger.warn('resume-gateway-degraded', { baseUrl: stored.baseUrl, error: error.message });
+        }
+      }
+
       this.connection = stored;
       this.brain = brain;
+      this.gateway = gateway;
+      this.session = session;
       this.loop = new AgentLoop({ brain, tools: this.tools, workspace: this.workspace, logger: this.logger });
-      this.logger.info('resumed', { llmUrl: stored.llmUrl });
+      this.logger.info('resumed', { llmUrl: stored.llmUrl, gateway: session ? 'ok' : 'degraded' });
       return { ok: true, connection: publicView(stored), workspace: this.describeWorkspace() };
     } catch (error) {
       this.logger.warn('resume-failed', { error: error.message, code: error.code });

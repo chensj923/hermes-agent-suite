@@ -447,9 +447,18 @@ function applyStatus(status) {
   // ready = 本机工作区 + LLM 推理端点都已就绪，这才是用户能聊天的真实状态；
   // connected 仅表示 Gateway 会话已登记，降级场景下可能为 false。
   const online = status.ready || status.connected;
-  el.gatewayLabel.textContent = online
-    ? `${target} · ${status.profile || 'buddy'}`
-    : (status.configured ? `${target}（未就绪）` : '未连接');
+  let label = '未连接';
+  if (online) {
+    const profile = status.profile || 'buddy';
+    if (status.connected) {
+      label = `${target} · ${profile}`;
+    } else {
+      label = `${target} · LLM已连 / Gateway未就绪`;
+    }
+  } else if (status.configured) {
+    label = `${target}（未就绪）`;
+  }
+  el.gatewayLabel.textContent = label;
   el.workdirTag.hidden = !status.workspace;
   el.workdirTag.textContent = status.workspace ? `工作目录：${status.workspace}` : '';
   el.permBadge.dataset.level = status.permission || 'read-write';
@@ -520,10 +529,19 @@ el.connectForm.addEventListener('submit', async (event) => {
   setConnectStatus('正在连接 Hermes…');
   try {
     const result = await api.connect(payload);
-    if (result.gatewayWarning) showBanner(`Gateway 未连通：${result.gatewayWarning}。LLM 已连接，不影响聊天和本机工具。`, 'warn');
     setConnectStatus('连接成功，正在进入主界面…', 'ok');
     el.fieldApiKey.value = '';
-    await enterChat({ ...(result.connection || {}), connected: true, workspace: payload.workspace });
+    const status = {
+      ...(result.connection || {}),
+      ready: true,
+      connected: Boolean(result.session),
+      workspace: payload.workspace
+    };
+    await enterChat(status);
+    // Gateway 未连通只降级，不再弹报错横幅；在主界面留个一次性系统提示即可。
+    if (result.gatewayWarning) {
+      renderNotice({ message: `Gateway 未就绪（${result.gatewayWarning}），聊天和本机工具不受影响。` });
+    }
   } catch (error) {
     setConnectStatus(error.message || '连接失败', 'error');
     setStatusDot('error');
