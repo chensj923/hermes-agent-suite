@@ -26,6 +26,7 @@ html, body {
 
 body {
   display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--text);
   font: 14px/1.55 'Segoe UI', 'Microsoft YaHei', sans-serif;
@@ -226,9 +227,8 @@ button:disabled { opacity: .5; cursor: default; }
 /* ---------- 主应用布局 ---------- */
 .app {
   flex: 1;
-  display: flex;
   min-height: 0;
-  height: 100%;
+  display: flex;
 }
 .app[hidden] { display: none; }
 
@@ -696,15 +696,11 @@ button:disabled { opacity: .5; cursor: default; }
 
 /* ---------- 底部 ---------- */
 .foot {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  flex-shrink: 0;
   padding: 4px 14px;
   font-size: 10px;
   color: #64748b;
   background: rgba(15, 23, 42, .9);
   border-top: 1px solid var(--border);
   z-index: 5;
-  pointer-events: none;
 }

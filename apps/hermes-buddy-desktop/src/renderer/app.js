@@ -520,7 +520,7 @@ el.connectForm.addEventListener('submit', async (event) => {
   setConnectStatus('正在连接 Hermes…');
   try {
     const result = await api.connect(payload);
-    if (result.gatewayWarning) showBanner(`Gateway 未连通（${result.gatewayWarning}），不影响本机工具链路，可在「设置」中重试。`, 'warn');
+    if (result.gatewayWarning) showBanner(`Gateway 未连通：${result.gatewayWarning}。LLM 已连接，不影响聊天和本机工具。`, 'warn');
     setConnectStatus('连接成功，正在进入主界面…', 'ok');
     el.fieldApiKey.value = '';
     await enterChat({ ...(result.connection || {}), connected: true, workspace: payload.workspace });
