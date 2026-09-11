@@ -19,24 +19,38 @@ function runQuiet(command, args, timeout = 8000) {
   }
 }
 
+function findPath(tool) {
+  if (process.platform === 'win32') {
+    const out = runQuiet('where', [tool.command]);
+    return out === null ? null : firstLine(out);
+  }
+  return runQuiet('command', ['-v', tool.command]);
+}
+
 function isAvailable(tool) {
-  if (process.platform === 'win32') return runQuiet('where', [tool.command]) !== null;
-  return runQuiet('command', ['-v', tool.command]) !== null;
+  return findPath(tool) !== null;
 }
 
 /** 探测工具链。返回给 UI 直接渲染，缺失的给出安装命令。 */
 function detectTooling() {
   return TOOLCHAIN.map((tool) => {
-    const available = isAvailable(tool);
+    const path = findPath(tool);
+    const available = path !== null;
     const version = available && tool.versionArgs ? firstLine(runQuiet(tool.command, tool.versionArgs)) : null;
+    const installCommand = available || !tool.wingetId ? null : buildInstallCommand(tool);
     return {
       id: tool.id,
       name: tool.name,
-      command: tool.command,
-      why: tool.why,
+      // 以下字段供 renderer/app.js 直接渲染
+      label: tool.name,
+      path: path || null,
+      note: version || tool.why,
       available,
       version,
-      installCommand: available || !tool.wingetId ? null : buildInstallCommand(tool)
+      command: tool.command,
+      why: tool.why,
+      installCommand,
+      installable: Boolean(installCommand)
     };
   });
 }

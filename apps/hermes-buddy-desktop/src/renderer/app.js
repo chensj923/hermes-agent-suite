@@ -444,14 +444,17 @@ async function loadModels(preferred) {
 function applyStatus(status) {
   if (!status) return;
   const target = status.llmUrl || status.baseUrl || '未连接';
-  el.gatewayLabel.textContent = status.connected
+  // ready = 本机工作区 + LLM 推理端点都已就绪，这才是用户能聊天的真实状态；
+  // connected 仅表示 Gateway 会话已登记，降级场景下可能为 false。
+  const online = status.ready || status.connected;
+  el.gatewayLabel.textContent = online
     ? `${target} · ${status.profile || 'buddy'}`
     : (status.configured ? `${target}（未就绪）` : '未连接');
   el.workdirTag.hidden = !status.workspace;
   el.workdirTag.textContent = status.workspace ? `工作目录：${status.workspace}` : '';
   el.permBadge.dataset.level = status.permission || 'read-write';
   el.permBadge.textContent = permLabel(status.permission || 'read-write');
-  setStatusDot(status.busy ? 'busy' : (status.connected ? 'online' : (status.configured ? 'error' : 'offline')));
+  setStatusDot(status.busy ? 'busy' : (online ? 'online' : (status.configured ? 'error' : 'offline')));
 }
 
 function permLabel(level) {
