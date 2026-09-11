@@ -32,6 +32,7 @@ const el = {
 
   // 连接表单
   connectForm: $('connect-form'),
+  fieldHost: $('field-host'),
   fieldBaseUrl: $('field-baseUrl'),
   fieldManagementUrl: $('field-managementUrl'),
   fieldLlmUrl: $('field-llmUrl'),
@@ -40,11 +41,8 @@ const el = {
   fieldModel: $('field-model'),
   fieldWorkspace: $('field-workspace'),
   btnPickWorkspace: $('btn-pick-workspace'),
-  btnOpenWorkspace: $('btn-open-workspace'),
   btnConnect: $('btn-connect'),
   connectStatus: $('connect-status'),
-  connectSteps: $('connect-steps'),
-  toolchainReport: $('toolchain-report'),
 
   // 诊断 + 服务端脚本
   btnDiagnose: $('btn-diagnose'),
@@ -140,36 +138,43 @@ function setConnectStatus(text, tone = 'info') {
   el.connectStatus.dataset.tone = tone;
 }
 
-function setStep(step, stepState) {
-  el.connectSteps.hidden = false;
-  const node = el.connectSteps.querySelector(`[data-step="${step}"]`);
-  if (node) node.dataset.state = stepState;
-}
+/** 从「主机」输入自动推导三个端点，支持 IP、域名、host:port 或完整 URL。 */
+function deriveEndpoints(hostValue) {
+  const raw = String(hostValue || '').trim();
+  if (!raw) return null;
 
-function resetSteps() {
-  el.connectSteps.hidden = true;
-  el.connectSteps.querySelectorAll('li').forEach((n) => { delete n.dataset.state; });
-}
-
-function renderToolchainReport(tools) {
-  if (!tools || !tools.length) {
-    el.toolchainReport.textContent = '正在检测本机工具…';
-    return;
+  if (/^https?:\/\//i.test(raw)) {
+    const url = new URL(raw);
+    const host = url.hostname;
+    const port = url.port || '8800';
+    return {
+      host,
+      llmUrl: raw,
+      baseUrl: `http://${host}:22122`,
+      managementUrl: `http://${host}:8700`
+    };
   }
-  const missing = tools.filter((t) => !t.available);
-  const lines = tools.map((t) => `${t.available ? '✓' : '✗'} ${t.label}${t.version ? ' ' + t.version : ''}${t.path ? ' · ' + t.path : ''}`);
-  if (missing.length) lines.push('提示：缺什么可在「设置 → 本机工具」一键安装。');
-  el.toolchainReport.textContent = lines.join('\n');
-  el.toolchainReport.dataset.tone = missing.length ? 'warn' : 'info';
+
+  const m = raw.match(/^([^:]+)(?::(\d+))?$/);
+  if (!m) return null;
+  const host = m[1];
+  const port = m[2] || '8800';
+  return {
+    host,
+    llmUrl: `http://${host}:${port}/v1/chat/completions`,
+    baseUrl: `http://${host}:22122`,
+    managementUrl: `http://${host}:8700`
+  };
 }
 
-async function refreshToolchain() {
+function hostFromConnection(status) {
+  if (!status || !status.llmUrl) return '';
   try {
-    const result = await api.toolchain();
-    renderToolchainReport(result && result.tools);
-  } catch (error) {
-    el.toolchainReport.textContent = `工具检测失败：${error.message}`;
-    el.toolchainReport.dataset.tone = 'error';
+    const url = new URL(status.llmUrl);
+    const port = url.port || '8800';
+    return `${url.hostname}:${port}`;
+  } catch (_) {
+    return status.llmUrl;
   }
 }
 
@@ -471,39 +476,35 @@ async function enterChat(status) {
 
 el.connectForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  const host = el.fieldHost.value.trim();
+  const derived = deriveEndpoints(host);
+  if (!derived) {
+    setConnectStatus('请输入有效的 Hermes 主机地址（IP、域名或 http://...）', 'error');
+    el.fieldHost.focus();
+    return;
+  }
+
   const payload = {
-    baseUrl: el.fieldBaseUrl.value.trim(),
-    managementUrl: el.fieldManagementUrl.value.trim(),
-    llmUrl: el.fieldLlmUrl.value.trim(),
+    llmUrl: el.fieldLlmUrl.value.trim() || derived.llmUrl,
+    baseUrl: el.fieldBaseUrl.value.trim() || derived.baseUrl,
+    managementUrl: el.fieldManagementUrl.value.trim() || derived.managementUrl,
     apiKey: el.fieldApiKey.value,
     profile: el.fieldProfile.value.trim() || 'buddy',
     model: el.fieldModel.value.trim() || 'hermes-agent',
     workspace: el.fieldWorkspace.value.trim(),
     permission: el.connectForm.querySelector('input[name="permission"]:checked').value
   };
-  resetSteps();
+
   el.btnConnect.disabled = true;
-  setConnectStatus('正在验证 Hermes 推理服务、创建工作目录…');
-  setStep('llm', 'running');
-  setStep('workspace', 'running');
-  setStep('gateway', 'running');
-  setStep('save', 'running');
+  setConnectStatus('正在连接 Hermes…');
   try {
     const result = await api.connect(payload);
-    setStep('llm', 'done');
-    setStep('workspace', 'done');
-    setStep('gateway', result.gatewayWarning ? 'failed' : 'done');
-    setStep('save', 'done');
     if (result.gatewayWarning) showBanner(`Gateway 未连通（${result.gatewayWarning}），不影响本机工具链路，可在「设置」中重试。`, 'warn');
-    setConnectStatus('配置完成，正在进入对话…', 'ok');
+    setConnectStatus('连接成功，正在进入主界面…', 'ok');
     el.fieldApiKey.value = '';
     await enterChat({ ...(result.connection || {}), connected: true, workspace: payload.workspace });
   } catch (error) {
-    ['llm', 'workspace', 'gateway', 'save'].forEach((step) => {
-      const node = el.connectSteps.querySelector(`[data-step="${step}"]`);
-      if (node && node.dataset.state === 'running') node.dataset.state = 'failed';
-    });
-    setConnectStatus(error.message || '配置失败', 'error');
+    setConnectStatus(error.message || '连接失败', 'error');
     setStatusDot('error');
   } finally {
     el.btnConnect.disabled = false;
@@ -522,22 +523,15 @@ el.btnPickWorkspace.addEventListener('click', async () => {
   }
 });
 
-el.btnOpenWorkspace.addEventListener('click', async () => {
-  try {
-    await api.openWorkspace();
-  } catch (error) {
-    showBanner(error.message || '无法打开工作目录', 'error');
-  }
-});
-
 // ============================================================ 诊断 + 服务端脚本
 
 function diagnosePayload() {
   // 提取用户在表单里填的三个端点。诊断时 Key 不下发，所以不传。
+  const derived = deriveEndpoints(el.fieldHost.value);
   return {
-    llmUrl: el.fieldLlmUrl.value.trim(),
-    gatewayBaseUrl: el.fieldBaseUrl.value.trim(),
-    managementUrl: el.fieldManagementUrl.value.trim()
+    llmUrl: el.fieldLlmUrl.value.trim() || (derived && derived.llmUrl),
+    gatewayBaseUrl: el.fieldBaseUrl.value.trim() || (derived && derived.baseUrl),
+    managementUrl: el.fieldManagementUrl.value.trim() || (derived && derived.managementUrl)
   };
 }
 
@@ -552,8 +546,8 @@ function renderDiagnose(report) {
   const title = document.createElement('div');
   title.className = 'dr-title';
   title.textContent = report.ok
-    ? '推理端点可达，可以直接验证并连接。'
-    : `推理端点（LLM）当前不可用 —— Buddy 必须能连上 8800 才能干活。`;
+    ? '探测通过：Hermes 推理端点可达，可以连接。'
+    : '探测失败：推理端点（LLM）不可达，Buddy 无法工作。';
   el.diagnoseReport.appendChild(title);
 
   const list = document.createElement('ul');
@@ -566,7 +560,7 @@ function renderDiagnose(report) {
     const detail = document.createElement('div');
     const reason = document.createElement('div');
     reason.className = 'dr-reason';
-    reason.textContent = `${r.label}：${r.userMessage}${r.value ? '  · ' + r.value : ''}`;
+    reason.textContent = `${r.userMessage}${r.value ? ' · ' + r.value : ''}`;
     detail.appendChild(reason);
     li.appendChild(key);
     li.appendChild(detail);
@@ -577,7 +571,7 @@ function renderDiagnose(report) {
   if (report.blocking && report.blocking.actionHint === 'bootstrap_server') {
     const hint = document.createElement('div');
     hint.className = 'dr-summary';
-    hint.textContent = '提示：点上方"生成服务端准备脚本"按钮，复制脚本到 Hermes 主机执行。';
+    hint.textContent = '提示：点「生成服务端准备脚本」，复制到 Hermes 主机执行后再试。';
     el.diagnoseReport.appendChild(hint);
   } else if (report.blocking && report.blocking.actionHint === 'verify_key') {
     const hint = document.createElement('div');
@@ -602,29 +596,22 @@ el.btnDiagnose.addEventListener('click', async () => {
 let lastBootstrapScript = '';
 let lastBootstrapHost = '';
 
-function hostFromLlmUrl() {
-  // 用 LLM 端点推一个 host 给脚本头部提示（不会真的去连，只是给人看）
-  const raw = el.fieldLlmUrl.value.trim();
-  const m = raw.match(/(?:https?:\/\/)?([^/:]+)/);
-  return (m && m[1]) || '<hermes-host>';
-}
-
 el.btnBootstrap.addEventListener('click', async () => {
-  const llmUrl = el.fieldLlmUrl.value.trim();
-  if (!llmUrl) {
-    setConnectStatus('先填推理端点，我才知道服务端脚本该监听哪个端口。', 'warn');
-    el.fieldLlmUrl.focus();
+  const derived = deriveEndpoints(el.fieldHost.value);
+  if (!derived) {
+    setConnectStatus('先填 Hermes 主机，我才知道服务端脚本该监听哪个地址。', 'warn');
+    el.fieldHost.focus();
     return;
   }
-  const llmPort = portOf(llmUrl) || 8800;
-  const gatewayPort = el.fieldBaseUrl.value.trim() ? (portOf(el.fieldBaseUrl.value) || 22122) : 0;
-  const managementPort = el.fieldManagementUrl.value.trim() ? (portOf(el.fieldManagementUrl.value) || 8700) : 0;
+  const llmPort = portOf(derived.llmUrl) || 8800;
+  const gatewayPort = portOf(el.fieldBaseUrl.value.trim()) || 22122;
+  const managementPort = portOf(el.fieldManagementUrl.value.trim()) || 8700;
   el.bootstrapStatus.textContent = '生成中…';
   el.bootstrapDialog.hidden = false;
   try {
-    const result = await api.bootstrapScript({ host: hostFromLlmUrl(), llmPort, gatewayPort, managementPort });
+    const result = await api.bootstrapScript({ host: derived.host, llmPort, gatewayPort, managementPort });
     lastBootstrapScript = result.script;
-    lastBootstrapHost = hostFromLlmUrl();
+    lastBootstrapHost = derived.host;
     el.bootstrapScript.textContent = result.script;
     el.bootstrapStatus.textContent = '脚本就绪。建议 SSH 到 Hermes 主机粘贴执行。';
   } catch (error) {
@@ -691,7 +678,6 @@ el.btnDisconnect.addEventListener('click', async () => {
   await api.disconnect().catch(() => {});
   state.activeRequestId = null;
   el.chatLog.textContent = '';
-  resetSteps();
   hideBanner();
   setConnectStatus('本机凭据已清除，可重新配置。');
   applyStatus({ configured: false });
@@ -995,21 +981,18 @@ el.modelSelect.addEventListener('change', () => {
     el.foot.textContent = 'Hermes Buddy';
   }
 
-  // 工具链先并行启动
-  refreshToolchain();
-
   let status = await api.status().catch(() => ({ configured: false }));
   applyStatus(status);
   if (!status.configured) {
     showView('connect');
-    setConnectStatus('填写 Hermes 地址与 API Key 完成首次配置。');
+    setConnectStatus('填写 Hermes 主机地址与 API Key 完成首次配置。');
     return;
   }
 
   // 已配置：回填字段
+  if (status.llmUrl) el.fieldHost.value = hostFromConnection(status);
   if (status.baseUrl) el.fieldBaseUrl.value = status.baseUrl;
   if (status.managementUrl) el.fieldManagementUrl.value = status.managementUrl;
-  if (status.llmUrl) el.fieldLlmUrl.value = status.llmUrl;
   if (status.profile) el.fieldProfile.value = status.profile;
   if (status.model) el.fieldModel.value = status.model;
   if (status.workspace) el.fieldWorkspace.value = status.workspace;

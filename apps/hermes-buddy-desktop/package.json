@@ -1,6 +1,6 @@
 {
   "name": "@hermes/buddy-desktop",
-  "version": "2.0.1-dev",
+  "version": "2.0.2-dev",
   "description": "Windows desktop client and guided provisioning for Hermes Buddy",
   "author": "Hermes Agent Suite",
   "main": "src/main.js",

@@ -141,26 +141,97 @@ button:disabled { opacity: .5; cursor: default; }
 main { flex: 1; min-height: 0; display: flex; }
 .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
-/* ---------- 连接页 ---------- */
-#view-connect { overflow: auto; align-items: stretch; padding: 24px; }
-
-.card {
-  width: min(720px, 100%);
-  margin: 0 auto;
-  padding: 24px 26px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
+/* ---------- 连接页（极简 WorkBuddy 风格） ---------- */
+#view-connect {
+  overflow: auto;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  background: var(--bg);
 }
 
-.card h1 { margin: 0 0 8px; font-size: 20px; }
-.hint { margin: 0 0 18px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.connect-card {
+  width: min(420px, 100%);
+  padding: 32px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 16px 50px rgba(0, 0, 0, .25);
+}
 
-form label { display: block; margin-bottom: 14px; font-size: 12px; color: var(--muted); }
-form label input, form label textarea { width: 100%; margin-top: 5px; }
-form small { display: block; margin-top: 4px; color: #7d8fae; font-size: 11px; }
-.row { display: flex; gap: 12px; }
-.row label { flex: 1; }
+.connect-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 24px;
+}
+.connect-brand .logo {
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  font-size: 18px;
+}
+.connect-brand .brand-name { font-weight: 700; font-size: 17px; }
+.connect-brand .brand-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+.connect-field {
+  display: block;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.connect-field > span { display: block; margin-bottom: 5px; }
+.connect-field input { width: 100%; }
+.connect-field small {
+  display: block;
+  margin-top: 4px;
+  color: #7d8fae;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.connect-submit {
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 14px;
+  font-size: 14px;
+}
+
+.connect-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.connect-actions .ghost {
+  flex: 1;
+  justify-content: center;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.connect-status-line {
+  min-height: 20px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: #93c5fd;
+}
+.connect-status-line[data-tone="error"] { color: var(--danger); }
+.connect-status-line[data-tone="ok"] { color: var(--ok); }
+.connect-status-line[data-tone="warn"] { color: var(--warn); }
+
+.advanced {
+  margin: 6px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.advanced summary { cursor: pointer; user-select: none; }
+.advanced-body { padding-top: 12px; }
+.advanced-body .connect-field { margin-bottom: 12px; }
+.advanced-body .row { display: flex; gap: 12px; }
+.advanced-body .row .connect-field { flex: 1; }
 
 .workspace-row { display: flex; gap: 8px; margin-top: 5px; }
 .workspace-row input { flex: 1; }
@@ -169,7 +240,7 @@ form small { display: block; margin-top: 4px; color: #7d8fae; font-size: 11px; }
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 14px;
-  margin: 14px 0 18px;
+  margin: 14px 0 6px;
 }
 .perm-fieldset legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
 .perm-option { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; cursor: pointer; }
@@ -177,17 +248,48 @@ form small { display: block; margin-top: 4px; color: #7d8fae; font-size: 11px; }
 .perm-option span { font-size: 12px; color: var(--text); line-height: 1.5; }
 .perm-option strong { color: var(--accent-hover); }
 
-.status-line { min-height: 20px; margin-top: 12px; font-size: 12px; color: #93c5fd; }
-.status-line[data-tone="error"] { color: var(--danger); }
-.status-line[data-tone="ok"] { color: var(--ok); }
+/* 旧版诊断报告复用 */
+.diagnose-report {
+  margin: 12px 0 0;
+  padding: 12px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+.diagnose-report[hidden] { display: none; }
+.diagnose-report .dr-title { font-weight: 600; margin-bottom: 8px; color: var(--muted); }
+.diagnose-report ul { margin: 0; padding: 0; list-style: none; }
+.diagnose-report li {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px dashed var(--border);
+}
+.diagnose-report li:first-child { border-top: none; }
+.diagnose-report .dr-key { font-weight: 600; }
+.diagnose-report .dr-reason { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.diagnose-report li[data-state="ok"] .dr-key::before { content: '✓ '; color: var(--ok); }
+.diagnose-report li[data-state="ok"] .dr-key { color: var(--ok); }
+.diagnose-report li[data-state="unauthorized"] .dr-key { color: var(--warn); }
+.diagnose-report li[data-state="unauthorized"] .dr-key::before { content: '🔑 '; }
+.diagnose-report li[data-state="refused"] .dr-key,
+.diagnose-report li[data-state="unreachable"] .dr-key,
+.diagnose-report li[data-state="timeout"] .dr-key { color: var(--danger); }
+.diagnose-report li[data-state="refused"] .dr-key::before { content: '✕ '; }
+.diagnose-report li[data-state="unreachable"] .dr-key::before { content: '✕ '; }
+.diagnose-report li[data-state="timeout"] .dr-key::before { content: '⏱ '; }
+.diagnose-report li[data-state="no_endpoint"] .dr-key { color: var(--muted); }
+.diagnose-report li[data-state="no_endpoint"] .dr-key::before { content: '· '; }
+.diagnose-report li[data-state="not_found"] .dr-key { color: var(--warn); }
+.diagnose-report li[data-state="not_found"] .dr-key::before { content: '? '; }
+.diagnose-report li[data-state="wrong_protocol"] .dr-key { color: var(--danger); }
+.diagnose-report li[data-state="wrong_protocol"] .dr-key::before { content: '✕ '; }
+.diagnose-report .dr-summary { margin-top: 8px; font-size: 11px; color: var(--muted); }
 
-.checklist { margin: 10px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--muted); }
-.checklist li { padding: 3px 0 3px 22px; position: relative; }
-.checklist li::before { content: '○'; position: absolute; left: 0; }
-.checklist li[data-state="running"]::before { content: '◌'; color: var(--warn); }
-.checklist li[data-state="done"]::before { content: '●'; color: var(--ok); }
-.checklist li[data-state="failed"]::before { content: '✕'; color: var(--danger); }
-
+/* 旧版兼容：设置页等仍需要的 report */
 .report { margin-top: 14px; }
 .report summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 0; }
 .report-pre {
@@ -511,20 +613,6 @@ form small { display: block; margin-top: 4px; color: #7d8fae; font-size: 11px; }
 .diagnose-report li[data-state="wrong_protocol"] .dr-key::before { content: '✕ '; }
 .diagnose-report .dr-summary { margin-top: 8px; font-size: 11px; color: var(--muted); }
 
-.diagnose-actions {
-  display: flex;
-  gap: 8px;
-  margin: 4px 0 12px 0;
-}
-.diagnose-actions .ghost { flex: 0 0 auto; }
-
-.diagnose-report {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 12px;
-  margin-bottom: 12px;
-}
 
 .foot {
   padding: 5px 18px;

@@ -37,71 +37,79 @@
   </div>
 
   <main>
-    <!-- 视图 1：连接与配置 -->
+    <!-- 视图 1：连接与配置（极简 WorkBuddy 风格） -->
     <section class="view" id="view-connect">
-      <div class="card">
-        <h1>连接你自己的 Hermes</h1>
-        <p class="hint">Buddy 把决策权交给远端 Hermes，把执行权留在本机工作目录。<br>
-          API Key 只以 Windows 加密凭据（DPAPI）保存在本机，不会写入普通配置文件，也不会进入渲染进程。</p>
+      <div class="connect-card">
+        <div class="connect-brand">
+          <span class="logo" aria-hidden="true">H</span>
+          <div>
+            <div class="brand-name">连接 Hermes</div>
+            <div class="brand-sub">输入主机地址和 API Key，让 Hermes 开始控制本机</div>
+          </div>
+        </div>
+
         <form id="connect-form" autocomplete="off">
-          <label>推理端点（LLM，必填）
-            <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8800/v1/chat/completions" spellcheck="false" required>
-            <small>Hermes 模型服务的 OpenAI 兼容端点。Budy 真正在用这个，必须能通。留空会自动用 Gateway 同主机的 :8800 推导。</small>
+          <label class="connect-field">
+            <span>Hermes 主机</span>
+            <input id="field-host" name="host" placeholder="192.168.0.246" spellcheck="false" required>
+            <small>支持 IP、域名，或带端口的地址。会自动推导 LLM :8800、Gateway :22122、Management :8700。</small>
           </label>
-          <label>Hermes Gateway 地址（可选）
-            <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22122" spellcheck="false">
-            <small>用于会话登记与部署清单。Hermes 服务端默认端口是 22122（不是 22124）。如果不知道怎么填，可以留空，Buddy 仍能正常工作。</small>
-          </label>
-          <div class="row">
-            <label>部署管理地址
-              <input id="field-managementUrl" name="managementUrl" placeholder="留空按 Gateway 同主机 :8700 推导" spellcheck="false">
-              <small>用于服务端部署清单；不通也能降级使用。</small>
-            </label>
-          </div>
-          <label>API Key
+
+          <label class="connect-field">
+            <span>API Key</span>
             <input id="field-apiKey" name="apiKey" type="password" autocomplete="new-password" required>
-            <small>服务端 ~/.hermes/data/.env 中的 API_SERVER_KEY。</small>
+            <small>服务端 ~/.hermes/.api_server_key 或 data/.env 中的 API_SERVER_KEY。</small>
           </label>
-          <div class="row">
-            <label>Profile
-              <input id="field-profile" name="profile" value="buddy" spellcheck="false">
-            </label>
-            <label>默认模型
-              <input id="field-model" name="model" value="hermes-agent" spellcheck="false">
-            </label>
-          </div>
-          <label>工作目录（Hermes 只能在它之下动手）
-            <div class="workspace-row">
-              <input id="field-workspace" name="workspace" placeholder="D:\\work\\buddy" spellcheck="false" required>
-              <button class="ghost" id="btn-pick-workspace" type="button">浏览…</button>
-              <button class="ghost" id="btn-open-workspace" type="button">打开</button>
+
+          <details class="advanced">
+            <summary>高级设置</summary>
+            <div class="advanced-body">
+              <label class="connect-field">
+                <span>推理端点（LLM）</span>
+                <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8800/v1/chat/completions" spellcheck="false">
+              </label>
+              <label class="connect-field">
+                <span>Gateway 地址</span>
+                <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22122" spellcheck="false">
+              </label>
+              <label class="connect-field">
+                <span>部署管理地址</span>
+                <input id="field-managementUrl" name="managementUrl" placeholder="http://192.168.0.246:8700" spellcheck="false">
+              </label>
+              <div class="row">
+                <label class="connect-field">Profile
+                  <input id="field-profile" name="profile" value="buddy" spellcheck="false">
+                </label>
+                <label class="connect-field">默认模型
+                  <input id="field-model" name="model" value="hermes-agent" spellcheck="false">
+                </label>
+              </div>
+              <label class="connect-field">
+                <span>工作目录</span>
+                <div class="workspace-row">
+                  <input id="field-workspace" name="workspace" placeholder="D:\\work\\buddy" spellcheck="false">
+                  <button class="ghost" id="btn-pick-workspace" type="button">浏览…</button>
+                </div>
+              </label>
+              <fieldset class="perm-fieldset">
+                <legend>工具权限档位</legend>
+                <label class="perm-option"><input type="radio" name="permission" value="read"><span><strong>只读</strong> · 禁止写文件、改文件、删除文件、执行命令</span></label>
+                <label class="perm-option"><input type="radio" name="permission" value="read-write" checked><span><strong>读 + 写</strong> · 可读写文件、可执行大部分命令，删除与系统级操作需要确认（推荐）</span></label>
+                <label class="perm-option"><input type="radio" name="permission" value="full"><span><strong>完全控制</strong> · 不再拦截任何命令（仅在你信任环境时使用）</span></label>
+              </fieldset>
             </div>
-            <small>首次使用会按这个路径建好目录与 .hermes 子目录。</small>
-          </label>
-          <fieldset class="perm-fieldset">
-            <legend>工具权限档位</legend>
-            <label class="perm-option"><input type="radio" name="permission" value="read"><span><strong>只读</strong> · 禁止写文件、改文件、删除文件、执行命令</span></label>
-            <label class="perm-option"><input type="radio" name="permission" value="read-write" checked><span><strong>读 + 写</strong> · 可读写文件、可执行大部分命令，删除与系统级操作需要确认（推荐）</span></label>
-            <label class="perm-option"><input type="radio" name="permission" value="full"><span><strong>完全控制</strong> · 不再拦截任何命令（仅在你信任环境时使用）</span></label>
-          </fieldset>
-          <button class="primary" id="btn-connect" type="submit">验证并配置 Buddy</button>
+          </details>
+
+          <button class="primary connect-submit" id="btn-connect" type="submit">连接</button>
         </form>
-        <div class="diagnose-actions">
-          <button class="ghost" id="btn-diagnose" type="button">先诊断 Hermes 是否可达</button>
+
+        <div class="connect-actions">
+          <button class="ghost" id="btn-diagnose" type="button">探测</button>
           <button class="ghost" id="btn-bootstrap" type="button">生成服务端准备脚本</button>
         </div>
+
+        <div class="connect-status-line" id="connect-status" role="status"></div>
         <div class="diagnose-report" id="diagnose-report" hidden></div>
-        <div class="status-line" id="connect-status" role="status"></div>
-        <ul class="checklist" id="connect-steps" hidden>
-          <li data-step="llm">验证推理端点</li>
-          <li data-step="workspace">初始化工作目录</li>
-          <li data-step="gateway">登记 Gateway 与部署</li>
-          <li data-step="save">保存本机凭据</li>
-        </ul>
-        <details class="report">
-          <summary>本机工具检测</summary>
-          <pre id="toolchain-report" class="report-pre">点击展开进行检测…</pre>
-        </details>
       </div>
     </section>
 
