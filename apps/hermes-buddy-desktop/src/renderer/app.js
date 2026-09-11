@@ -719,11 +719,15 @@ el.btnReconnect.addEventListener('click', async () => {
 });
 
 el.btnDisconnect.addEventListener('click', async () => {
+  const confirmed = confirm('断开连接并清除所有缓存文件（连接配置、Gateway 会话、日志）？\n\n注意：清除后需要重新填写 Hermes 主机地址和 API Key。');
+  if (!confirmed) return;
+  
+  try { await api.clearCache(); } catch (_) {}
   await api.disconnect().catch(() => {});
   state.activeRequestId = null;
   el.chatLog.textContent = '';
   hideBanner();
-  setConnectStatus('本机凭据已清除，可重新配置。');
+  setConnectStatus('缓存已清除，可重新配置。');
   applyStatus({ configured: false });
   showView('connect');
 });

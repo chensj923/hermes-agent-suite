@@ -170,11 +170,18 @@ class ConnectionStore {
     return payload;
   }
 
-  clear() {
-    try { this.fs.rmSync(this.filePath, { force: true }); return true; } catch (error) {
+  clear(keepConfig = false) {
+    try { this.fs.rmSync(this.filePath, { force: true }); } catch (error) {
       if (this.logger) this.logger.warn('clear-connection-failed', { error: error.message });
-      return false;
     }
+    if (keepConfig) return true;
+    // 彻底清理所有残留缓存文件
+    const dirs = ['gateway-cache', 'logs', 'memory', 'persona', 'skills'];
+    dirs.forEach((subDir) => {
+      const dirPath = path.join(path.dirname(this.filePath), subDir);
+      try { this.fs.rmSync(dirPath, { recursive: true, force: true }); } catch (_) {}
+    });
+    return true;
   }
 
   quarantine(reason, error) {
