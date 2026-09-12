@@ -291,7 +291,7 @@ function registerIpc() {
 
   // ---- 其它 ----
   handle('buddy:update', async () => {
-    const result = await checkForUpdates({ currentVersion: app.getVersion() });
+    const result = await checkForUpdates({ currentVersion: app.getVersion(), fetchImpl: updater.fetchImpl });
     // 探测成功且确实有新版本时，把本地已下载好的安装包状态一并带上，UI 可以直接显示"重启即更新"。
     if (result.ok && result.updateAvailable) {
       result.readyToInstall = updater.hasReadyInstaller();
@@ -344,6 +344,14 @@ function bootstrap() {
   const userData = app.getPath('userData');
   logger = createLogger({ dir: path.join(userData, 'logs'), level: process.env.BUDDY_LOG_LEVEL || 'info' });
   updater = new Updater({ logger });
+  // 更新请求优先走 Chromium 网络栈（net.fetch）：跟随系统代理、读 Windows 证书库，
+  // 对 SakuraCat 等 MITM 代理兼容；证书仍失败时 fetchLenient 会降级重试。
+  try {
+    const { net } = require('electron');
+    if (net && typeof net.fetch === 'function') updater.fetchImpl = net.fetch;
+  } catch (error) {
+    logger.warn('net-fetch-unavailable', { error: error.message });
+  }
   const store = new ConnectionStore({ dir: userData, safeStorage, logger });
   manager = new SessionManager({
     store,

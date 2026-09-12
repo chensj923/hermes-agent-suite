@@ -470,20 +470,30 @@ class SessionManager {
   activateAgent(id) {
     if (!this.agentStore) throw new Error('智能体存储不可用');
     const agent = this.agentStore.activate(id);
-    if (this.connection) {
-      // 工作目录变化时 ensureRuntime 会自动重建 memory/skills/tools。
+    let warning = null;
+    try {
+      // 无论是否已连接，都先把工作区目录落盘（.hermes/、AGENTS.md），
+      // 否则"创建智能体 → 填工作目录 → 保存"在未连接时目录不会出现。
       const target = this.effectiveWorkspace(this.connection);
-      if (!this.workspace || this.workspace.dir !== path.resolve(target)) {
-        this.ensureRuntime(this.connection);
-      } else if (this.tools && agent.permission) {
-        this.tools.setPermission(agent.permission);
+      if (target) {
+        if (!this.workspace || this.workspace.dir !== path.resolve(target)) {
+          this.ensureRuntime(this.connection);
+        } else {
+          // 目录没变也可能被用户手动删过：保存即补建。
+          this.workspace.ensure();
+          if (this.tools && agent.permission) this.tools.setPermission(agent.permission);
+        }
       }
-      if (this.brain && this.tools) {
+      if (this.connection && this.brain && this.tools) {
         this.loop = new AgentLoop({ brain: this.brain, tools: this.tools, workspace: this.workspace, logger: this.logger });
       }
+    } catch (error) {
+      // 目录建不出来（盘符不存在/无权限）不阻断切换，但要把原因带给 UI。
+      warning = `工作目录创建失败：${error.message}`;
+      this.logger.warn('agent-workspace-ensure-failed', { id: agent.id, workspace: agent.workspace, error: error.message });
     }
     this.logger.info('agent-activated', { id: agent.id, name: agent.name, workspace: agent.workspace || '(默认)' });
-    return { agent, workspace: this.describeWorkspace() };
+    return { agent, workspace: this.describeWorkspace(), warning };
   }
 
   // ---------------------------------------------------------------- 工作区

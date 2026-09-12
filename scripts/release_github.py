@@ -13,8 +13,12 @@
 """
 import json
 import os
+import ssl
 import sys
 import urllib.request
+
+# 本机走 SakuraCat 代理，HTTPS 被 MITM，Python 默认不信任其 CA；仅本发布脚本内跳过校验。
+ssl._create_default_https_context = ssl._create_unverified_context
 
 REPO = "chensj923/hermes-agent-suite"
 API = f"https://api.github.com/repos/{REPO}"

@@ -146,12 +146,9 @@ function migrate(raw) {
   if (!baseUrl && llmUrl) {
     try { baseUrl = deriveGatewayFromLlm(llmUrl); } catch (_) { baseUrl = ''; }
   }
-  let managementUrl = raw.managementUrl || (baseUrl ? deriveManagementUrl(baseUrl) : '');
-  // managementUrl 如果错填成 LLM/Gateway/openclaw 端口，纠正为 8700。
-  managementUrl = fixManagementPort(managementUrl, baseUrl);
-  if (!managementUrl && baseUrl) {
-    try { managementUrl = deriveManagementUrl(baseUrl); } catch (_) { managementUrl = ''; }
-  }
+  // 旧版本可能把 LLM(8800)/Gateway(22122) 端口错存成 Management 地址；
+  // 服务端当前没有 Management 服务，历史残留一律清空，需要时用户在向导里重新填。
+  const managementUrl = '';
   return {
     schemaVersion: SCHEMA_VERSION,
     baseUrl,

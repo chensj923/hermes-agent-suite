@@ -14,6 +14,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
+const { fetchLenient } = require('./fetch-lenient');
 
 const INSTALLER_NAME = 'hermes-suite-windows-x86_64.exe';
 
@@ -71,7 +72,7 @@ class Updater {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30 * 60 * 1000); // 84MB 弱网也要给足时间
     try {
-      const response = await this.fetchImpl(url, {
+      const response = await fetchLenient(this.fetchImpl, url, {
         signal: controller.signal,
         headers: { 'User-Agent': 'hermes-buddy-desktop' }
       });

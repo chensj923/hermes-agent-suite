@@ -664,6 +664,7 @@ button:disabled { opacity: .5; cursor: default; }
 .context-body .settings-status { font-size: 11px; min-height: 16px; color: var(--muted); }
 .context-body .settings-status[data-tone="ok"] { color: var(--ok); }
 .context-body .settings-status[data-tone="error"] { color: var(--danger); }
+.context-body .settings-status[data-tone="warn"] { color: var(--warn); }
 .context-body .settings-field { display: block; margin: 10px 0; font-size: 12px; color: var(--muted); }
 .context-body .settings-field input,
 .context-body .settings-field select { margin-top: 4px; }

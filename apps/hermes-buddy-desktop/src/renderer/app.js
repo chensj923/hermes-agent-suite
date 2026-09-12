@@ -946,9 +946,11 @@ async function renderAgentTab() {
       permission: (el.contextBody.querySelector('input[name="agent-perm"]:checked') || {}).value
     };
     try {
-      await api.updateAgent(agent.id, patch);
-      $('agent-status').textContent = '已保存并生效（工作区、权限、模型都已切换）。';
-      $('agent-status').dataset.tone = 'ok';
+      const result = await api.updateAgent(agent.id, patch);
+      $('agent-status').textContent = (result && result.warning)
+        ? `已保存，但${result.warning}`
+        : '已保存并生效（工作区、权限、模型都已切换）。';
+      $('agent-status').dataset.tone = (result && result.warning) ? 'warn' : 'ok';
       await refreshChatForAgent();
     } catch (error) {
       $('agent-status').textContent = `保存失败：${error.message}`;
