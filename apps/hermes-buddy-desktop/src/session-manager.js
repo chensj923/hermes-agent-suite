@@ -147,12 +147,26 @@ class SessionManager {
     let session = null;
     let deployment = null;
     let gatewayWarning = null;
+    this.lastGatewayError = null;
     if (this.provisioning && normalized.baseUrl) {
+      const gateway = this.provisioning.createGateway({ baseUrl: normalized.baseUrl, apiKey: normalized.apiKey });
       try {
-        const gateway = this.provisioning.createGateway({ baseUrl: normalized.baseUrl, apiKey: normalized.apiKey });
         health = await gateway.health();
         session = await gateway.createSession(normalized.profile);
-        if (normalized.managementUrl) {
+        this.gateway = gateway;
+        this.session = session;
+      } catch (error) {
+        // Gateway 不通只降级：本机工具链路不依赖它。
+        gatewayWarning = describeGatewayError(error);
+        this.lastGatewayError = error;
+        this.dumpGatewayDiagnostic(normalized.baseUrl, normalized.managementUrl, error);
+        this.logger.warn('gateway-unreachable', { baseUrl: normalized.baseUrl, error: error.message });
+      }
+
+      // 部署清单（provisioning）是可选能力：当前 Hermes 服务端的 8700 端口跑的是 Web UI，
+      // 并没有 /api/provisioning/* 端点。这里失败不应该影响 Gateway"就绪"状态。
+      if (this.session && normalized.managementUrl) {
+        try {
           const managementGateway = this.provisioning.createGateway({ baseUrl: normalized.managementUrl, apiKey: normalized.apiKey });
           deployment = await this.provisioning.provision({
             gateway: managementGateway,
@@ -160,12 +174,14 @@ class SessionManager {
             deployment: this.deployment,
             registry: this.registry
           });
+        } catch (error) {
+          if (error && (error.code === 'not_found' || error.status === 404)) {
+            this.logger.info('provisioning-not-available', { managementUrl: normalized.managementUrl, message: error.message });
+          } else {
+            this.logger.warn('provisioning-failed', { managementUrl: normalized.managementUrl, error: error.message });
+          }
+          // 不设置 lastGatewayError / gatewayWarning：provisioning 不是 Gateway 核心功能。
         }
-      } catch (error) {
-        // Gateway 不通只降级：本机工具链路不依赖它。
-        gatewayWarning = describeGatewayError(error);
-        this.lastGatewayError = error;
-        this.logger.warn('gateway-unreachable', { baseUrl: normalized.baseUrl, error: error.message });
       }
     } else if (!normalized.baseUrl) {
       gatewayWarning = '未配置 Gateway，跳过会话登记与部署清单。';
@@ -222,6 +238,7 @@ class SessionManager {
           gateway = gw;
         } catch (error) {
           this.lastGatewayError = error;
+          this.dumpGatewayDiagnostic(stored.baseUrl, stored.managementUrl, error);
           this.logger.warn('resume-gateway-degraded', { baseUrl: stored.baseUrl, error: error.message });
         }
       }
@@ -326,6 +343,30 @@ class SessionManager {
   clearHistory() {
     this.messages = [];
     return { cleared: true };
+  }
+
+  /** 把 Gateway 错误写成明文诊断文件，方便远程排查。 */
+  dumpGatewayDiagnostic(baseUrl, managementUrl, error) {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const appDir = this.store && this.store.dir ? this.store.dir : this.appDir;
+      if (!appDir) return;
+      const file = path.join(appDir, 'gateway-diagnostic.json');
+      const payload = {
+        at: new Date().toISOString(),
+        baseUrl,
+        managementUrl,
+        error: {
+          code: error && (error.code || error.status),
+          status: error && error.status,
+          message: error && error.message,
+          stack: error && error.stack
+        },
+        described: describeGatewayError(error)
+      };
+      fs.writeFileSync(file, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8' });
+    } catch (_) { /* 诊断写入失败不影响主流程 */ }
   }
 
   trimHistory() {
@@ -487,14 +528,43 @@ class SessionManager {
 
   disconnect() {
     this.abort();
-    const cleared = this.store.clear();
+    const cleared = this.store.clear(false); // 清除配置
     this.connection = null;
     this.brain = null;
     this.gateway = null;
     this.session = null;
     this.messages = [];
+    this.lastGatewayError = null;
     this.logger.info('disconnected', { cleared });
     return { cleared };
+  }
+
+  clearCache() {
+    this.abort();
+    // 彻底清除所有缓存文件
+    const appData = this.store.dir || app.getPath('userData');
+    const fs = require('fs');
+    const path = require('path');
+    const dirs = ['gateway-cache', 'logs', 'memory', 'persona', 'skills'];
+    dirs.forEach((subDir) => {
+      const dirPath = path.join(appData, subDir);
+      try { fs.rmSync(dirPath, { recursive: true, force: true }); } catch (_) {}
+    });
+    // 清除配置文件
+    this.store.clear();
+    this.connection = null;
+    this.brain = null;
+    this.gateway = null;
+    this.session = null;
+    this.messages = [];
+    this.lastGatewayError = null;
+    this.workspace = null;
+    this.tools = null;
+    this.memory = null;
+    this.skills = null;
+    this.loop = null;
+    this.logger.info('cache-cleared');
+    return { cleared: true };
   }
 }
 

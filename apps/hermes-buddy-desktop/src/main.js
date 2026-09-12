@@ -129,6 +129,48 @@ function registerIpc() {
     return { ...result, status: manager.status(), gatewayWarning: manager.lastGatewayError ? describeGatewayError(manager.lastGatewayError) : null };
   });
   handle('buddy:disconnect', () => manager.disconnect());
+  handle('buddy:disconnect-and-clear-cache', () => {
+    // 彻底清除所有缓存文件（配置 + 子目录）
+    const appData = app.getPath('userData');
+    const fs = require('fs');
+    const path = require('path');
+    const dirs = ['gateway-cache', 'logs', 'memory', 'persona', 'skills'];
+    dirs.forEach((subDir) => {
+      const dirPath = path.join(appData, subDir);
+      try { fs.rmSync(dirPath, { recursive: true, force: true }); } catch (_) {}
+    });
+    // 清除配置文件
+    const store = manager.store;
+    if (store) {
+      try {
+        const configPath = store.filePath;
+        if (fs.existsSync(configPath)) fs.rmSync(configPath, { force: true });
+        // 清理 quarantine 文件
+        const backupPaths = ['decrypt-failed', 'parse-failed', 'incomplete'];
+        backupPaths.forEach((reason) => {
+          const backupPath = `${configPath}.${reason}`;
+          if (fs.existsSync(backupPath)) fs.rmSync(backupPath, { force: true });
+        });
+      } catch (e) {
+        manager.logger.warn('clear-config-failed', { error: e.message });
+      }
+    }
+    // 重置 session
+    manager.abort();
+    manager.connection = null;
+    manager.brain = null;
+    manager.gateway = null;
+    manager.session = null;
+    manager.messages = [];
+    manager.lastGatewayError = null;
+    manager.workspace = null;
+    manager.tools = null;
+    manager.memory = null;
+    manager.skills = null;
+    manager.loop = null;
+    manager.logger.info('cache-cleared');
+    return { cleared: true };
+  });
   handle('buddy:models', () => manager.models());
   handle('buddy:history', () => manager.history());
   handle('buddy:clear-history', () => manager.clearHistory());

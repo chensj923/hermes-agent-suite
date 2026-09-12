@@ -153,14 +153,42 @@ class GatewayClient {
       try {
         const data = await this.send(path);
         this.healthPath = path;
+        // /health 返回 200 不代表这就是 Hermes Gateway：openclaw 等其它服务
+        // 也会回 200。再多探一下真正的 Gateway 路由，避免把 22121 这种端口误判成可用。
+        await this.assertIsGateway();
         return { ...(typeof data === 'object' && data ? data : { raw: data }), endpoint: path };
       } catch (error) {
         lastError = error;
-        // 只有"这个端点不存在"才继续换路径；鉴权失败、网络不通都应立刻报出去。
+        // 只有"这个端点不存在"才继续换路径；鉴权失败、网络不通、不是 Gateway 都应立刻报出去。
         if (error.code !== 'not_found') break;
       }
     }
     throw lastError || new GatewayError('健康检查失败');
+  }
+
+  /**
+   * 确认当前 baseUrl 真的是 Hermes Gateway。
+   * GET /api/sessions 在没有/带着合法 key 时应返回 200 或 401（路由存在），
+   * 绝不能返回 404。openclaw（22121/22123）、管理端口（8700）等会回 404，
+   * 那样就说明用户把地址填成了别的服务的端口。
+   */
+  async assertIsGateway() {
+    try {
+      await this.send('/api/sessions', { method: 'GET' });
+      return; // 200 或 401 都说明 /api/sessions 路由存在
+    } catch (error) {
+      if (error && error.code === 'not_found') {
+        throw new GatewayError(
+          `地址 ${this.baseUrl} 不是 Hermes Gateway（/api/sessions 返回 404）。` +
+          `Hermes Gateway 默认端口是 22122，请确认连接配置里填的是 22122，` +
+          `而不是 22121 / 22123（openclaw）或 8700（管理端口）等其它服务。`,
+          error.status,
+          'not_a_gateway'
+        );
+      }
+      // 其它错误（网络/401/5xx）说明路由可达或至少在响应，放行交给后续流程判定。
+      return;
+    }
   }
 
   createSession(profile, extra) {
@@ -173,6 +201,19 @@ class GatewayClient {
       headers: { 'Content-Type': 'application/json' },
       // model 缺失会被 Gateway 判成 401，属于服务端硬约束。
       body: JSON.stringify({ model: 'hermes-agent', ...(extra || {}) })
+    }).catch((error) => {
+      // /api/sessions 返回 404 说明这个地址根本不是 Hermes Gateway（多半填成了
+      // openclaw 的 22121 或管理端口 8700）。把笼统的 not_found 转成更直白的提示。
+      if (error && error.code === 'not_found') {
+        throw new GatewayError(
+          `地址 ${this.baseUrl} 不是 Hermes Gateway（/api/sessions 返回 404）。` +
+          `Hermes Gateway 默认端口是 22122，请确认连接配置里填的是 22122，` +
+          `而不是 22121 / 22123（openclaw）或 8700（管理端口）等其它服务。`,
+          error.status,
+          'not_a_gateway'
+        );
+      }
+      throw error;
     });
   }
 
@@ -278,6 +319,7 @@ function describeGatewayError(error) {
   const code = error.code || GatewayError.codeFromStatus(error.status);
   switch (code) {
     case 'unauthorized': return 'API Key 无效或没有权限，请检查 ~/.hermes/data/.env 中的 API_SERVER_KEY';
+    case 'not_a_gateway': return error.message || '该地址不是 Hermes Gateway，请确认 Gateway 端口为 22122';
     case 'timeout': return 'Hermes 没有在预期时间内响应，请确认网关进程和端口可达';
     case 'network': return '网络不可达，请确认地址、端口和防火墙设置';
     case 'not_found': return '接口不存在，请确认 Hermes 网关版本';

@@ -195,17 +195,23 @@ class ToolRegistry {
 
 /** 工具结果 → 给模型的紧凑文本。命令输出保持原样，结构化结果走 JSON。 */
 function renderResult(name, result) {
-  // 被拦截 / 出错时优先说清原因，模型才知道该换路而不是重试。
-  if (!result || result.blocked || result.ok === false) {
+  // 被守卫拦截：优先说清原因，模型才知道该换路而不是重试。
+  if (!result || result.blocked) {
     const reason = (result && (result.error || result.reason)) || '未知错误';
     return `失败: ${reason}`;
   }
   if (name === 'run_command') {
     const parts = [];
-    parts.push(`退出码: ${result.exitCode}${result.timedOut ? '（超时被中断）' : ''}  耗时: ${(result.durationMs / 1000).toFixed(1)}s`);
+    const isSearchLike = /\b(findstr|grep|Select-String|where\.exe)\b/i.test(result.command || '');
+    const noMatchesExit1 = result.ok === false && result.exitCode === 1 && isSearchLike;
+    if (noMatchesExit1) {
+      parts.push('未找到匹配项（命令正常退出码 1）。');
+    } else {
+      parts.push(`退出码: ${result.exitCode}${result.timedOut ? '（超时被中断）' : ''}  耗时: ${(result.durationMs / 1000).toFixed(1)}s`);
+    }
     if (result.stdout && result.stdout.trim()) parts.push(`--- 标准输出 ---\n${result.stdout.trim()}`);
     if (result.stderr && result.stderr.trim()) parts.push(`--- 错误输出 ---\n${result.stderr.trim()}`);
-    if (!result.stdout && !result.stderr) parts.push('（命令没有产生任何输出）');
+    if (!result.stdout && !result.stderr && !noMatchesExit1) parts.push('（命令没有产生任何输出）');
     return parts.join('\n');
   }
   try { return JSON.stringify(result, null, 2); } catch (_) { return String(result); }

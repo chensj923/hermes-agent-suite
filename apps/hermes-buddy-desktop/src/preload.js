@@ -29,6 +29,7 @@ const api = {
   connect: (connection) => invoke('buddy:connect', connection),
   resume: () => invoke('buddy:resume'),
   disconnect: () => invoke('buddy:disconnect'),
+  disconnectAndClearCache: () => invoke('buddy:disconnect-and-clear-cache'),
   models: () => invoke('buddy:models'),
   history: () => invoke('buddy:history'),
   clearHistory: () => invoke('buddy:clear-history'),

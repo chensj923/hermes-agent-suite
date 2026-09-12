@@ -48,6 +48,9 @@ const el = {
   modelSelect: $('model-select'),
   btnReconnect: $('btn-reconnect'),
   chatLog: $('chat-log'),
+  toolLog: $('tool-log'),
+  toolEmpty: $('tool-empty'),
+  btnToolClear: $('btn-tool-clear'),
   composer: $('composer'),
   input: $('input'),
   btnSend: $('btn-send'),
@@ -155,7 +158,7 @@ function deriveEndpoints(hostValue) {
       host,
       llmUrl: raw,
       baseUrl: `http://${host}:22122`,
-      managementUrl: `http://${host}:8700`
+      managementUrl: ''
     };
   }
 
@@ -167,7 +170,7 @@ function deriveEndpoints(hostValue) {
     host,
     llmUrl: `http://${host}:${port}/v1/chat/completions`,
     baseUrl: `http://${host}:22122`,
-    managementUrl: `http://${host}:8700`
+    managementUrl: ''
   };
 }
 
@@ -185,6 +188,19 @@ function hostFromConnection(status) {
 // ============================================================ 聊天渲染
 
 function scrollToEnd() { el.chatLog.scrollTop = el.chatLog.scrollHeight; }
+function scrollTools() { el.toolLog.scrollTop = el.toolLog.scrollHeight; }
+
+function hideToolEmpty() {
+  if (el.toolEmpty) el.toolEmpty.hidden = true;
+}
+
+function clearToolLog() {
+  el.toolLog.textContent = '';
+  if (el.toolEmpty) {
+    el.toolEmpty.hidden = false;
+    el.toolLog.appendChild(el.toolEmpty);
+  }
+}
 
 function clearPlaceholder() {
   const placeholder = el.chatLog.querySelector('.empty');
@@ -210,23 +226,12 @@ function showPlaceholder(text) {
 }
 
 function ensureToolTrack() {
-  // 工具卡片挂在最后一个 assistant 气泡后面，按时间顺序排列。
-  const lastMsg = [...el.chatLog.querySelectorAll('.msg.assistant')].pop();
-  let track;
-  if (lastMsg) {
-    track = lastMsg.nextElementSibling;
-    if (!track || !track.classList.contains('tool-track')) {
-      track = document.createElement('div');
-      track.className = 'tool-track';
-      lastMsg.after(track);
-    }
-  } else {
-    track = el.chatLog.querySelector('.tool-track');
-    if (!track) {
-      track = document.createElement('div');
-      track.className = 'tool-track';
-      el.chatLog.appendChild(track);
-    }
+  // 工具卡片统一挂在右侧"执行记录"栏里，按时间顺序排列，与左侧对话互不干扰。
+  let track = el.toolLog.querySelector('.tool-track');
+  if (!track) {
+    track = document.createElement('div');
+    track.className = 'tool-track';
+    el.toolLog.appendChild(track);
   }
   return track;
 }
@@ -276,7 +281,8 @@ function renderToolStart({ id, name, args }) {
   card.querySelector('.tool-args').textContent = shortArgs(args);
   card.querySelector('.tool-output').hidden = true;
   card.dataset.status = 'running';
-  scrollToEnd();
+  hideToolEmpty();
+  scrollTools();
 }
 
 function renderToolResult({ id, ok, durationMs, text, name }) {
@@ -292,7 +298,7 @@ function renderToolResult({ id, ok, durationMs, text, name }) {
   // 输出给模型看的就是给用户看的；文本上限由工具层控好了。
   out.textContent = (text || '').slice(0, 8000);
   out.hidden = false;
-  scrollToEnd();
+  scrollTools();
   state.pendingTools.delete(id);
 }
 
@@ -308,7 +314,8 @@ function renderNotice({ message }) {
   node.className = 'notice';
   node.textContent = message;
   track.appendChild(node);
-  scrollToEnd();
+  hideToolEmpty();
+  scrollTools();
 }
 
 function beginAssistantBubble() {
@@ -499,6 +506,7 @@ async function enterChat(status) {
   await loadModels(status && status.model);
   const history = await api.history().catch(() => []);
   el.chatLog.textContent = '';
+  clearToolLog();
   if (Array.isArray(history) && history.length) {
     for (const entry of history) addMessage(entry.role === 'user' ? 'user' : 'assistant', entry.text || '');
   } else {
@@ -722,10 +730,10 @@ el.btnDisconnect.addEventListener('click', async () => {
   const confirmed = confirm('断开连接并清除所有缓存文件（连接配置、Gateway 会话、日志）？\n\n注意：清除后需要重新填写 Hermes 主机地址和 API Key。');
   if (!confirmed) return;
   
-  try { await api.clearCache(); } catch (_) {}
-  await api.disconnect().catch(() => {});
+  try { await api.disconnectAndClearCache(); } catch (_) {}
   state.activeRequestId = null;
   el.chatLog.textContent = '';
+  clearToolLog();
   hideBanner();
   setConnectStatus('缓存已清除，可重新配置。');
   applyStatus({ configured: false });
@@ -736,11 +744,16 @@ el.btnNewChat.addEventListener('click', async () => {
   try {
     await api.clearHistory();
     el.chatLog.textContent = '';
+    clearToolLog();
     showPlaceholder('已开启新会话。Hermes 在远端做决策，工具在本机执行。');
     el.input.focus();
   } catch (error) {
     showBanner('无法清空历史：' + error.message, 'error');
   }
+});
+
+el.btnToolClear.addEventListener('click', () => {
+  clearToolLog();
 });
 
 // ============================================================ 设置面板

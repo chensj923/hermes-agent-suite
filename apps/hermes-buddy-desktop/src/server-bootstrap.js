@@ -86,6 +86,9 @@ function generateBootstrapScript(input = {}) {
 
   // 4. 重启 gateway
   lines.push('# ---- 4. 重启 gateway（如果改了绑定地址，必须重启） ----');
+  lines.push('# 先停掉所有已存在的 hermes gateway 进程，避免多实例抢占端口（22122/22124 等导致连错端口）');
+  lines.push('for p in $(pgrep -f "hermes.*gateway.*run" 2>/dev/null); do kill "$p" 2>/dev/null || true; done');
+  lines.push('sleep 2');
   lines.push('if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q hermes-gateway; then');
   lines.push('  echo "[buddy-bootstrap] 用 systemd 重启..."');
   lines.push('  systemctl restart hermes-gateway 2>&1 || echo "  (systemctl 失败，尝试下面的手动方式)"');
@@ -162,7 +165,11 @@ function generateBootstrapScript(input = {}) {
   lines.push('  fi');
   lines.push('fi');
   lines.push('');
-  lines.push('echo "[buddy-bootstrap] 完成。把上面的 API Key 复制回 Buddy 的连接向导。"');
+  lines.push('echo "[buddy-bootstrap] 完成。请在 Buddy 连接向导里按下面三项填写："');
+  if (gatewayPort) lines.push('echo "[buddy-bootstrap]   Gateway 地址: http://' + host + ':' + gatewayPort + '   （Hermes Gateway 默认就是 22122，不要填 22121/22123/8700）"');
+  lines.push('echo "[buddy-bootstrap]   LLM 地址:     http://' + host + ':' + llmPort + '/v1/chat/completions"');
+  lines.push('echo "[buddy-bootstrap]   API Key:      $API_KEY"');
+  lines.push('echo "[buddy-bootstrap] 注意：Gateway 地址必须指向 22122，如果上面填成了 22121/8700 会报 404（不是 Gateway）。"');
 
   return lines.join('\n') + '\n';
 }

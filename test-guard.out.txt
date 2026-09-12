@@ -1,0 +1,7 @@
+[allow/read] Get-Process | Format-Table Name, Id
+[allow/read] Get-ChildItem | Format-List
+[allow/read] Get-Service | Format-Wide
+[deny/forbidden/磁盘格式化] format d:
+[deny/forbidden/磁盘格式化] format.com d:
+[deny/forbidden/磁盘管理破坏性命令] Format-Volume -DriveLetter D
+[deny/forbidden/磁盘格式化] Format D:
