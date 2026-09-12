@@ -50,11 +50,13 @@ function normalizeConnectionInput(input) {
   if (!baseUrl) {
     try { baseUrl = deriveGatewayFromLlm(llmUrl); } catch (_) { baseUrl = ''; }
   }
-  // managementUrl 留空就由 baseUrl 推导；baseUrl 也没有就空串，主流程会跳过 Gateway。
+  // managementUrl 是可选能力：当前 Hermes 服务端 8700 跑的是 WorkBuddy 前端代理，
+  // 并没有 /api/provisioning/* 端点。因此不再默认推导；只有用户显式填写时才保留。
   const rawManagement = String(source.managementUrl || '').trim();
   let managementUrl = '';
-  if (rawManagement) managementUrl = normalizeGatewayUrl(rawManagement);
-  else if (baseUrl) managementUrl = deriveManagementUrl(baseUrl);
+  if (rawManagement) {
+    managementUrl = fixManagementPort(normalizeGatewayUrl(rawManagement), baseUrl);
+  }
 
   return { schemaVersion: SCHEMA_VERSION, baseUrl, managementUrl, llmUrl, apiKey, profile, model, workspace, permission };
 }
@@ -87,24 +89,70 @@ function publicView(connection) {
   };
 }
 
-/** 老版本（v1，无 schemaVersion）配置的就地升级，避免用户重新填一遍。 */
+/** 已知会冒充 Hermes Gateway 的非 Gateway 端口。 */
+const NON_GATEWAY_PORTS = new Set(['22121', '22123', '22124', '22125']);
+
+/** 用户容易把 LLM（8800）或 Gateway（22122）端口填进部署管理地址里，纠正为 8700。 */
+const MANAGEMENT_PORT = '8700';
+const NON_MANAGEMENT_PORTS = new Set(['8800', '22122', '22121', '22123', '22124', '22125']);
+
+/** 把用户错填的 openclaw / 旧 Gateway 端口纠正为 22122。 */
+function fixGatewayPort(urlString, defaultPort = '22122') {
+  if (!urlString) return urlString;
+  try {
+    const url = new URL(/^https?:\/\//i.test(urlString) ? urlString : `http://${urlString}`);
+    if (NON_GATEWAY_PORTS.has(url.port)) {
+      url.port = defaultPort;
+      return url.toString().replace(/\/$/, '');
+    }
+  } catch (_) {}
+  return urlString;
+}
+
+/** 把用户错填的 LLM / Gateway / openclaw 端口纠正为管理端口 8700。 */
+function fixManagementPort(urlString, baseUrl) {
+  if (!urlString) return urlString;
+  try {
+    const url = new URL(/^https?:\/\//i.test(urlString) ? urlString : `http://${urlString}`);
+    if (NON_MANAGEMENT_PORTS.has(url.port)) {
+      url.port = MANAGEMENT_PORT;
+      // 管理地址只接受根路径；若用户把 LLM 端点（如 /v1/chat/completions）错贴进来，清掉路径。
+      url.pathname = '';
+      url.search = '';
+      url.hash = '';
+      return url.toString().replace(/\/$/, '');
+    }
+  } catch (_) {
+    // 解析失败时，如果有 baseUrl，按 baseUrl 重新推导。
+  }
+  if (!urlString && baseUrl) {
+    try { return deriveManagementUrl(baseUrl); } catch (_) {}
+  }
+  return urlString;
+}
+
+/** 配置迁移/清洗：补全缺失字段，并把错填的 Gateway 端口纠正为 22122。 */
 function migrate(raw) {
   if (!raw || typeof raw !== 'object') return null;
   if (!raw.apiKey) return null;
-  if (raw.schemaVersion === SCHEMA_VERSION) return raw;
-  // v1/v2 都没有本地工作区与推理端点，补默认值即可，不必让用户重填。
+  // 不管 schemaVersion 是多少，都做一次端口纠错：用户可能在当前版本里把 openclaw
+  //（22121/22123）、旧 Gateway（22124）或管理端口（8700）错存成 Gateway。
   let llmUrl = raw.llmUrl || '';
   let baseUrl = raw.baseUrl || '';
+  baseUrl = fixGatewayPort(baseUrl);
   if (!llmUrl) {
     try { llmUrl = deriveLlmEndpoint(baseUrl); } catch (_) { llmUrl = ''; }
   }
   if (!baseUrl && llmUrl) {
     try { baseUrl = deriveGatewayFromLlm(llmUrl); } catch (_) { baseUrl = ''; }
   }
+  // 旧版本可能把 LLM(8800)/Gateway(22122) 端口错存成 Management 地址；
+  // 服务端当前没有 Management 服务，历史残留一律清空，需要时用户在向导里重新填。
+  const managementUrl = '';
   return {
     schemaVersion: SCHEMA_VERSION,
     baseUrl,
-    managementUrl: raw.managementUrl || (baseUrl ? deriveManagementUrl(baseUrl) : ''),
+    managementUrl,
     llmUrl,
     apiKey: raw.apiKey,
     profile: raw.profile || DEFAULT_PROFILE,
@@ -171,16 +219,17 @@ class ConnectionStore {
   }
 
   clear(keepConfig = false) {
-    try { this.fs.rmSync(this.filePath, { force: true }); } catch (error) {
-      if (this.logger) this.logger.warn('clear-connection-failed', { error: error.message });
-    }
-    if (keepConfig) return true;
-    // 彻底清理所有残留缓存文件
+    // keepConfig=true：只清理子目录缓存，不清配置文件（保留配置方便用户重填）
+    // keepConfig=false：清理配置文件 + 所有子目录缓存
     const dirs = ['gateway-cache', 'logs', 'memory', 'persona', 'skills'];
     dirs.forEach((subDir) => {
       const dirPath = path.join(path.dirname(this.filePath), subDir);
       try { this.fs.rmSync(dirPath, { recursive: true, force: true }); } catch (_) {}
     });
+    if (keepConfig) return true;
+    try { this.fs.rmSync(this.filePath, { force: true }); } catch (error) {
+      if (this.logger) this.logger.warn('clear-connection-failed', { error: error.message });
+    }
     return true;
   }
 
