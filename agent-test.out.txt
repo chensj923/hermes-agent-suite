@@ -1,0 +1,7 @@
+default: 1 agent(s), active=default, name=默认智能体
+created: agent-mtyjsl0b-4ih7 active=agent-mtyjsl0b-4ih7
+switched back: active=default
+updated: {"id":"agent-mtyjsl0b-4ih7","name":"代码助手2","workspace":"D:\\work\\code","model":"qwen3-235b","permission":"full","createdAt":1789227394139}
+removed: agents=1, active=default
+reload: agents=1, active=default
+remove-last-blocked: 至少保留一个智能体

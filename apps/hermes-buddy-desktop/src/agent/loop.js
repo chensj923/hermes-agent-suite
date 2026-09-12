@@ -33,8 +33,9 @@ class AgentLoop {
    * @param {(request:object)=>Promise<boolean>} [options.onConfirm]
    * @returns {Promise<{ text: string, turns: number, toolCalls: Array, stopped?: string }>}
    */
-  async run({ systemPrompt, history = [], userMessage, signal, onEvent, onConfirm, stream = true }) {
+  async run({ systemPrompt, history = [], userMessage, signal, onEvent, onConfirm, stream = true, model }) {
     const emit = (event) => { if (typeof onEvent === 'function') onEvent(event); };
+    const modelOverride = String(model || '').trim() || null;
     const messages = [
       { role: 'system', content: String(systemPrompt || '') },
       ...history.filter((item) => item && item.role !== 'system'),
@@ -63,6 +64,7 @@ class AgentLoop {
           tools: toolSchemas,
           signal,
           stream,
+          model: modelOverride,
           onText: (chunk) => emit({ type: 'text', text: chunk })
         });
       } catch (error) {
@@ -154,6 +156,7 @@ class AgentLoop {
           tools: [],
           signal,
           stream,
+          model: modelOverride,
           onText: (chunk) => emit({ type: 'text', text: chunk })
         });
         if (wrapUp.content) finalText = `${finalText}\n\n${wrapUp.content}`.trim();

@@ -1,0 +1,9 @@
+OK: src\updater.js
+OK: src\agent-store.js
+OK: src\session-manager.js
+OK: src\main.js
+OK: src\preload.js
+OK: src\update-checker.js
+OK: src\agent\brain.js
+OK: src\agent\loop.js
+OK: src\renderer\app.js

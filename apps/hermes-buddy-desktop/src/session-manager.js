@@ -12,6 +12,7 @@ const { buildSystemPrompt, DEFAULT_PERSONA } = require('./agent/prompts');
 const { MemoryStore, rememberLine } = require('./memory');
 const { SkillStore } = require('./skills');
 const { detectTooling, renderToolchainForPrompt } = require('./toolchain');
+const { AgentStore } = require('./agent-store');
 
 const MAX_HISTORY_MESSAGES = 30;
 const PERSONA_FILE = 'persona.md';
@@ -50,7 +51,6 @@ class SessionManager {
     this.gateway = null;
     this.brain = null;
     this.session = null;
-    this.messages = [];       // OpenAI 格式历史（不含 system）
     this.controllers = new Map();
     this.lastGatewayError = null; // { code, message, at }，仅用于 UI 诊断，不含密钥
 
@@ -59,6 +59,42 @@ class SessionManager {
     this.memory = null;
     this.skills = null;
     this.loop = null;
+
+    // 智能体：每个智能体独立的工作区/权限/模型，会话历史也按智能体隔离。
+    try {
+      this.agentStore = new AgentStore({ dir: appDir, logger: this.logger });
+    } catch (error) {
+      this.logger.warn('agent-store-init-failed', { error: error.message });
+      this.agentStore = null;
+    }
+    this.agentMessages = new Map(); // agentId -> OpenAI 消息数组
+  }
+
+  get activeAgent() {
+    return this.agentStore ? this.agentStore.active() : null;
+  }
+
+  /** 智能体配置的工作目录优先；留空则用连接时的默认工作目录。 */
+  effectiveWorkspace(connection) {
+    const agent = this.activeAgent;
+    return (agent && agent.workspace) || (connection && connection.workspace) || '';
+  }
+
+  effectiveModel(connection) {
+    const agent = this.activeAgent;
+    return (agent && agent.model) || (connection && connection.model) || '';
+  }
+
+  /** 会话历史按智能体隔离：切换智能体即切换上下文。 */
+  get messages() {
+    const id = this.activeAgent ? this.activeAgent.id : 'default';
+    if (!this.agentMessages.has(id)) this.agentMessages.set(id, []);
+    return this.agentMessages.get(id);
+  }
+
+  set messages(value) {
+    const id = this.activeAgent ? this.activeAgent.id : 'default';
+    this.agentMessages.set(id, Array.isArray(value) ? value : []);
   }
 
   // ---------------------------------------------------------------- 状态
@@ -87,19 +123,20 @@ class SessionManager {
 
   /** 按当前连接装配本地运行时；工作目录切换后需要重建。 */
   ensureRuntime(connection) {
-    const workspaceDir = (connection && connection.workspace) || '';
+    const workspaceDir = this.effectiveWorkspace(connection);
     if (!this.workspace || this.workspace.dir !== path.resolve(workspaceDir)) {
       this.workspace = new Workspace({ root: workspaceDir, logger: this.logger });
       this.workspace.ensure();
       this.memory = new MemoryStore({ workspace: this.workspace, appDir: this.appDir, logger: this.logger });
       this.memory.ensure();
       this.skills = new SkillStore({ builtinDir: this.builtinSkillsDir, workspace: this.workspace, logger: this.logger });
+      const agent = this.activeAgent;
       this.tools = new ToolRegistry({
         workspace: this.workspace,
         logger: this.logger,
-        permission: (connection && connection.permission) || 'read-write'
+        permission: (agent && agent.permission) || (connection && connection.permission) || 'read-write'
       });
-      this.logger.info('workspace-ready', { workspace: this.workspace.dir });
+      this.logger.info('workspace-ready', { workspace: this.workspace.dir, agent: agent && agent.name });
     }
     if (!this.brain && connection) {
       this.brain = new Brain({
@@ -276,7 +313,7 @@ class SessionManager {
 
   // ---------------------------------------------------------------- 对话
 
-  async send({ requestId, text, onConfirm }, onEvent) {
+  async send({ requestId, text, onConfirm, model }, onEvent) {
     await this.ensureReady();
     const id = String(requestId || `req-${Date.now()}`);
     if (this.controllers.has(id)) throw new Error('该请求已在进行中');
@@ -293,7 +330,9 @@ class SessionManager {
         userMessage: text,
         signal: controller.signal,
         onEvent: emit,
-        onConfirm
+        onConfirm,
+        // 智能体配置的模型优先，其次用界面下拉里选的，最后用连接默认。
+        model: this.effectiveModel(this.connection) || model
       });
 
       this.messages.push({ role: 'user', content: String(text || '') });
@@ -398,6 +437,55 @@ class SessionManager {
     }) + `\n\n【本机工具链】\n${renderToolchainForPrompt()}`;
   }
 
+  // ---------------------------------------------------------------- 智能体
+
+  listAgents() {
+    if (!this.agentStore) return { agents: [], activeId: null };
+    return { agents: this.agentStore.list(), activeId: this.agentStore.activeId };
+  }
+
+  createAgent(input = {}) {
+    if (!this.agentStore) throw new Error('智能体存储不可用');
+    const agent = this.agentStore.create(input);
+    return this.activateAgent(agent.id);
+  }
+
+  updateAgent(id, patch = {}) {
+    if (!this.agentStore) throw new Error('智能体存储不可用');
+    const agent = this.agentStore.update(id, patch);
+    // 改的就是当前智能体：立即生效（工作区/权限/模型都可能在改）。
+    if (this.agentStore.activeId === id) return this.activateAgent(id);
+    return { agent, switched: false };
+  }
+
+  removeAgent(id) {
+    if (!this.agentStore) throw new Error('智能体存储不可用');
+    const removed = this.agentStore.remove(id);
+    // 若删的是当前智能体，切到新的当前项。
+    if (this.agentStore.activeId) this.activateAgent(this.agentStore.activeId);
+    return { removed, activeId: this.agentStore.activeId };
+  }
+
+  /** 切换智能体：重建工作区/工具/权限，恢复该智能体自己的对话历史。 */
+  activateAgent(id) {
+    if (!this.agentStore) throw new Error('智能体存储不可用');
+    const agent = this.agentStore.activate(id);
+    if (this.connection) {
+      // 工作目录变化时 ensureRuntime 会自动重建 memory/skills/tools。
+      const target = this.effectiveWorkspace(this.connection);
+      if (!this.workspace || this.workspace.dir !== path.resolve(target)) {
+        this.ensureRuntime(this.connection);
+      } else if (this.tools && agent.permission) {
+        this.tools.setPermission(agent.permission);
+      }
+      if (this.brain && this.tools) {
+        this.loop = new AgentLoop({ brain: this.brain, tools: this.tools, workspace: this.workspace, logger: this.logger });
+      }
+    }
+    this.logger.info('agent-activated', { id: agent.id, name: agent.name, workspace: agent.workspace || '(默认)' });
+    return { agent, workspace: this.describeWorkspace() };
+  }
+
   // ---------------------------------------------------------------- 工作区
 
   setWorkspace(dir) {
@@ -446,6 +534,11 @@ class SessionManager {
   setPermission(level) {
     if (!this.tools) throw new Error('工作区尚未就绪');
     this.tools.setPermission(level);
+    // 权限档位跟随当前智能体保存，切换智能体后各自记住自己的档位。
+    const agent = this.activeAgent;
+    if (agent && this.agentStore) {
+      try { this.agentStore.update(agent.id, { permission: level }); } catch (_) {}
+    }
     if (this.connection) {
       const updated = { ...this.connection, permission: level };
       try { this.connection = this.store.save(updated); } catch (error) {

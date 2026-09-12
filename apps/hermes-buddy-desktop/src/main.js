@@ -13,6 +13,7 @@ const { checkForUpdates } = require('./update-checker');
 const { install: installTool } = require('./toolchain');
 const { diagnose } = require('./diagnostics');
 const { generateBootstrapScript } = require('./server-bootstrap');
+const { Updater } = require('./updater');
 
 // 打包冒烟：启动 → 加载完成 → 退出，用于 CI 校验主进程与渲染层能起来。
 const SMOKE_TEST = process.argv.includes('--smoke-test');
@@ -23,6 +24,7 @@ const EXTERNAL_ALLOWLIST = [/^https:\/\/github\.com\//i, /^https:\/\/ghfast\.top
 
 let mainWindow = null;
 let manager = null;
+let updater = null;
 let logger = { info() {}, warn() {}, error() {}, debug() {} };
 const pendingConfirms = new Map();
 
@@ -214,7 +216,7 @@ function registerIpc() {
     };
     try {
       return await manager.send(
-        { requestId, text: request && request.text, onConfirm: (payload) => requestConfirm(event.sender, payload) },
+        { requestId, text: request && request.text, model: request && request.model, onConfirm: (payload) => requestConfirm(event.sender, payload) },
         forward
       );
     } finally {
@@ -234,6 +236,13 @@ function registerIpc() {
     return { ok: true };
   });
 
+  // ---- 智能体 ----
+  handle('buddy:agents', () => manager.listAgents());
+  handle('buddy:agents:create', (_event, input) => manager.createAgent(input || {}));
+  handle('buddy:agents:update', (_event, { id, patch } = {}) => manager.updateAgent(id, patch || {}));
+  handle('buddy:agents:remove', (_event, id) => manager.removeAgent(id));
+  handle('buddy:agents:activate', (_event, id) => manager.activateAgent(id));
+
   // ---- 工作区 ----
   handle('buddy:workspace', () => manager.describeWorkspace());
   handle('buddy:workspace:set', (_event, dir) => manager.setWorkspace(dir));
@@ -244,6 +253,15 @@ function registerIpc() {
     });
     if (result.canceled || !result.filePaths || !result.filePaths.length) return { canceled: true };
     return manager.setWorkspace(result.filePaths[0]);
+  });
+  // 纯选路径，不产生任何副作用（供智能体配置使用）。
+  handle('buddy:workspace:dialog', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '选择智能体工作目录',
+      properties: ['openDirectory', 'createDirectory', 'promptToCreate']
+    });
+    if (result.canceled || !result.filePaths || !result.filePaths.length) return { canceled: true };
+    return { canceled: false, path: result.filePaths[0] };
   });
   handle('buddy:workspace:open', async (_event, target) => {
     const dir = target && String(target).trim() ? target : (manager.workspace ? manager.workspace.dir : null);
@@ -272,7 +290,31 @@ function registerIpc() {
   handle('buddy:toolchain:install', (_event, id) => installTool(id));
 
   // ---- 其它 ----
-  handle('buddy:update', () => checkForUpdates({ currentVersion: app.getVersion() }));
+  handle('buddy:update', async () => {
+    const result = await checkForUpdates({ currentVersion: app.getVersion() });
+    // 探测成功且确实有新版本时，把本地已下载好的安装包状态一并带上，UI 可以直接显示"重启即更新"。
+    if (result.ok && result.updateAvailable) {
+      result.readyToInstall = updater.hasReadyInstaller();
+    }
+    return result;
+  });
+  // 后台下载更新：进度经 buddy:update:progress 推给渲染层，聊天不受影响。
+  handle('buddy:update:download', async (_event, info = {}) => {
+    const urls = info.useMirror === false
+      ? [info.downloadUrl]
+      : [info.mirrorUrl || info.downloadUrl, info.downloadUrl]; // 大陆网络默认镜像优先，失败回落直连
+    const download = updater.download(urls, {
+      expectedSize: Number(info.size) || 0,
+      onProgress: (progress) => safeSend(mainWindow && mainWindow.webContents, 'buddy:update:progress', progress)
+    });
+    return download;
+  });
+  handle('buddy:update:install', () => {
+    const result = updater.install();
+    // 给安装器 1 秒启动时间，然后退出旧进程；NSIS /S 完成后会自动拉起新版本。
+    setTimeout(() => app.exit(0), 1000);
+    return result;
+  });
   handle('buddy:open-external', async (_event, url) => {
     const target = String(url || '');
     if (!EXTERNAL_ALLOWLIST.some((pattern) => pattern.test(target))) throw new Error('该链接不在允许列表中');
@@ -301,6 +343,7 @@ function builtinSkillsDir() {
 function bootstrap() {
   const userData = app.getPath('userData');
   logger = createLogger({ dir: path.join(userData, 'logs'), level: process.env.BUDDY_LOG_LEVEL || 'info' });
+  updater = new Updater({ logger });
   const store = new ConnectionStore({ dir: userData, safeStorage, logger });
   manager = new SessionManager({
     store,

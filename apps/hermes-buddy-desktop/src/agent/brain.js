@@ -125,9 +125,10 @@ class Brain {
    * @param {(text:string)=>void} [options.onText]
    * @returns {Promise<{ content: string, toolCalls: Array, finishReason: string|null, usage?: object }>}
    */
-  async complete({ messages, tools, toolChoice = 'auto', signal, stream = false, onText, onToolName, temperature } = {}) {
+  async complete({ messages, tools, toolChoice = 'auto', signal, stream = false, onText, onToolName, temperature, model } = {}) {
     if (!Array.isArray(messages) || !messages.length) throw new BrainError('消息不能为空', 'empty_messages');
-    const body = { model: this.model, messages, stream: Boolean(stream) };
+    // model 支持按次覆盖：不同智能体可以用不同模型，共用同一个推理端点。
+    const body = { model: String(model || '').trim() || this.model, messages, stream: Boolean(stream) };
     if (tools && tools.length) { body.tools = tools; body.tool_choice = toolChoice; }
     if (typeof temperature === 'number') body.temperature = temperature;
 

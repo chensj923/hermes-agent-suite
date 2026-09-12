@@ -72,6 +72,7 @@ async function checkForUpdates({ currentVersion, feedUrl = RELEASES_API, fetchIm
       updateAvailable: compareVersions(latest, currentVersion) > 0,
       downloadUrl,
       mirrorUrl: mirrorUrl(downloadUrl),
+      assetSize: asset ? Number(asset.size) || 0 : 0,
       releasePage: release.html_url || null,
       publishedAt: release.published_at || null,
       notes: String(release.body || '').slice(0, 2000)

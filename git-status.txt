@@ -1,0 +1,20 @@
+ M .gitignore
+ M apps/hermes-buddy-desktop/package.json
+ M apps/hermes-buddy-desktop/src/agent/brain.js
+ M apps/hermes-buddy-desktop/src/agent/loop.js
+ M apps/hermes-buddy-desktop/src/main.js
+ M apps/hermes-buddy-desktop/src/preload.js
+ M apps/hermes-buddy-desktop/src/renderer/app.js
+ M apps/hermes-buddy-desktop/src/renderer/index.html
+ M apps/hermes-buddy-desktop/src/renderer/styles.css
+ M apps/hermes-buddy-desktop/src/session-manager.js
+ M apps/hermes-buddy-desktop/src/update-checker.js
+?? agent-test.js
+?? agent-test.out.txt
+?? apps/hermes-buddy-desktop/src/agent-store.js
+?? apps/hermes-buddy-desktop/src/updater.js
+?? git-out.txt
+?? git-status.txt
+?? rel-out.txt
+?? scripts/release_github.py
+?? syn-out.txt
