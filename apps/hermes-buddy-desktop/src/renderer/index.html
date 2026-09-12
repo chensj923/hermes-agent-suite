@@ -24,7 +24,7 @@
         <label class="connect-field">
           <span>Hermes 主机</span>
           <input id="field-host" name="host" placeholder="192.168.0.246" spellcheck="false" required>
-          <small>支持 IP、域名，或带端口的地址。会自动推导 LLM :8800、Gateway :22122、Management :8700。</small>
+          <small>支持 IP、域名，或带端口的地址。会自动推导 LLM :8800、Gateway :22122；部署管理地址（可选）默认留空。</small>
         </label>
 
         <label class="connect-field">
@@ -96,10 +96,10 @@
         </div>
       </div>
 
-      <button class="primary new-chat" id="btn-new-chat" type="button">+ 新对话</button>
+      <button class="primary new-chat" id="btn-new-chat" type="button">+ 新智能体</button>
 
       <div class="session-list" id="session-list">
-        <div class="session-empty">暂无历史会话</div>
+        <div class="session-empty">暂无智能体</div>
       </div>
 
       <div class="sidebar-footer">
@@ -129,7 +129,19 @@
         <button class="link dismiss" id="banner-dismiss" type="button" aria-label="关闭">×</button>
       </div>
 
-      <div class="chat-log" id="chat-log" aria-live="polite"></div>
+      <!-- 左右两栏：左侧对话记录，右侧执行日志，各自独立滚动 -->
+      <div class="chat-body">
+        <div class="chat-log" id="chat-log" aria-live="polite"></div>
+        <aside class="tool-pane">
+          <div class="tool-pane-header">
+            <span>执行记录</span>
+            <button class="link dismiss" id="btn-tool-clear" type="button" title="清空执行记录">清空</button>
+          </div>
+          <div class="tool-log" id="tool-log">
+            <div class="tool-empty" id="tool-empty">Hermes 执行命令、读写文件等操作会实时显示在这里</div>
+          </div>
+        </aside>
+      </div>
 
       <form class="composer" id="composer">
         <textarea id="input" rows="2" placeholder="和 Hermes 说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
@@ -147,6 +159,7 @@
         <button class="link dismiss" id="btn-context-close" type="button" aria-label="关闭">×</button>
       </div>
       <div class="context-tabs" id="context-tabs">
+        <button data-tab="agent" type="button">智能体</button>
         <button data-tab="persona" type="button">角色设定</button>
         <button data-tab="memory" type="button">记忆</button>
         <button data-tab="skills" type="button">技能</button>
