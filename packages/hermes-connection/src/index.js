@@ -164,11 +164,15 @@ class GatewayClient {
   }
 
   createSession(profile, extra) {
+    // Gateway 的 _expected_api_key() 对命名 profile（如 "buddy"）会从 secret_scope
+    // 取 API_SERVER_KEY，而不是从环境变量取。这导致环境变量里的 Key 和 profile-scoped
+    // 的 Key 不一致时返回 401。解决方案：createSession 不传 profile（走 default 路径，
+    // 用环境变量里的 API_SERVER_KEY 鉴权），profile 信息靠 Buddy 侧自行管理。
     return this.send('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       // model 缺失会被 Gateway 判成 401，属于服务端硬约束。
-      body: JSON.stringify({ model: 'hermes-agent', ...(profile ? { profile } : {}), ...(extra || {}) })
+      body: JSON.stringify({ model: 'hermes-agent', ...(extra || {}) })
     });
   }
 
