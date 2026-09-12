@@ -29,6 +29,7 @@ const api = {
   connect: (connection) => invoke('buddy:connect', connection),
   resume: () => invoke('buddy:resume'),
   disconnect: () => invoke('buddy:disconnect'),
+  disconnectAndClearCache: () => invoke('buddy:disconnect-and-clear-cache'),
   models: () => invoke('buddy:models'),
   history: () => invoke('buddy:history'),
   clearHistory: () => invoke('buddy:clear-history'),
@@ -42,10 +43,18 @@ const api = {
   onConfirmRequest: (handler) => subscribe('buddy:confirm:request', handler),
   replyConfirm: (id, approved) => invoke('buddy:confirm:reply', { id, approved }),
 
+  // ---- 智能体 ----
+  agents: () => invoke('buddy:agents'),
+  createAgent: (input) => invoke('buddy:agents:create', input || {}),
+  updateAgent: (id, patch) => invoke('buddy:agents:update', { id, patch: patch || {} }),
+  removeAgent: (id) => invoke('buddy:agents:remove', id),
+  activateAgent: (id) => invoke('buddy:agents:activate', id),
+
   // ---- 工作区 ----
   workspace: () => invoke('buddy:workspace'),
   setWorkspace: (dir) => invoke('buddy:workspace:set', dir),
   pickWorkspace: () => invoke('buddy:workspace:pick'),
+  pickWorkspacePath: () => invoke('buddy:workspace:dialog'),
   openWorkspace: (target) => invoke('buddy:workspace:open', target),
 
   // ---- 权限 ----
@@ -73,6 +82,9 @@ const api = {
 
   // ---- 其它 ----
   update: () => invoke('buddy:update'),
+  downloadUpdate: (info) => invoke('buddy:update:download', info || {}),
+  installUpdate: () => invoke('buddy:update:install'),
+  onUpdateProgress: (handler) => subscribe('buddy:update:progress', handler),
   openExternal: (url) => invoke('buddy:open-external', url)
 };
 
