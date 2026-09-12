@@ -8,6 +8,7 @@
  */
 
 const REPO = 'chensj923/hermes-agent-suite';
+const { fetchLenient } = require('./fetch-lenient');
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const ASSET_NAME = 'hermes-suite-windows-x86_64.exe';
 // 大陆网络下的镜像前缀，与 4.1 网络约束一致。
@@ -55,7 +56,7 @@ async function checkForUpdates({ currentVersion, feedUrl = RELEASES_API, fetchIm
   const controller = new AbortController();
   const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    const response = await fetchImpl(url, {
+    const response = await fetchLenient(fetchImpl, url, {
       signal: controller.signal,
       headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'hermes-buddy-desktop' }
     });
@@ -72,6 +73,7 @@ async function checkForUpdates({ currentVersion, feedUrl = RELEASES_API, fetchIm
       updateAvailable: compareVersions(latest, currentVersion) > 0,
       downloadUrl,
       mirrorUrl: mirrorUrl(downloadUrl),
+      assetSize: asset ? Number(asset.size) || 0 : 0,
       releasePage: release.html_url || null,
       publishedAt: release.published_at || null,
       notes: String(release.body || '').slice(0, 2000)
