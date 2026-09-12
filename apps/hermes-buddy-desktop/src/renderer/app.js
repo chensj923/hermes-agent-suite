@@ -48,6 +48,9 @@ const el = {
   modelSelect: $('model-select'),
   btnReconnect: $('btn-reconnect'),
   chatLog: $('chat-log'),
+  toolLog: $('tool-log'),
+  toolEmpty: $('tool-empty'),
+  btnToolClear: $('btn-tool-clear'),
   composer: $('composer'),
   input: $('input'),
   btnSend: $('btn-send'),
@@ -95,6 +98,8 @@ const state = {
   currentView: 'connect',
   settingsTab: 'persona',
   bannerActionUrl: null,
+  bannerActionClick: null,
+  updateDownloading: false,
   pendingConfirm: null         // confirmId
 };
 
@@ -106,13 +111,21 @@ function showBanner(text, tone = 'info', action = null) {
   el.bannerText.textContent = text;
   el.banner.dataset.tone = tone;
   el.banner.hidden = false;
-  if (action && action.label && action.url) {
+  // action 支持 { label, url }（外链）或 { label, onClick }（本地动作，如"立即重启安装"）。
+  if (action && action.label && action.onClick) {
+    el.bannerAction.textContent = action.label;
+    el.bannerAction.hidden = false;
+    state.bannerActionUrl = null;
+    state.bannerActionClick = action.onClick;
+  } else if (action && action.label && action.url) {
     el.bannerAction.textContent = action.label;
     el.bannerAction.hidden = false;
     state.bannerActionUrl = action.url;
+    state.bannerActionClick = null;
   } else {
     el.bannerAction.hidden = true;
     state.bannerActionUrl = null;
+    state.bannerActionClick = null;
   }
 }
 
@@ -155,7 +168,7 @@ function deriveEndpoints(hostValue) {
       host,
       llmUrl: raw,
       baseUrl: `http://${host}:22122`,
-      managementUrl: `http://${host}:8700`
+      managementUrl: ''
     };
   }
 
@@ -167,7 +180,7 @@ function deriveEndpoints(hostValue) {
     host,
     llmUrl: `http://${host}:${port}/v1/chat/completions`,
     baseUrl: `http://${host}:22122`,
-    managementUrl: `http://${host}:8700`
+    managementUrl: ''
   };
 }
 
@@ -185,6 +198,19 @@ function hostFromConnection(status) {
 // ============================================================ 聊天渲染
 
 function scrollToEnd() { el.chatLog.scrollTop = el.chatLog.scrollHeight; }
+function scrollTools() { el.toolLog.scrollTop = el.toolLog.scrollHeight; }
+
+function hideToolEmpty() {
+  if (el.toolEmpty) el.toolEmpty.hidden = true;
+}
+
+function clearToolLog() {
+  el.toolLog.textContent = '';
+  if (el.toolEmpty) {
+    el.toolEmpty.hidden = false;
+    el.toolLog.appendChild(el.toolEmpty);
+  }
+}
 
 function clearPlaceholder() {
   const placeholder = el.chatLog.querySelector('.empty');
@@ -210,23 +236,12 @@ function showPlaceholder(text) {
 }
 
 function ensureToolTrack() {
-  // 工具卡片挂在最后一个 assistant 气泡后面，按时间顺序排列。
-  const lastMsg = [...el.chatLog.querySelectorAll('.msg.assistant')].pop();
-  let track;
-  if (lastMsg) {
-    track = lastMsg.nextElementSibling;
-    if (!track || !track.classList.contains('tool-track')) {
-      track = document.createElement('div');
-      track.className = 'tool-track';
-      lastMsg.after(track);
-    }
-  } else {
-    track = el.chatLog.querySelector('.tool-track');
-    if (!track) {
-      track = document.createElement('div');
-      track.className = 'tool-track';
-      el.chatLog.appendChild(track);
-    }
+  // 工具卡片统一挂在右侧"执行记录"栏里，按时间顺序排列，与左侧对话互不干扰。
+  let track = el.toolLog.querySelector('.tool-track');
+  if (!track) {
+    track = document.createElement('div');
+    track.className = 'tool-track';
+    el.toolLog.appendChild(track);
   }
   return track;
 }
@@ -276,7 +291,8 @@ function renderToolStart({ id, name, args }) {
   card.querySelector('.tool-args').textContent = shortArgs(args);
   card.querySelector('.tool-output').hidden = true;
   card.dataset.status = 'running';
-  scrollToEnd();
+  hideToolEmpty();
+  scrollTools();
 }
 
 function renderToolResult({ id, ok, durationMs, text, name }) {
@@ -292,7 +308,7 @@ function renderToolResult({ id, ok, durationMs, text, name }) {
   // 输出给模型看的就是给用户看的；文本上限由工具层控好了。
   out.textContent = (text || '').slice(0, 8000);
   out.hidden = false;
-  scrollToEnd();
+  scrollTools();
   state.pendingTools.delete(id);
 }
 
@@ -308,7 +324,8 @@ function renderNotice({ message }) {
   node.className = 'notice';
   node.textContent = message;
   track.appendChild(node);
-  scrollToEnd();
+  hideToolEmpty();
+  scrollTools();
 }
 
 function beginAssistantBubble() {
@@ -479,32 +496,104 @@ function permLabel(level) {
   })[level] || level;
 }
 
-function renderSessionList() {
+function modelsInclude(select, value) {
+  return Array.from(select.options || []).some((option) => option.value === value);
+}
+
+// ---- 智能体列表：左侧栏。点击切换智能体（切工作区/权限/模型/上下文），齿轮打开配置 ----
+
+async function renderSessionList() {
+  const data = await api.agents().catch(() => ({ agents: [], activeId: null }));
   el.sessionList.innerHTML = '';
-  const item = document.createElement('button');
-  item.className = 'session-item';
-  item.dataset.active = 'true';
-  item.innerHTML = '<div>当前会话</div>';
-  item.addEventListener('click', () => {
-    el.sessionList.querySelectorAll('.session-item').forEach((n) => { n.dataset.active = 'false'; });
-    item.dataset.active = 'true';
-  });
-  el.sessionList.appendChild(item);
+  if (!data.agents.length) {
+    const empty = document.createElement('div');
+    empty.className = 'session-empty';
+    empty.textContent = '暂无智能体';
+    el.sessionList.appendChild(empty);
+    return;
+  }
+  for (const agent of data.agents) {
+    const item = document.createElement('div');
+    item.className = 'session-item';
+    item.dataset.active = String(agent.id === data.activeId);
+
+    const name = document.createElement('div');
+    name.className = 'agent-name';
+    name.textContent = agent.name;
+
+    const sub = document.createElement('div');
+    sub.className = 'agent-sub';
+    sub.textContent = agent.workspace
+      ? agent.workspace.split('\\').pop().split('/').pop() || agent.workspace
+      : '默认工作区';
+
+    const gear = document.createElement('button');
+    gear.className = 'agent-config';
+    gear.type = 'button';
+    gear.title = '配置这个智能体';
+    gear.textContent = '⚙';
+    gear.addEventListener('click', (event) => {
+      event.stopPropagation();
+      state.settingsTab = 'agent';
+      showView('settings');
+    });
+
+    item.append(name, sub, gear);
+    item.addEventListener('click', () => activateAgentById(agent.id));
+    el.sessionList.appendChild(item);
+  }
+}
+
+async function activateAgentById(id) {
+  try {
+    await api.activateAgent(id);
+    await refreshChatForAgent();
+  } catch (error) {
+    showBanner('切换智能体失败：' + (error.message || id), 'error');
+  }
+}
+
+/** 切换智能体后刷新整个聊天视图：历史、工作目录、权限徽标、模型下拉。 */
+async function refreshChatForAgent() {
+  const history = await api.history().catch(() => []);
+  el.chatLog.textContent = '';
+  clearToolLog();
+  if (Array.isArray(history) && history.length) {
+    for (const entry of history) addMessage(entry.role === 'user' ? 'user' : 'assistant', entry.text || '');
+  } else {
+    showPlaceholder('会话已就绪。Hermes 在远端做决策，工具在本机执行。提问前请确认顶部的工作目录与权限档位。');
+  }
+  const status = await api.status().catch(() => null);
+  if (status) {
+    applyStatus(status);
+    const agents = await api.agents().catch(() => null);
+    const active = agents && agents.agents.find((a) => a.id === agents.activeId);
+    await loadModels((active && active.model) || (status && status.model));
+    await renderSessionList();
+  }
+  el.input.focus();
 }
 
 async function enterChat(status) {
   applyStatus(status);
   showView('chat');
-  renderSessionList();
   await loadModels(status && status.model);
+  // 模型下拉优先反映当前智能体的默认模型。
+  const agents = await api.agents().catch(() => null);
+  const active = agents && agents.agents.find((a) => a.id === agents.activeId);
+  if (active && active.model && modelsInclude(el.modelSelect, active.model)) el.modelSelect.value = active.model;
+  await renderSessionList();
   const history = await api.history().catch(() => []);
   el.chatLog.textContent = '';
+  clearToolLog();
   if (Array.isArray(history) && history.length) {
     for (const entry of history) addMessage(entry.role === 'user' ? 'user' : 'assistant', entry.text || '');
   } else {
     showPlaceholder('会话已就绪。Hermes 在远端做决策，工具在本机执行。提问前请确认顶部的工作目录与权限档位。');
   }
   el.input.focus();
+  // 启动 8 秒后静默探测一次更新；有新版本会自动后台下载，不打断当前使用。
+  setTimeout(() => { autoCheckUpdate(); }, 8000);
 }
 
 // ============================================================ 连接表单提交
@@ -722,10 +811,10 @@ el.btnDisconnect.addEventListener('click', async () => {
   const confirmed = confirm('断开连接并清除所有缓存文件（连接配置、Gateway 会话、日志）？\n\n注意：清除后需要重新填写 Hermes 主机地址和 API Key。');
   if (!confirmed) return;
   
-  try { await api.clearCache(); } catch (_) {}
-  await api.disconnect().catch(() => {});
+  try { await api.disconnectAndClearCache(); } catch (_) {}
   state.activeRequestId = null;
   el.chatLog.textContent = '';
+  clearToolLog();
   hideBanner();
   setConnectStatus('缓存已清除，可重新配置。');
   applyStatus({ configured: false });
@@ -734,13 +823,18 @@ el.btnDisconnect.addEventListener('click', async () => {
 
 el.btnNewChat.addEventListener('click', async () => {
   try {
-    await api.clearHistory();
-    el.chatLog.textContent = '';
-    showPlaceholder('已开启新会话。Hermes 在远端做决策，工具在本机执行。');
-    el.input.focus();
+    // 新建一个智能体并切换过去；工作目录先留空（跟随默认），用户可点齿轮去配置。
+    await api.createAgent({ name: `智能体 ${new Date().toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })}` });
+    await refreshChatForAgent();
+    state.settingsTab = 'agent';
+    showView('settings'); // 打开配置面板，让用户直接设置工作区/模型
   } catch (error) {
-    showBanner('无法清空历史：' + error.message, 'error');
+    showBanner('创建智能体失败：' + error.message, 'error');
   }
+});
+
+el.btnToolClear.addEventListener('click', () => {
+  clearToolLog();
 });
 
 // ============================================================ 设置面板
@@ -769,6 +863,7 @@ async function renderSettings() {
     node.dataset.active = node.dataset.tab === state.settingsTab ? 'true' : 'false';
   });
   const titles = {
+    agent: '智能体配置',
     persona: '角色设定',
     memory: '记忆',
     skills: '技能',
@@ -779,7 +874,8 @@ async function renderSettings() {
   el.contextTitle.textContent = titles[state.settingsTab] || '设置';
   el.contextBody.textContent = '加载中…';
   try {
-    if (state.settingsTab === 'persona') await renderPersonaTab();
+    if (state.settingsTab === 'agent') await renderAgentTab();
+    else if (state.settingsTab === 'persona') await renderPersonaTab();
     else if (state.settingsTab === 'memory') await renderMemoryTab();
     else if (state.settingsTab === 'skills') await renderSkillsTab();
     else if (state.settingsTab === 'toolchain') await renderToolchainTab();
@@ -788,6 +884,91 @@ async function renderSettings() {
   } catch (error) {
     el.contextBody.textContent = `加载失败：${error.message}`;
   }
+}
+
+// ---- 智能体配置面板：每个智能体独立的工作区 / 权限 / 模型 ----
+
+async function renderAgentTab() {
+  const agents = await api.agents().catch(() => ({ agents: [], activeId: null }));
+  const agent = agents.agents.find((a) => a.id === agents.activeId) || agents.agents[0];
+  if (!agent) { el.contextBody.textContent = '暂无智能体'; return; }
+  const models = await api.models().catch(() => ['hermes-agent']);
+  el.contextBody.innerHTML = `
+    <h2>智能体配置</h2>
+    <p class="hint">每个智能体都有独立的工作目录、权限档位和默认模型；角色、技能、记忆跟随各自的工作区。点击左侧列表可切换。</p>
+
+    <label class="settings-field">名称
+      <input id="agent-name" value=""></label>
+    <label class="settings-field">工作目录（留空 = 默认工作区）
+      <div class="workspace-row">
+        <input id="agent-workspace" spellcheck="false" placeholder="D:\\work\\buddy">
+        <button class="ghost" id="agent-pick" type="button">浏览…</button>
+      </div>
+    </label>
+    <label class="settings-field">默认模型
+      <select id="agent-model"></select>
+    </label>
+    <fieldset class="perm-fieldset">
+      <legend>工具权限档位</legend>
+      <label class="perm-option"><input type="radio" name="agent-perm" value="read"><span><strong>只读</strong></span></label>
+      <label class="perm-option"><input type="radio" name="agent-perm" value="read-write"><span><strong>读 + 写</strong></span></label>
+      <label class="perm-option"><input type="radio" name="agent-perm" value="full"><span><strong>完全控制</strong></span></label>
+    </fieldset>
+    <div class="settings-actions">
+      <button class="primary" id="agent-save" type="button">保存并生效</button>
+      <button class="ghost danger" id="agent-delete" type="button" ${agents.agents.length <= 1 ? 'disabled title="至少保留一个智能体"' : ''}>删除此智能体</button>
+    </div>
+    <div class="settings-status" id="agent-status" role="status"></div>
+  `;
+  $('agent-name').value = agent.name;
+  $('agent-workspace').value = agent.workspace || '';
+  const modelSelect = $('agent-model');
+  for (const id of models) {
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = id;
+    modelSelect.appendChild(option);
+  }
+  if (models.includes(agent.model)) modelSelect.value = agent.model;
+  const permInput = el.contextBody.querySelector(`input[name="agent-perm"][value="${agent.permission}"]`);
+  if (permInput) permInput.checked = true;
+
+  $('agent-pick').addEventListener('click', async () => {
+    const result = await api.pickWorkspacePath().catch(() => null);
+    if (result && !result.canceled && result.path) $('agent-workspace').value = result.path;
+  });
+
+  $('agent-save').addEventListener('click', async () => {
+    const patch = {
+      name: $('agent-name').value.trim(),
+      workspace: $('agent-workspace').value.trim(),
+      model: modelSelect.value,
+      permission: (el.contextBody.querySelector('input[name="agent-perm"]:checked') || {}).value
+    };
+    try {
+      const result = await api.updateAgent(agent.id, patch);
+      $('agent-status').textContent = (result && result.warning)
+        ? `已保存，但${result.warning}`
+        : '已保存并生效（工作区、权限、模型都已切换）。';
+      $('agent-status').dataset.tone = (result && result.warning) ? 'warn' : 'ok';
+      await refreshChatForAgent();
+    } catch (error) {
+      $('agent-status').textContent = `保存失败：${error.message}`;
+      $('agent-status').dataset.tone = 'error';
+    }
+  });
+
+  $('agent-delete').addEventListener('click', async () => {
+    if (!confirm(`删除智能体「${agent.name}」？其工作目录内的文件不会被删除。`)) return;
+    try {
+      await api.removeAgent(agent.id);
+      await refreshChatForAgent();
+      renderAgentTab();
+    } catch (error) {
+      $('agent-status').textContent = `删除失败：${error.message}`;
+      $('agent-status').dataset.tone = 'error';
+    }
+  });
 }
 
 async function renderPersonaTab() {
@@ -1021,18 +1202,66 @@ async function renderWorkspaceTab() {
 // ============================================================ 横幅与外部链接
 
 el.bannerAction.addEventListener('click', async () => {
-  if (!state.bannerActionUrl) return;
+  if (!state.bannerActionUrl && !state.bannerActionClick) return;
+  if (state.bannerActionClick) { state.bannerActionClick(); return; }
   await api.openExternal(state.bannerActionUrl).catch((error) => showBanner(error.message || '无法打开链接', 'error'));
 });
 el.bannerDismiss.addEventListener('click', hideBanner);
 
+// ---- 自动更新：探测 → 后台下载（聊天不受影响）→ 一键重启静默安装 ----
+
+async function autoCheckUpdate() {
+  if (state.updateDownloading) return;
+  const result = await api.update().catch(() => null);
+  if (!result || !result.ok || !result.updateAvailable) return;
+  if (result.readyToInstall) {
+    showBanner(`新版本 ${result.latest} 已下载完成，重启即可完成更新`, 'info', { label: '立即重启安装', onClick: installNow });
+    return;
+  }
+  startDownload(result);
+}
+
+function installNow() {
+  showBanner('正在退出并安装新版本…');
+  api.installUpdate().catch((error) => showBanner(`安装失败：${error.message}`, 'error'));
+}
+
+api.onUpdateProgress((progress) => {
+  if (progress && typeof progress.percent === 'number') {
+    showBanner(`新版本正在后台下载… ${progress.percent}%（不影响当前使用）`);
+    state.updateDownloading = true;
+  }
+});
+
+async function startDownload(result) {
+  state.updateDownloading = true;
+  showBanner(`发现新版本 ${result.latest}（当前 ${result.current}），正在后台下载…`);
+  try {
+    await api.downloadUpdate({
+      downloadUrl: result.downloadUrl,
+      mirrorUrl: result.mirrorUrl,
+      size: result.assetSize || 0
+    });
+    state.updateDownloading = false;
+    showBanner(`新版本 ${result.latest} 已就绪，重启即可完成更新`, 'info', { label: '立即重启安装', onClick: installNow });
+  } catch (error) {
+    state.updateDownloading = false;
+    const url = result.mirrorUrl || result.downloadUrl || result.releasePage;
+    showBanner(`自动下载失败（${error.message || '网络原因'}）`, 'warn', url ? { label: '手动下载', url } : null);
+  }
+}
+
 el.btnUpdate.addEventListener('click', async () => {
+  if (state.updateDownloading) { showBanner('更新正在下载中，请稍候…'); return; }
   showBanner('正在检查更新…');
   const result = await api.update().catch(() => ({ ok: false, reason: 'error' }));
   if (!result.ok) { showBanner(`无法检查更新（${result.reason || '未知原因'}），可稍后重试或用镜像地址手动下载`, 'warn'); return; }
   if (!result.updateAvailable) { showBanner(`已是最新版本（${result.current}）`); return; }
-  const url = result.mirrorUrl || result.downloadUrl || result.releasePage;
-  showBanner(`发现新版本 ${result.latest}（当前 ${result.current}）`, 'info', url ? { label: '打开下载页', url } : null);
+  if (result.readyToInstall) {
+    showBanner(`新版本 ${result.latest} 已下载完成，重启即可完成更新`, 'info', { label: '立即重启安装', onClick: installNow });
+    return;
+  }
+  startDownload(result);
 });
 
 async function renderGatewayDiagTab() {
