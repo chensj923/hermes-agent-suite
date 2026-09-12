@@ -12,6 +12,7 @@ const { buildSystemPrompt, DEFAULT_PERSONA } = require('./agent/prompts');
 const { MemoryStore, rememberLine } = require('./memory');
 const { SkillStore } = require('./skills');
 const { detectTooling, renderToolchainForPrompt } = require('./toolchain');
+const { AgentStore } = require('./agent-store');
 
 const MAX_HISTORY_MESSAGES = 30;
 const PERSONA_FILE = 'persona.md';
@@ -50,7 +51,6 @@ class SessionManager {
     this.gateway = null;
     this.brain = null;
     this.session = null;
-    this.messages = [];       // OpenAI 格式历史（不含 system）
     this.controllers = new Map();
     this.lastGatewayError = null; // { code, message, at }，仅用于 UI 诊断，不含密钥
 
@@ -59,6 +59,42 @@ class SessionManager {
     this.memory = null;
     this.skills = null;
     this.loop = null;
+
+    // 智能体：每个智能体独立的工作区/权限/模型，会话历史也按智能体隔离。
+    try {
+      this.agentStore = new AgentStore({ dir: appDir, logger: this.logger });
+    } catch (error) {
+      this.logger.warn('agent-store-init-failed', { error: error.message });
+      this.agentStore = null;
+    }
+    this.agentMessages = new Map(); // agentId -> OpenAI 消息数组
+  }
+
+  get activeAgent() {
+    return this.agentStore ? this.agentStore.active() : null;
+  }
+
+  /** 智能体配置的工作目录优先；留空则用连接时的默认工作目录。 */
+  effectiveWorkspace(connection) {
+    const agent = this.activeAgent;
+    return (agent && agent.workspace) || (connection && connection.workspace) || '';
+  }
+
+  effectiveModel(connection) {
+    const agent = this.activeAgent;
+    return (agent && agent.model) || (connection && connection.model) || '';
+  }
+
+  /** 会话历史按智能体隔离：切换智能体即切换上下文。 */
+  get messages() {
+    const id = this.activeAgent ? this.activeAgent.id : 'default';
+    if (!this.agentMessages.has(id)) this.agentMessages.set(id, []);
+    return this.agentMessages.get(id);
+  }
+
+  set messages(value) {
+    const id = this.activeAgent ? this.activeAgent.id : 'default';
+    this.agentMessages.set(id, Array.isArray(value) ? value : []);
   }
 
   // ---------------------------------------------------------------- 状态
@@ -87,19 +123,20 @@ class SessionManager {
 
   /** 按当前连接装配本地运行时；工作目录切换后需要重建。 */
   ensureRuntime(connection) {
-    const workspaceDir = (connection && connection.workspace) || '';
+    const workspaceDir = this.effectiveWorkspace(connection);
     if (!this.workspace || this.workspace.dir !== path.resolve(workspaceDir)) {
       this.workspace = new Workspace({ root: workspaceDir, logger: this.logger });
       this.workspace.ensure();
       this.memory = new MemoryStore({ workspace: this.workspace, appDir: this.appDir, logger: this.logger });
       this.memory.ensure();
       this.skills = new SkillStore({ builtinDir: this.builtinSkillsDir, workspace: this.workspace, logger: this.logger });
+      const agent = this.activeAgent;
       this.tools = new ToolRegistry({
         workspace: this.workspace,
         logger: this.logger,
-        permission: (connection && connection.permission) || 'read-write'
+        permission: (agent && agent.permission) || (connection && connection.permission) || 'read-write'
       });
-      this.logger.info('workspace-ready', { workspace: this.workspace.dir });
+      this.logger.info('workspace-ready', { workspace: this.workspace.dir, agent: agent && agent.name });
     }
     if (!this.brain && connection) {
       this.brain = new Brain({
@@ -147,12 +184,26 @@ class SessionManager {
     let session = null;
     let deployment = null;
     let gatewayWarning = null;
+    this.lastGatewayError = null;
     if (this.provisioning && normalized.baseUrl) {
+      const gateway = this.provisioning.createGateway({ baseUrl: normalized.baseUrl, apiKey: normalized.apiKey });
       try {
-        const gateway = this.provisioning.createGateway({ baseUrl: normalized.baseUrl, apiKey: normalized.apiKey });
         health = await gateway.health();
         session = await gateway.createSession(normalized.profile);
-        if (normalized.managementUrl) {
+        this.gateway = gateway;
+        this.session = session;
+      } catch (error) {
+        // Gateway 不通只降级：本机工具链路不依赖它。
+        gatewayWarning = describeGatewayError(error);
+        this.lastGatewayError = error;
+        this.dumpGatewayDiagnostic(normalized.baseUrl, normalized.managementUrl, error);
+        this.logger.warn('gateway-unreachable', { baseUrl: normalized.baseUrl, error: error.message });
+      }
+
+      // 部署清单（provisioning）是可选能力：当前 Hermes 服务端的 8700 端口跑的是 Web UI，
+      // 并没有 /api/provisioning/* 端点。这里失败不应该影响 Gateway"就绪"状态。
+      if (this.session && normalized.managementUrl) {
+        try {
           const managementGateway = this.provisioning.createGateway({ baseUrl: normalized.managementUrl, apiKey: normalized.apiKey });
           deployment = await this.provisioning.provision({
             gateway: managementGateway,
@@ -160,12 +211,14 @@ class SessionManager {
             deployment: this.deployment,
             registry: this.registry
           });
+        } catch (error) {
+          if (error && (error.code === 'not_found' || error.status === 404)) {
+            this.logger.info('provisioning-not-available', { managementUrl: normalized.managementUrl, message: error.message });
+          } else {
+            this.logger.warn('provisioning-failed', { managementUrl: normalized.managementUrl, error: error.message });
+          }
+          // 不设置 lastGatewayError / gatewayWarning：provisioning 不是 Gateway 核心功能。
         }
-      } catch (error) {
-        // Gateway 不通只降级：本机工具链路不依赖它。
-        gatewayWarning = describeGatewayError(error);
-        this.lastGatewayError = error;
-        this.logger.warn('gateway-unreachable', { baseUrl: normalized.baseUrl, error: error.message });
       }
     } else if (!normalized.baseUrl) {
       gatewayWarning = '未配置 Gateway，跳过会话登记与部署清单。';
@@ -222,6 +275,7 @@ class SessionManager {
           gateway = gw;
         } catch (error) {
           this.lastGatewayError = error;
+          this.dumpGatewayDiagnostic(stored.baseUrl, stored.managementUrl, error);
           this.logger.warn('resume-gateway-degraded', { baseUrl: stored.baseUrl, error: error.message });
         }
       }
@@ -259,7 +313,7 @@ class SessionManager {
 
   // ---------------------------------------------------------------- 对话
 
-  async send({ requestId, text, onConfirm }, onEvent) {
+  async send({ requestId, text, onConfirm, model }, onEvent) {
     await this.ensureReady();
     const id = String(requestId || `req-${Date.now()}`);
     if (this.controllers.has(id)) throw new Error('该请求已在进行中');
@@ -276,7 +330,9 @@ class SessionManager {
         userMessage: text,
         signal: controller.signal,
         onEvent: emit,
-        onConfirm
+        onConfirm,
+        // 智能体配置的模型优先，其次用界面下拉里选的，最后用连接默认。
+        model: this.effectiveModel(this.connection) || model
       });
 
       this.messages.push({ role: 'user', content: String(text || '') });
@@ -328,6 +384,30 @@ class SessionManager {
     return { cleared: true };
   }
 
+  /** 把 Gateway 错误写成明文诊断文件，方便远程排查。 */
+  dumpGatewayDiagnostic(baseUrl, managementUrl, error) {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const appDir = this.store && this.store.dir ? this.store.dir : this.appDir;
+      if (!appDir) return;
+      const file = path.join(appDir, 'gateway-diagnostic.json');
+      const payload = {
+        at: new Date().toISOString(),
+        baseUrl,
+        managementUrl,
+        error: {
+          code: error && (error.code || error.status),
+          status: error && error.status,
+          message: error && error.message,
+          stack: error && error.stack
+        },
+        described: describeGatewayError(error)
+      };
+      fs.writeFileSync(file, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8' });
+    } catch (_) { /* 诊断写入失败不影响主流程 */ }
+  }
+
   trimHistory() {
     if (this.messages.length > MAX_HISTORY_MESSAGES * 2) {
       this.messages = this.messages.slice(-MAX_HISTORY_MESSAGES);
@@ -355,6 +435,65 @@ class SessionManager {
       workspaceTree: tree && tree.tree ? tree.tree : '',
       modelName: this.connection ? this.connection.model : ''
     }) + `\n\n【本机工具链】\n${renderToolchainForPrompt()}`;
+  }
+
+  // ---------------------------------------------------------------- 智能体
+
+  listAgents() {
+    if (!this.agentStore) return { agents: [], activeId: null };
+    return { agents: this.agentStore.list(), activeId: this.agentStore.activeId };
+  }
+
+  createAgent(input = {}) {
+    if (!this.agentStore) throw new Error('智能体存储不可用');
+    const agent = this.agentStore.create(input);
+    return this.activateAgent(agent.id);
+  }
+
+  updateAgent(id, patch = {}) {
+    if (!this.agentStore) throw new Error('智能体存储不可用');
+    const agent = this.agentStore.update(id, patch);
+    // 改的就是当前智能体：立即生效（工作区/权限/模型都可能在改）。
+    if (this.agentStore.activeId === id) return this.activateAgent(id);
+    return { agent, switched: false };
+  }
+
+  removeAgent(id) {
+    if (!this.agentStore) throw new Error('智能体存储不可用');
+    const removed = this.agentStore.remove(id);
+    // 若删的是当前智能体，切到新的当前项。
+    if (this.agentStore.activeId) this.activateAgent(this.agentStore.activeId);
+    return { removed, activeId: this.agentStore.activeId };
+  }
+
+  /** 切换智能体：重建工作区/工具/权限，恢复该智能体自己的对话历史。 */
+  activateAgent(id) {
+    if (!this.agentStore) throw new Error('智能体存储不可用');
+    const agent = this.agentStore.activate(id);
+    let warning = null;
+    try {
+      // 无论是否已连接，都先把工作区目录落盘（.hermes/、AGENTS.md），
+      // 否则"创建智能体 → 填工作目录 → 保存"在未连接时目录不会出现。
+      const target = this.effectiveWorkspace(this.connection);
+      if (target) {
+        if (!this.workspace || this.workspace.dir !== path.resolve(target)) {
+          this.ensureRuntime(this.connection);
+        } else {
+          // 目录没变也可能被用户手动删过：保存即补建。
+          this.workspace.ensure();
+          if (this.tools && agent.permission) this.tools.setPermission(agent.permission);
+        }
+      }
+      if (this.connection && this.brain && this.tools) {
+        this.loop = new AgentLoop({ brain: this.brain, tools: this.tools, workspace: this.workspace, logger: this.logger });
+      }
+    } catch (error) {
+      // 目录建不出来（盘符不存在/无权限）不阻断切换，但要把原因带给 UI。
+      warning = `工作目录创建失败：${error.message}`;
+      this.logger.warn('agent-workspace-ensure-failed', { id: agent.id, workspace: agent.workspace, error: error.message });
+    }
+    this.logger.info('agent-activated', { id: agent.id, name: agent.name, workspace: agent.workspace || '(默认)' });
+    return { agent, workspace: this.describeWorkspace(), warning };
   }
 
   // ---------------------------------------------------------------- 工作区
@@ -405,6 +544,11 @@ class SessionManager {
   setPermission(level) {
     if (!this.tools) throw new Error('工作区尚未就绪');
     this.tools.setPermission(level);
+    // 权限档位跟随当前智能体保存，切换智能体后各自记住自己的档位。
+    const agent = this.activeAgent;
+    if (agent && this.agentStore) {
+      try { this.agentStore.update(agent.id, { permission: level }); } catch (_) {}
+    }
     if (this.connection) {
       const updated = { ...this.connection, permission: level };
       try { this.connection = this.store.save(updated); } catch (error) {
@@ -487,14 +631,43 @@ class SessionManager {
 
   disconnect() {
     this.abort();
-    const cleared = this.store.clear();
+    const cleared = this.store.clear(false); // 清除配置
     this.connection = null;
     this.brain = null;
     this.gateway = null;
     this.session = null;
     this.messages = [];
+    this.lastGatewayError = null;
     this.logger.info('disconnected', { cleared });
     return { cleared };
+  }
+
+  clearCache() {
+    this.abort();
+    // 彻底清除所有缓存文件
+    const appData = this.store.dir || app.getPath('userData');
+    const fs = require('fs');
+    const path = require('path');
+    const dirs = ['gateway-cache', 'logs', 'memory', 'persona', 'skills'];
+    dirs.forEach((subDir) => {
+      const dirPath = path.join(appData, subDir);
+      try { fs.rmSync(dirPath, { recursive: true, force: true }); } catch (_) {}
+    });
+    // 清除配置文件
+    this.store.clear();
+    this.connection = null;
+    this.brain = null;
+    this.gateway = null;
+    this.session = null;
+    this.messages = [];
+    this.lastGatewayError = null;
+    this.workspace = null;
+    this.tools = null;
+    this.memory = null;
+    this.skills = null;
+    this.loop = null;
+    this.logger.info('cache-cleared');
+    return { cleared: true };
   }
 }
 
