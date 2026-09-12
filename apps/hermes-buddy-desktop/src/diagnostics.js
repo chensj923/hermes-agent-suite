@@ -152,6 +152,11 @@ const GUIDANCE = {
     label: '未填写',
     userMessage: '这个端点留空了 —— Buddy 不强求它，但填上能解锁会话登记等高级功能。',
     actionHint: null
+  },
+  management_optional: {
+    label: '管理端点可选',
+    userMessage: '8700 当前不是 Hermes Management 服务（可能是 WorkBuddy 前端），不影响聊天和本机工具，可留空。',
+    actionHint: null
   }
 };
 
@@ -167,7 +172,7 @@ async function diagnose(options = {}) {
   const endpoints = [
     { key: 'llmUrl', label: '推理端点 (LLM)', value: options.llmUrl, critical: true },
     { key: 'gatewayBaseUrl', label: 'Gateway', value: options.gatewayBaseUrl, critical: false },
-    { key: 'managementUrl', label: '部署管理', value: options.managementUrl, critical: false }
+    { key: 'managementUrl', label: '部署管理（可选）', value: options.managementUrl, critical: false }
   ];
 
   const results = [];
@@ -179,7 +184,12 @@ async function diagnose(options = {}) {
     }
     try {
       const { status, reason } = await probe(ep.value, { timeoutMs: options.timeoutMs, fetchImpl: options.fetchImpl });
-      const finalReason = classify(status, reason);
+      let finalReason = classify(status, reason);
+      // Management 端点 404 很常见：当前 Hermes 服务端 8700 跑的是 WorkBuddy 前端代理，
+      // 并不是真正的 Hermes Management 服务。把它降级为可选提示，避免用户以为连接失败。
+      if (ep.key === 'managementUrl' && finalReason === 'not_found') {
+        finalReason = 'management_optional';
+      }
       const g = guidanceFor(finalReason);
       results.push({ key: ep.key, label: ep.label, value: ep.value, status, reason: finalReason, critical: ep.critical, ...g });
     } catch (error) {
