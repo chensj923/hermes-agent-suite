@@ -24,7 +24,7 @@
         <label class="connect-field">
           <span>Hermes 主机</span>
           <input id="field-host" name="host" placeholder="192.168.0.246" spellcheck="false" required>
-          <small>支持 IP、域名，或带端口的地址。这是 <strong>Gateway</strong> 地址（会话登记用，默认端口 22122）。推理用的大模型端点在下面「高级设置 → 推理端点」单独填——Gateway 的 22122 是服务端 agent 端点，不能当推理端点用。</small>
+          <small>支持 IP、域名，或带端口的地址。这是 <strong>Gateway</strong> 地址（会话登记用，默认端口 22122）。<strong>填这一个地址 + API Key 就够了</strong>：推理端点会自动指向同主机上的 Buddy 直通代理（<code>:8811</code>）——它由「生成服务端准备脚本」一键部署，上游大模型由 Hermes 服务端持有，密钥不出服务器。</small>
         </label>
 
         <label class="connect-field">
@@ -37,9 +37,9 @@
           <summary>高级设置</summary>
           <div class="advanced-body">
             <label class="connect-field">
-              <span>推理端点（LLM）· 必填</span>
-              <input id="field-llmUrl" name="llmUrl" placeholder="https://ark.cn-beijing.volces.com/api/v3/chat/completions" spellcheck="false">
-              <small>必须是<strong>原生支持 function calling 的 OpenAI 兼容端点</strong>。可填：火山方舟 Ark、DeepSeek、通义、本地 vLLM/Ollama，或服务器上的 <code>hermes proxy start --host 0.0.0.0 --port 8645</code>。<strong>不要填 Gateway 的 22122</strong>——那是服务端 agent 端点，会忽略本地工具、在服务器上执行命令。</small>
+              <span>推理端点（LLM）· 选填（默认留空）</span>
+              <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8811/v1/chat/completions" spellcheck="false">
+              <small>留空 = 用 Hermes 本机上的<strong>直通代理 :8811</strong>（推荐，由服务端准备脚本部署）。只有在你想让 Buddy 直连别的 OpenAI 兼容端点时才手填（火山方舟 Ark、DeepSeek、通义、本地 vLLM/Ollama 等）——注意此时密钥存在本机。<strong>不要填 Gateway 的 22122</strong>——那是服务端 agent 端点，会忽略本地工具、在服务器上执行命令。</small>
             </label>
             <label class="connect-field">
               <span>Gateway 地址</span>
