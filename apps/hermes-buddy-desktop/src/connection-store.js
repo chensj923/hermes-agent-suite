@@ -89,12 +89,12 @@ function publicView(connection) {
   };
 }
 
-/** 已知会冒充 Hermes Gateway 的非 Gateway 端口。 */
-const NON_GATEWAY_PORTS = new Set(['22121', '22123', '22124', '22125']);
+/** 已知会冒充 Hermes Gateway 的非 Gateway 端口（含 8811 推理直通代理、8645 hermes proxy）。 */
+const NON_GATEWAY_PORTS = new Set(['22121', '22123', '22124', '22125', '8811', '8645']);
 
-/** 用户容易把 LLM（8800）或 Gateway（22122）端口填进部署管理地址里，纠正为 8700。 */
+/** 用户容易把推理端点（8811 直通代理 / 8800）或 Gateway（22122）端口填进部署管理地址里，纠正为 8700。 */
 const MANAGEMENT_PORT = '8700';
-const NON_MANAGEMENT_PORTS = new Set(['8800', '22122', '22121', '22123', '22124', '22125']);
+const NON_MANAGEMENT_PORTS = new Set(['8811', '8800', '8645', '22122', '22121', '22123', '22124', '22125']);
 
 /** 把用户错填的 openclaw / 旧 Gateway 端口纠正为 22122。 */
 function fixGatewayPort(urlString, defaultPort = '22122') {
