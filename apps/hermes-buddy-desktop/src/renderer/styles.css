@@ -64,7 +64,7 @@ button:disabled { opacity: .5; cursor: default; }
 .ghost.danger:hover:not(:disabled) { background: rgba(248,113,113,.1); }
 .link { background: none; border: 0; color: var(--accent-hover); padding: 0 6px; text-decoration: underline; cursor: pointer; }
 .link.danger { color: var(--danger); }
-.link.dismiss { color: var(--muted); text-decoration: none; font-size: 18px; line-height: 1; }
+.link.dismiss { color: var(--muted); text-decoration: none; font-size: 18px; line-height: 1; padding: 4px 8px; margin: -4px -8px; cursor: pointer; z-index: 1; position: relative; }
 
 /* ---------- 连接页（WorkBuddy 风格） ---------- */
 .connect-overlay {
