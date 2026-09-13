@@ -112,7 +112,7 @@ test('connect: 推理端点不通则失败，且不写盘', async () => {
   assert.equal(fs.existsSync(path.join(dir, 'conn.json')), false, '失败时不应保存凭据');
 });
 
-/** 模拟“Gateway 22122 是 agent 端点、8800 是纯推理端点”的部署。 */
+/** 模拟“Gateway 22122 是 agent 端点、8645（hermes proxy 真实默认端口）是纯推理端点”的部署。 */
 function agentModeFetch() {
   const make = (payload) => ({
     ok: true, status: 200,
@@ -139,9 +139,10 @@ function agentModeFetch() {
 test('connect: agent 端点自动切换到同主机纯推理端口', async () => {
   const { manager, workspace } = makeManager({ fetchImpl: agentModeFetch() });
   const result = await manager.connect(CONNECTION(workspace));
-  assert.equal(result.connection.llmUrl, 'http://192.168.0.246:8800/v1/chat/completions');
+  // v2.3.9：8645 是 hermes proxy 的真实默认端口（8800 是早期误判），优先试它。
+  assert.equal(result.connection.llmUrl, 'http://192.168.0.246:8645/v1/chat/completions');
   assert.ok(result.endpointNotice, '应带上自动切换提示');
-  assert.match(result.endpointNotice, /8800/);
+  assert.match(result.endpointNotice, /8645/);
 });
 
 test('connect: Gateway 不通只降级，本机照样能干活', async () => {
