@@ -163,12 +163,12 @@ function deriveEndpoints(hostValue) {
   if (/^https?:\/\//i.test(raw)) {
     const url = new URL(raw);
     const host = url.hostname;
-    // LLM（api_server 平台）与 Gateway 同端口（22122），仅路径不同
+    // 主机框只用来推导 Gateway；推理端点必须单独填（22122 是服务端 agent 端点，不能用）
     const port = url.port || '22122';
     return {
       host,
-      llmUrl: raw,
-      baseUrl: `http://${host}:22122`,
+      llmUrl: '',
+      baseUrl: `http://${host}:${port}`,
       managementUrl: ''
     };
   }
@@ -176,24 +176,27 @@ function deriveEndpoints(hostValue) {
   const m = raw.match(/^([^:]+)(?::(\d+))?$/);
   if (!m) return null;
   const host = m[1];
-  // 默认端口即 Gateway 端口（22122）；LLM 与 Gateway 同端口，无需独立 8800
+  // Gateway 端口（会话登记用）。推理端点不再从这里推导：
+  // Gateway 的 22122 是服务端 agent 端点，当推理端点用会失效（已实测）。
   const port = m[2] || '22122';
   return {
     host,
-    llmUrl: `http://${host}:${port}/v1/chat/completions`,
-    baseUrl: `http://${host}:22122`,
+    llmUrl: '',
+    baseUrl: `http://${host}:${port}`,
     managementUrl: ''
   };
 }
 
 function hostFromConnection(status) {
-  if (!status || !status.llmUrl) return '';
+  // 主机框代表 Gateway，所以优先从 baseUrl 取；llmUrl 可能是外部供应商（如 Ark）。
+  const source = (status && (status.baseUrl || status.llmUrl)) || '';
+  if (!source) return '';
   try {
-    const url = new URL(status.llmUrl);
+    const url = new URL(source);
     const port = url.port || '22122';
     return `${url.hostname}:${port}`;
   } catch (_) {
-    return status.llmUrl;
+    return source;
   }
 }
 
@@ -629,8 +632,16 @@ el.connectForm.addEventListener('submit', async (event) => {
     return;
   }
 
+  // 推理端点必填且不能由 Gateway 推导：Gateway 的 22122 是服务端 agent 端点，用不了。
+  const llmUrl = el.fieldLlmUrl.value.trim();
+  if (!llmUrl) {
+    setConnectStatus('请填写「推理端点（LLM）」：必须是原生支持 function calling 的 OpenAI 兼容端点（如火山方舟 Ark / DeepSeek / 服务器上的 hermes proxy），不能用 Gateway 的 22122。不确定就点「生成服务端准备脚本」看第 4 步。', 'error');
+    el.fieldLlmUrl.focus();
+    return;
+  }
+
   const payload = {
-    llmUrl: el.fieldLlmUrl.value.trim() || derived.llmUrl,
+    llmUrl,
     baseUrl: el.fieldBaseUrl.value.trim() || derived.baseUrl,
     managementUrl: el.fieldManagementUrl.value.trim() || derived.managementUrl,
     apiKey: el.fieldApiKey.value,
@@ -1385,7 +1396,8 @@ el.modelSelect.addEventListener('change', () => {
   }
 
   // 已配置：回填字段
-  if (status.llmUrl) el.fieldHost.value = hostFromConnection(status);
+  if (status.baseUrl || status.llmUrl) el.fieldHost.value = hostFromConnection(status);
+  if (status.llmUrl) el.fieldLlmUrl.value = status.llmUrl;
   if (status.baseUrl) el.fieldBaseUrl.value = status.baseUrl;
   if (status.managementUrl) el.fieldManagementUrl.value = status.managementUrl;
   if (status.profile) el.fieldProfile.value = status.profile;
