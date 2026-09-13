@@ -17,9 +17,19 @@ class BrainError extends Error {
 }
 
 /**
+ * Buddy 推理直通代理端口（在 Hermes 主机上由「服务端准备脚本」部署）。
+ *
+ * 为什么不是 22122：Gateway 的 /v1/chat/completions 与 /v1/responses 都是服务端 agent 端点——
+ * 无视请求 tools、注入约 1.2 万 token 系统提示、在服务器本地执行命令（2026-09-14 实测）。
+ * 8811 上跑的是零依赖直通代理，复用 Hermes 自己配好的上游并原样透传 tools。
+ */
+const BUDDY_PROXY_PORT = '8811';
+
+/**
  * 从 Gateway 地址推导 LLM 推理端点。
- * LLM（api_server 平台）与 Gateway 同主机同端口（22122），仅路径不同。
- * 用户只填一个地址是最省事的，但推导错了要能一眼看懂报错，所以保留原文兜底。
+ *
+ * 只给 Hermes 主机时，推理端点默认是**同主机上的 Buddy 直通代理**（8811），
+ * 而不是 Gateway 自己的 22122（那是服务端 agent 端点，Buddy 用不了）。
  */
 function deriveLlmEndpoint(gatewayUrl, explicit) {
   const raw = String(explicit || '').trim();
@@ -30,8 +40,7 @@ function deriveLlmEndpoint(gatewayUrl, explicit) {
   try { url = new URL(/^https?:\/\//i.test(source) ? source : `http://${source}`); } catch (_) {
     throw new BrainError(`Hermes 地址无法解析: ${source}`, 'invalid_endpoint');
   }
-  const port = url.port || '22122';
-  url.port = port; // LLM 与 Gateway 同端口（22122），仅路径不同
+  url.port = BUDDY_PROXY_PORT; // 同主机上的直通代理；Gateway 的 22122 是 agent 端点，不能当推理端点
   url.pathname = '/v1/chat/completions';
   url.search = '';
   url.hash = '';
@@ -349,7 +358,8 @@ module.exports = {
   normalizeLlmEndpoint,
   parseCompletionSse,
   normalizeToolCalls,
-  DEFAULT_TIMEOUT_MS
+  DEFAULT_TIMEOUT_MS,
+  BUDDY_PROXY_PORT
 };
 
 // GatewayError 仍在主进程其它链路上使用，这里一并保持引用清晰。
