@@ -214,6 +214,50 @@ class Brain {
     try { return await this.fetchModels(); } catch (_) { return [this.model]; }
   }
 
+  /**
+   * 端点能力探测：区分「无状态纯推理端点（hermes proxy，Buddy 适用）」与
+   * 「服务端 agent 端点（Gateway 的 api_server 平台，Buddy 不适用）」。
+   *
+   * 实测（2026-09-13，192.168.0.231:22122）：Gateway 的 /v1/chat/completions 会
+   * 1) 无视请求里的 tools（返回 tool_calls: null）；
+   * 2) 注入约 1.2 万 token 的服务端 agent 系统提示（prompt_tokens 远超发送量）；
+   * 3) 在服务器本地执行命令（ls /root）并把文字结果返回。
+   * Buddy 的本地工具循环对这种端点完全不工作——模型会把"在服务器上跑的命令"
+   * 当作对话内容叙述出来，本地执行记录永远是空的。
+   *
+   * 探测方法：发一个最小 function-calling 请求，看返回：
+   * - 有 tool_calls → 无状态纯推理端点（stateless）；
+   * - 无 tool_calls 且 prompt_tokens 远超发送量（服务端注入）→ agent 端点（agent_endpoint）；
+   * - 无 tool_calls 且无明显注入 → 模型可能不支持 FC（no_fc）。
+   */
+  async probeCapability(signal) {
+    const messages = [
+      { role: 'system', content: 'You are a local Windows desktop assistant. All tools execute locally on the user\'s Windows machine.' },
+      { role: 'user', content: 'List the files in the current working directory. You must call the provided tool to do this.' }
+    ];
+    const tools = [{
+      type: 'function',
+      function: {
+        name: 'list_dir',
+        description: 'List entries of a directory on the local Windows machine',
+        parameters: { type: 'object', properties: { path: { type: 'string', description: 'Directory path' } }, required: [] }
+      }
+    }];
+    const result = await this.complete({ messages, tools, toolChoice: 'auto', stream: false, signal });
+    if (result.toolCalls && result.toolCalls.length) {
+      return { verdict: 'stateless', detail: '端点按 OpenAI function calling 返回了工具调用' };
+    }
+    const promptTokens = result.usage && Number(result.usage.prompt_tokens) || 0;
+    const sentTokens = 60; // 上面的消息 + 工具 schema 估个下限，足够区分「注入」与「没注入」
+    if (promptTokens > 2000) {
+      return { verdict: 'agent_endpoint', promptTokens, detail: `服务端注入了约 ${promptTokens} token 的自有系统提示（实际发送不足 ${sentTokens}），请求被服务端 agent 接管` };
+    }
+    if (/\/root\b|\/home\//.test(result.content || '')) {
+      return { verdict: 'agent_endpoint', promptTokens, detail: '回复中出现服务端路径（如 /root），说明命令在服务端执行' };
+    }
+    return { verdict: 'no_fc', promptTokens, detail: '端点没有返回 tool_calls，模型可能不支持 function calling' };
+  }
+
   /** 严格的连通性检查：拿不到模型清单就抛错，用于连接校验。 */
   async assertReachable() {
     const models = await this.fetchModels();
