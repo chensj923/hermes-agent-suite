@@ -653,6 +653,10 @@ el.connectForm.addEventListener('submit', async (event) => {
       workspace: payload.workspace
     };
     await enterChat(status);
+    // 推理端点被自动纠正（agent 端点 → 纯推理端点）时，明确告诉用户切到了哪里。
+    if (result.endpointNotice) {
+      renderNotice({ message: result.endpointNotice });
+    }
     // Gateway 未连通只降级，不再弹报错横幅；在主界面留个一次性系统提示即可。
     if (result.gatewayWarning) {
       renderNotice({ message: `Gateway 未就绪（${result.gatewayWarning}），聊天和本机工具不受影响。` });
@@ -1395,6 +1399,9 @@ el.modelSelect.addEventListener('change', () => {
   if (resumed.ok) {
     status = await api.status().catch(() => status);
     await enterChat(status);
+    if (resumed.endpointNotice) {
+      renderNotice({ message: resumed.endpointNotice });
+    }
     // resume 后如果 Gateway 也降级，在聊天区留一条诊断提示（不含敏感信息）
     if (resumed.gatewayWarning) {
       renderNotice({ message: `Gateway 未就绪（${resumed.gatewayWarning}），聊天和本机工具不受影响。` });
