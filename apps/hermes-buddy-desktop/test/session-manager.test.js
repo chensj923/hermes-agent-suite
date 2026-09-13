@@ -40,6 +40,21 @@ function hermesFetch({ models = ['hermes-agent'], replies = [] } = {}) {
       body: null
     });
     if (url.includes('/v1/models')) return make({ object: 'list', data: models.map((id) => ({ id })) });
+    // 能力探测请求（v2.3.8）：固定按"无状态纯推理端点"应答一个 tool_call，不消费预设回复。
+    if (body.tools && Array.isArray(body.messages) && body.messages.length === 2
+      && typeof body.messages[1].content === 'string'
+      && body.messages[1].content.includes('List the files')) {
+      return make({
+        choices: [{
+          message: {
+            role: 'assistant', content: '',
+            tool_calls: [{ id: 'probe_1', type: 'function', function: { name: 'list_dir', arguments: '{}' } }]
+          },
+          finish_reason: 'tool_calls'
+        }],
+        usage: { prompt_tokens: 50, total_tokens: 60 }
+      });
+    }
     // 依次消费预设回复，用完就返回一段普通文本。
     const reply = replies[state.replyIndex] || { content: '（默认回复）' };
     state.replyIndex += 1;
@@ -97,6 +112,38 @@ test('connect: 推理端点不通则失败，且不写盘', async () => {
   assert.equal(fs.existsSync(path.join(dir, 'conn.json')), false, '失败时不应保存凭据');
 });
 
+/** 模拟“Gateway 22122 是 agent 端点、8800 是纯推理端点”的部署。 */
+function agentModeFetch() {
+  const make = (payload) => ({
+    ok: true, status: 200,
+    json: async () => payload,
+    text: async () => JSON.stringify(payload),
+    body: null
+  });
+  const impl = async (url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : {};
+    if (url.includes('/v1/models')) return make({ object: 'list', data: [{ id: 'hermes-agent' }] });
+    if (url.includes('/chat/completions') && body.tools
+      && Array.isArray(body.messages) && body.messages[1].content.includes('List the files')) {
+      // 探测请求：22122 注入 3 万 token 且不回 tool_calls（agent 端点）；8800 正常回 tool_calls。
+      if (url.includes(':22122')) {
+        return make({ choices: [{ message: { role: 'assistant', content: '已在 /root 执行 ls' }, finish_reason: 'stop' }], usage: { prompt_tokens: 30000, total_tokens: 30050 } });
+      }
+      return make({ choices: [{ message: { role: 'assistant', content: '', tool_calls: [{ id: 'p1', type: 'function', function: { name: 'list_dir', arguments: '{}' } }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 50, total_tokens: 60 } });
+    }
+    return make({ choices: [{ message: { role: 'assistant', content: '（默认回复）' }, finish_reason: 'stop' }], usage: { total_tokens: 10 } });
+  };
+  return impl;
+}
+
+test('connect: agent 端点自动切换到同主机纯推理端口', async () => {
+  const { manager, workspace } = makeManager({ fetchImpl: agentModeFetch() });
+  const result = await manager.connect(CONNECTION(workspace));
+  assert.equal(result.connection.llmUrl, 'http://192.168.0.246:8800/v1/chat/completions');
+  assert.ok(result.endpointNotice, '应带上自动切换提示');
+  assert.match(result.endpointNotice, /8800/);
+});
+
 test('connect: Gateway 不通只降级，本机照样能干活', async () => {
   const broken = {
     createGateway: () => ({
@@ -141,8 +188,9 @@ test('send: 调用工具并把结果回灌，最终给出答复', async () => {
   assert.ok(events.some((e) => e.type === 'tool_result'));
   assert.ok(events.some((e) => e.type === 'done'));
   // 第二轮必须带上工具结果，模型才知道目录里有什么
+  // （chats[0] 是 v2.3.8 的端点能力探测请求，chats[1] 首轮对话，chats[2] 才是回灌工具结果的第二轮）
   const chats = fetch.state.requests.filter((r) => r.url.includes('/chat/completions'));
-  const toolMsg = chats[1].body.messages[chats[1].body.messages.length - 1];
+  const toolMsg = chats[2].body.messages[chats[2].body.messages.length - 1];
   assert.equal(toolMsg.role, 'tool');
   assert.match(toolMsg.content, /hello\.txt/);
 });
@@ -164,7 +212,8 @@ test('send: 危险命令被拦截且不落地', async () => {
   const result = await manager.send({ requestId: 'r1', text: '格式化磁盘' }, () => {});
   assert.match(result.text, /不能执行/);
   const chats = fetch.state.requests.filter((r) => r.url.includes('/chat/completions'));
-  assert.match(chats[1].body.messages.slice(-1)[0].content, /被安全规则拦截/);
+  // chats[0] = 端点能力探测，chats[1] = 首轮对话，chats[2] = 回灌拦截结果的第二轮
+  assert.match(chats[2].body.messages.slice(-1)[0].content, /被安全规则拦截/);
 });
 
 test('abort: 能取消进行中的请求', async () => {
@@ -172,8 +221,13 @@ test('abort: 能取消进行中的请求', async () => {
   let release;
   const hanging = new Promise((resolve) => { release = resolve; });
   const { manager, workspace } = makeManager({
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, options = {}) => {
       if (url.includes('/v1/models')) return { ok: true, status: 200, json: async () => ({ data: [{ id: 'hermes-agent' }] }), text: async () => '{}', body: null };
+      // 端点能力探测请求立即应答，只有真正的对话请求才挂起（用于测取消）。
+      const body = options.body ? JSON.parse(options.body) : {};
+      if (body.tools && Array.isArray(body.messages) && body.messages[1].content.includes('List the files')) {
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { role: 'assistant', content: '', tool_calls: [{ id: 'p1', type: 'function', function: { name: 'list_dir', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] }), text: async () => '{}', body: null };
+      }
       await hanging;
       return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'done' } }] }), text: async () => '{}', body: null };
     }
