@@ -99,7 +99,7 @@ test('connect: 建立运行时、建好工作区、落盘配置', async () => {
 
   assert.equal(result.connection.configured, true);
   assert.equal(result.connection.workspace, workspace);
-  assert.equal(result.connection.llmUrl, 'http://192.168.0.246:22122/v1/chat/completions');
+  assert.equal(result.connection.llmUrl, 'http://192.168.0.246:8811/v1/chat/completions');
   assert.ok(fs.existsSync(path.join(workspace, 'AGENTS.md')), '应自动生成 AGENTS.md');
   assert.ok(fs.existsSync(path.join(workspace, '.hermes', 'skills')));
   assert.deepEqual(result.models, ['hermes-agent']);
@@ -138,11 +138,15 @@ function agentModeFetch() {
 
 test('connect: agent 端点自动切换到同主机纯推理端口', async () => {
   const { manager, workspace } = makeManager({ fetchImpl: agentModeFetch() });
-  const result = await manager.connect(CONNECTION(workspace));
-  // v2.3.9：8645 是 hermes proxy 的真实默认端口（8800 是早期误判），优先试它。
-  assert.equal(result.connection.llmUrl, 'http://192.168.0.246:8645/v1/chat/completions');
+  // 显式把推理端点填成 Gateway 的 22122（用户常见误填），应被探测识别为 agent 端点并纠正
+  const result = await manager.connect({
+    ...CONNECTION(workspace),
+    llmUrl: 'http://192.168.0.246:22122/v1/chat/completions'
+  });
+  // v2.3.10：8811 是 Buddy 直通代理（首选），8645/8800/8000 兜底
+  assert.equal(result.connection.llmUrl, 'http://192.168.0.246:8811/v1/chat/completions');
   assert.ok(result.endpointNotice, '应带上自动切换提示');
-  assert.match(result.endpointNotice, /8645/);
+  assert.match(result.endpointNotice, /8811/);
 });
 
 test('connect: Gateway 不通只降级，本机照样能干活', async () => {
