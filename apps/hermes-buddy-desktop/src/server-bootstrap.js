@@ -35,7 +35,7 @@ function generateBootstrapScript(input = {}) {
   lines.push('#!/usr/bin/env bash');
   lines.push('# Hermes Buddy 服务端一次性准备脚本');
   lines.push('# 由 Buddy 自动生成，请复制到 Hermes 主机（' + host + '）以 root 身份执行');
-  lines.push('# 作用：诊断端口监听、检查绑定地址、打印 API Key、重启 gateway');
+  lines.push('# 作用：诊断端口监听、检查绑定地址、打印 API Key、启动 LLM、重启 gateway');
   lines.push('set -euo pipefail');
   lines.push('');
 
@@ -73,20 +73,65 @@ function generateBootstrapScript(input = {}) {
   lines.push('CONFIG="$HERMES_HOME/config.yaml"');
   lines.push('if [[ -f "$CONFIG" ]]; then');
   lines.push('  echo "[buddy-bootstrap] config.yaml 里和绑定相关的行:"');
-  lines.push('  grep -nE "^\\s*(host|bind|listen|bind_host|gateway_host|server_host)\\s*[:=]" "$CONFIG" | head -20 || echo "  (没有显式的 host 字段，Hermes 启动命令会决定监听)"');
+  lines.push('  grep -nE "^\\s*(host|bind|listen|bind_host|gateway_host|server_host|api_server_host|llm_host|model_router_host)\\s*[:=]" "$CONFIG" | head -20 || echo "  (没有显式的 host 字段，Hermes 启动命令会决定监听)"');
   lines.push('  echo ""');
   lines.push('  echo "[buddy-bootstrap] 如果上面看到 127.0.0.1，需要改成 0.0.0.0 才能让 Buddy（另一台机器）连上"');
   lines.push('  echo "[buddy-bootstrap] sed 单引号转义太容易踩坑，这里只提示，由你人工决定：人工编辑 $CONFIG，把 host/bind 这一类键的值改成 0.0.0.0"');
   lines.push('  echo ""');
-  lines.push('  echo "[buddy-bootstrap] 编辑完之后直接重启 gateway（第 4 步），无需改配置文件"');
+  lines.push('  echo "[buddy-bootstrap] 编辑完之后直接重启 gateway（第 5 步），无需改配置文件"');
   lines.push('else');
   lines.push('  echo "[buddy-bootstrap] WARN: $CONFIG 不存在"');
   lines.push('fi');
   lines.push('');
 
-  // 4. 重启 gateway
-  lines.push('# ---- 4. 重启 gateway（如果改了绑定地址，必须重启） ----');
-  lines.push('# 先停掉所有已存在的 hermes gateway 进程，避免多实例抢占端口（22122/22124 等导致连错端口）');
+  // 4. 先确保 LLM / api_server 在跑（8800 必须通，Buddy 才能聊天）
+  lines.push('# ---- 4. 启动 / 检查 LLM（api_server）----');
+  lines.push('# LLM 端口（' + llmPort + '）和 Gateway 是两个独立进程；脚本会尝试自动启动，失败则给出手动命令。');
+  lines.push('ensure_llm_running() {');
+  lines.push('  local port="$1"');
+  lines.push('  if ss -tln 2>/dev/null | grep -qE ":${port}\\b"; then');
+  lines.push('    echo "[buddy-bootstrap] LLM 端口 ${port} 已在监听"');
+  lines.push('    return 0');
+  lines.push('  fi');
+  lines.push('  if netstat -tln 2>/dev/null | grep -qE ":${port}\\b"; then');
+  lines.push('    echo "[buddy-bootstrap] LLM 端口 ${port} 已在监听"');
+  lines.push('    return 0');
+  lines.push('  fi');
+  lines.push('  echo "[buddy-bootstrap] LLM 端口 ${port} 未监听，尝试启动..."');
+  lines.push('  # 先停掉可能卡住的旧 LLM 进程');
+  lines.push('  for p in $(pgrep -f "hermes.*api_server" 2>/dev/null); do kill "$p" 2>/dev/null || true; done');
+  lines.push('  for p in $(pgrep -f "hermes_cli.*api_server" 2>/dev/null); do kill "$p" 2>/dev/null || true; done');
+  lines.push('  sleep 1');
+  lines.push('  mkdir -p "$HERMES_HOME/logs"');
+  lines.push('  # 常见启动方式逐个尝试；哪个成功就用哪个');
+  lines.push('  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "hermes-api"; then');
+  lines.push('    echo "[buddy-bootstrap] 用 systemd 启动 hermes-api..."');
+  lines.push('    systemctl restart hermes-api-server 2>&1 || systemctl restart hermes-api 2>&1 || true');
+  lines.push('  elif command -v hermes >/dev/null 2>&1; then');
+  lines.push('    echo "[buddy-bootstrap] 用 hermes CLI 启动 api_server..."');
+  lines.push('    nohup hermes api_server run --host 0.0.0.0 >> "$HERMES_HOME/logs/api_server.log" 2>&1 &');
+  lines.push('  else');
+  lines.push('    # 某些安装把 hermes_cli 当模块跑');
+  lines.push('    echo "[buddy-bootstrap] 尝试 python 模块方式启动 api_server..."');
+  lines.push('    nohup python3 -m hermes_cli.main api_server run --host 0.0.0.0 >> "$HERMES_HOME/logs/api_server.log" 2>&1 &');
+  lines.push('  fi');
+  lines.push('  sleep 5');
+  lines.push('  if ss -tln 2>/dev/null | grep -qE ":${port}\\b" || netstat -tln 2>/dev/null | grep -qE ":${port}\\b"; then');
+  lines.push('    echo "[buddy-bootstrap] LLM 端口 ${port} 已启动"');
+  lines.push('    return 0');
+  lines.push('  fi');
+  lines.push('  echo "[buddy-bootstrap] WARN: 自动启动 LLM 失败，请手动执行以下命令之一："');
+  lines.push('  echo "  hermes api_server run --host 0.0.0.0"');
+  lines.push('  echo "  python3 -m hermes_cli.main api_server run --host 0.0.0.0"');
+  lines.push('  echo "  或检查 config.yaml 中 api_server / llm / model_router 的 host 是否绑定 0.0.0.0"');
+  lines.push('  return 1');
+  lines.push('}');
+  lines.push('ensure_llm_running ' + llmPort);
+  lines.push('');
+
+  // 5. 重启 gateway
+  lines.push('# ---- 5. 重启 gateway（如果改了绑定地址，必须重启） ----');
+  lines.push('# 先停掉所有已存在的 hermes gateway 进程，避免多实例抢占端口导致连错端口');
   lines.push('for p in $(pgrep -f "hermes.*gateway.*run" 2>/dev/null); do kill "$p" 2>/dev/null || true; done');
   lines.push('sleep 2');
   lines.push('if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q hermes-gateway; then');
@@ -95,28 +140,30 @@ function generateBootstrapScript(input = {}) {
   lines.push('elif command -v hermes >/dev/null 2>&1; then');
   lines.push('  echo "[buddy-bootstrap] 用 hermes CLI 重启..."');
   lines.push('  if [[ -f "$HERMES_HOME/gateway.pid" ]]; then');
-  lines.push('    PID=$(grep -oE "\\\"pid\\\":\\s*[0-9]+" "$HERMES_HOME/gateway.pid" 2>/dev/null | grep -oE "[0-9]+" || true)');
+  lines.push('    PID=$(grep -oE "\\"pid\\":\\s*[0-9]+" "$HERMES_HOME/gateway.pid" 2>/dev/null | grep -oE "[0-9]+" || true)');
   lines.push('    [[ -n "${PID:-}" ]] && kill "$PID" 2>/dev/null || true');
   lines.push('    sleep 2');
   lines.push('  fi');
-  lines.push('  nohup hermes gateway run >> "$HERMES_HOME/gateway.log" 2>&1 &');
+  lines.push('  nohup hermes gateway run --host 0.0.0.0 >> "$HERMES_HOME/gateway.log" 2>&1 &');
   lines.push('  sleep 2');
   lines.push('else');
   lines.push('  echo "[buddy-bootstrap] WARN: 没找到 hermes 命令，也没 systemd 单元，请手动重启"');
   lines.push('fi');
   lines.push('');
 
-  // 5. 验证 + 打印 API Key
-  lines.push('# ---- 5. 重启后再听一次端口 ----');
+  // 6. 验证 + 打印 API Key
+  lines.push('# ---- 6. 重启后再听一次端口 ----');
   lines.push('sleep 3');
   lines.push('if command -v ss >/dev/null 2>&1; then');
-  lines.push('  ss -tlnp 2>/dev/null | grep -E ":' + llmPort + (gatewayPort ? '|:' + gatewayPort : '') + (managementPort ? '|:' + managementPort : '') + '" || echo "  还是没监听 —— 检查 gateway.log"');
+  lines.push('  ss -tlnp 2>/dev/null | grep -E ":' + llmPort + (gatewayPort ? '|:' + gatewayPort : '') + (managementPort ? '|:' + managementPort : '') + '" || echo "  还是没监听 —— 检查 gateway.log / api_server.log"');
   lines.push('fi');
+  lines.push('echo "[buddy-bootstrap] api_server.log 最近 20 行:"');
+  lines.push('tail -n 20 "$HERMES_HOME/logs/api_server.log" 2>/dev/null || echo "  (api_server.log 不存在)"');
   lines.push('echo "[buddy-bootstrap] gateway.log 最近 20 行:"');
   lines.push('tail -n 20 "$HERMES_HOME/gateway.log" 2>/dev/null || true');
   lines.push('');
 
-  lines.push('# ---- 6. 打印 API Key + 确保 .env 包含 API_SERVER_KEY ----');
+  lines.push('# ---- 7. 打印 API Key + 确保 .env 包含 API_SERVER_KEY ----');
   lines.push('KEY_FILE=""');
   lines.push('for candidate in "$HERMES_HOME/.api_server_key" "$HERMES_HOME/data/.env" "$HERMES_HOME/.env"; do');
   lines.push('  if [[ -f "$candidate" ]]; then KEY_FILE="$candidate"; break; fi');
@@ -160,16 +207,18 @@ function generateBootstrapScript(input = {}) {
   lines.push('  else');
   lines.push('    kill $(pgrep -f "hermes_cli.*gateway.*run" | head -1) 2>/dev/null || true');
   lines.push('    sleep 2');
-  lines.push('    cd "$HERMES_HOME" && nohup /usr/bin/python3 -m hermes_cli.main gateway run >> "$HERMES_HOME/logs/gateway.log" 2>&1 &');
+  lines.push('    cd "$HERMES_HOME" && nohup /usr/bin/python3 -m hermes_cli.main gateway run --host 0.0.0.0 >> "$HERMES_HOME/logs/gateway.log" 2>&1 &');
   lines.push('    sleep 3');
   lines.push('  fi');
   lines.push('fi');
   lines.push('');
-  lines.push('echo "[buddy-bootstrap] 完成。请在 Buddy 连接向导里按下面三项填写："');
-  if (gatewayPort) lines.push('echo "[buddy-bootstrap]   Gateway 地址: http://' + host + ':' + gatewayPort + '   （Hermes Gateway 默认就是 22122，不要填 22121/22123/8700）"');
+  lines.push('echo "[buddy-bootstrap] 完成。请在 Buddy 连接向导里按下面填写："');
+  if (gatewayPort) {
+    lines.push('echo "[buddy-bootstrap]   Gateway 地址: http://' + host + ':' + gatewayPort + '"');
+    lines.push('echo "[buddy-bootstrap]   注意：Gateway 必须是 22122，填 22121/22123/8700 会报 404（不是 Gateway）"');
+  }
   lines.push('echo "[buddy-bootstrap]   LLM 地址:     http://' + host + ':' + llmPort + '/v1/chat/completions"');
   lines.push('echo "[buddy-bootstrap]   API Key:      $API_KEY"');
-  lines.push('echo "[buddy-bootstrap] 注意：Gateway 地址必须指向 22122，如果上面填成了 22121/8700 会报 404（不是 Gateway）。"');
 
   return lines.join('\n') + '\n';
 }
