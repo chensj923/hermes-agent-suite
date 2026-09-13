@@ -13,13 +13,13 @@ const TOOL_DEFINITIONS = [
   {
     name: 'run_command',
     category: 'shell',
-    description: '在用户 Windows 电脑的工作目录中执行 PowerShell 命令。命令在独立进程中运行，默认工作目录已设为工作区根目录。可以运行 git、npm、python、node 等本机已安装的程序。不要用 ssh 连接其他机器。',
+    description: '在用户 Windows 电脑的工作目录中执行 PowerShell 命令。命令在独立进程中运行，默认工作目录已设为工作区根目录。可以运行 git、npm、python、node 等本机已安装的程序。不要用 ssh 连接其他机器。注意：工作目录可能是一个很大的网络同步盘（如 SynologyDrive），递归遍历整盘的命令（Get-ChildItem -Recurse）会非常慢、极易超时。按名称/扩展名找文件请优先用 find_files（自带文件数上限、跳过 node_modules/.git，快得多）；若确实要跑长命令，把 timeout_seconds 设大（最大 600）。',
     parameters: {
       type: 'object',
       properties: {
         command: { type: 'string', description: '要执行的 PowerShell 命令或脚本，可多行' },
         cwd: { type: 'string', description: '可选，相对工作区的子目录；留空则在工作区根目录执行' },
-        timeout_seconds: { type: 'number', description: '可选，超时秒数，默认 120，最大 600' }
+        timeout_seconds: { type: 'number', description: '可选，超时秒数，默认 120，最大 600。大型目录的扫描建议设 300 以上' }
       },
       required: ['command']
     }
@@ -67,12 +67,13 @@ const TOOL_DEFINITIONS = [
   {
     name: 'find_files',
     category: 'read',
-    description: '按名称模式查找文件，支持 * 和 ** 通配，例如 "*.md"、"src/**/*.js"。',
+    description: '按名称/扩展名查找文件，支持 * 和 ** 通配，例如 "*.md"、"src/**/*.js"。可一次传多个逗号分隔的模式覆盖多种类型，例如 "*.pem,*.key,*.p12,*.pfx"。自动跳过 node_modules/.git/dist 等目录，并限制扫描文件数，因此在大型或网络同步盘上也很快、不会超时。结果上限 300 条。',
     parameters: {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: '文件名模式' },
-        path: { type: 'string', description: '可选，限定在某个子目录下查找' }
+        pattern: { type: 'string', description: '文件名模式，可用逗号分隔多个，例如 "*.pem,*.key" 或 "*pass*,*secret*"' },
+        path: { type: 'string', description: '可选，限定在某个子目录下查找' },
+        maxDepth: { type: 'number', description: '可选，最多下钻的目录层数（含根层），默认不限制。浅扫大目录可设 3~5' }
       },
       required: ['pattern']
     }
@@ -176,7 +177,8 @@ class ToolRegistry {
           cwd: input.cwd,
           timeoutMs,
           signal: options.signal,
-          onConfirm: options.onConfirm
+          onConfirm: options.onConfirm,
+          onData: options.onData
         });
         // 被守卫拦截或用户取消：让模型知道这条路走不通，换别的办法。
         if (result.denied) return { ok: false, blocked: true, error: result.error };
@@ -206,8 +208,11 @@ function renderResult(name, result) {
     const noMatchesExit1 = result.ok === false && result.exitCode === 1 && isSearchLike;
     if (noMatchesExit1) {
       parts.push('未找到匹配项（命令正常退出码 1）。');
+    } else if (result.timedOut) {
+      // 超时：命令被强制中断，但已经收集到的输出一并交回，模型可据此判断是否需要换个更快的方式。
+      parts.push(`命令超时（已返回部分结果，命令未完成）  耗时: ${(result.durationMs / 1000).toFixed(1)}s`);
     } else {
-      parts.push(`退出码: ${result.exitCode}${result.timedOut ? '（超时被中断）' : ''}  耗时: ${(result.durationMs / 1000).toFixed(1)}s`);
+      parts.push(`退出码: ${result.exitCode}  耗时: ${(result.durationMs / 1000).toFixed(1)}s`);
     }
     if (result.stdout && result.stdout.trim()) parts.push(`--- 标准输出 ---\n${result.stdout.trim()}`);
     if (result.stderr && result.stderr.trim()) parts.push(`--- 错误输出 ---\n${result.stderr.trim()}`);
