@@ -200,7 +200,7 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 3. 如果端口未监听，点「生成服务端准备脚本」 —— Buddy 会基于你填的端点生成一份 shell 脚本，复制到 Hermes 主机以 root 身份执行：
    - 检查 Hermes 进程状态 + pid 文件
    - 看 `config.yaml` 里的 `host` / `bind` / `api_server_host` / `llm_host` 字段，提醒 127.0.0.1 改成 0.0.0.0
-   - 自动尝试启动 LLM（`hermes api_server run --host 0.0.0.0`；失败则给出手动命令）
+   - 自动尝试启动 LLM（用 `hermes --help` 识别正确的子命令后启动，失败会把真实报错和子命令清单打印出来）
    - 重启 gateway（优先 systemd，回落 `hermes gateway run`）
    - 打印当前 API Key
 4. 把脚本最后一行打印的 Key 复制回 Buddy 的 API Key 字段。
