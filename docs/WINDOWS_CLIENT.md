@@ -6,7 +6,7 @@
 
 Buddy 不是一个远程 agent 的 Web 包装。它做的是**让远端 Hermes 做决策、让本机 Windows 做执行**：
 
-- **决策**：把消息、工具 schema、本地工作区描述发给 Hermes 侧的 OpenAI 兼容端点（默认 `:8800/v1/chat/completions`）。Hermes 走标准 function calling 返回要做什么。
+- **决策**：把消息、工具 schema、本地工作区描述发给 Hermes 侧的 OpenAI 兼容端点（默认 `:22122/v1/chat/completions`，与 Gateway 同端口）。Hermes 走标准 function calling 返回要做什么。
 - **执行**：本机 Electron 主进程按 function name 调本地工具（PowerShell / 文件系统 / Git…），把结果回灌给模型，直到模型不再要工具为止。
 - **落点**：所有执行强制限制在用户选的工作区目录里；越界路径与黑名单命令由工具层的 `guard.js` 拦截。
 
@@ -55,7 +55,7 @@ render → IPC(buddyApi) → main.js
                   │                        │
           SessionManager             Window Dialog
                   │                        │
-   brain.chat() ───→ Hermes :8800         危险命令弹窗
+   brain.chat() ───→ Hermes :22122         危险命令弹窗
    (OpenAI compat)   (function calling)   (用户点头/拒绝)
                   │                        │
                   ↓                        │
@@ -156,7 +156,7 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 
 | 字段 | 必填 | 填什么 | 备注 |
 |------|------|--------|------|
-| 推理端点（LLM） | **是** | `http://192.168.0.246:8800/v1/chat/completions` | Hermes 模型服务的 OpenAI 兼容端点。Buddy 真正在用这个，必须能通。 |
+| 推理端点（LLM） | **是** | `http://192.168.0.246:22122/v1/chat/completions` | Hermes 模型服务的 OpenAI 兼容端点。**与 Gateway 同端口（22122）**，Buddy 真正在用这个，必须能通。 |
 | Hermes Gateway 地址 | 否 | `http://192.168.0.246:22122` | **Hermes 服务端默认端口是 22122，不是 22124**。用于会话登记与部署清单；留空 Buddy 仍能干活（降级模式）。 |
 | 部署管理地址 | 否 | 留空按 Gateway 同主机 `:8700` 推导 | 不通不影响本地工具链路 |
 | API Key | **是** | `~/.hermes/data/.env` 中的 `API_SERVER_KEY` | 走 Windows DPAPI 加密保存 |
@@ -167,8 +167,10 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 
 ### 8.1 端口约定
 
-- **22122**：Hermes Linux 服务端的 Gateway API 默认端口（`POST /api/sessions`）
-- **8800**：Hermes LLM router（`POST /v1/chat/completions`，OpenAI 兼容 + function calling）
+- **22122**：Hermes Linux 服务端 Gateway API 默认端口（`POST /api/sessions`）
+- **22122**：Hermes LLM router（`POST /v1/chat/completions`，OpenAI 兼容 + function calling）
+  ——**它是 Gateway 的 `api_server` 平台，与 Gateway 共用 22122 端口，不是独立进程**。
+  早期文档里写的 `:8800` 是过时的，服务端并没有单独监听 8800 的进程。
 - **8700**：Hermes 部署管理服务（`/api/provisioning/products`）
 - **22124**：仅 Windows 端 Buddy Gateway 端口（**非 Hermes 默认**，仅当你在 Windows 上跑了 hermes-buddy-gateway 时才用）
 
@@ -189,22 +191,24 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 
 | 项 | 默认状态 | 需要做什么 |
 |----|----------|-----------|
-| LLM 端点 `:8800` 对外 | 通常绑 `127.0.0.1` 或 Unix socket | Hermes 启动参数加 `--host 0.0.0.0` 或修改 `config.yaml` |
+| LLM 端点 `:22122` 对外（与 Gateway 同端口） | 通常绑 `127.0.0.1` 或 Unix socket | Hermes 启动参数加 `--host 0.0.0.0` 或修改 `config.yaml` |
 | API Key | 服务端随机生成 | 用户需要从服务端取：`cat /root/.hermes/.api_server_key` 或 `grep API_SERVER_KEY /root/.hermes/data/.env` |
 | Gateway `:22122` 对外（可选） | 通常绑 `127.0.0.1` | 同上；不通 Buddy 仍能干活（降级模式） |
 
 **最省事的做法**：
 
 1. 在 Buddy 连接页填推理端点（必填），其他留空也行。
-2. 点「先诊断 Hermes 是否可达」 —— Buddy 会同时探 `:8800` / `:22122` / `:8700`，每个端口给出具体原因与建议（端口未监听 / 鉴权失败 / 网络层失败 / 协议错误 …）。
+2. 点「先诊断 Hermes 是否可达」 —— Buddy 会同时探 `:22122`（LLM + Gateway）/ `:8700`，每个端口给出具体原因与建议（端口未监听 / 鉴权失败 / 网络层失败 / 协议错误 …）。
 3. 如果端口未监听，点「生成服务端准备脚本」 —— Buddy 会基于你填的端点生成一份 shell 脚本，复制到 Hermes 主机以 root 身份执行：
    - 检查 Hermes 进程状态 + pid 文件
    - 看 `config.yaml` 里的 `host` / `bind` / `api_server_host` / `llm_host` 字段，提醒 127.0.0.1 改成 0.0.0.0
-   - 自动尝试启动 LLM（用 `hermes --help` 识别正确的子命令后启动，失败会把真实报错和子命令清单打印出来）
+   - 确认 LLM（api_server 平台）：从 `.env` 的 `API_SERVER_PORT` / `config.yaml` 的 `platforms.api_server.extra.port` 读取真实端口（默认 22122），
+     检查平台是否启用，未启用则自动写入配置，并确认端口在监听
+     （注意：LLM 不是独立进程，`hermes` 也没有 `api_server`/`llm` 子命令，无需也无法单独“启动 8800”）
    - 重启 gateway（优先 systemd，回落 `hermes gateway run`）
    - 打印当前 API Key
 4. 把脚本最后一行打印的 Key 复制回 Buddy 的 API Key 字段。
-5. 重新点「先诊断」确认 `8800` 现在显示 ✓，再点「验证并配置 Buddy」。
+5. 重新点「先诊断」确认 `22122` 现在显示 ✓，再点「验证并配置 Buddy」。
 
 > If the Hermes Linux server has gateway / LLM ports bound to `127.0.0.1` (the default), Buddy cannot reach them. Use **"先诊断"** to see which ports are blocked, then **"生成服务端准备脚本"** to get a copy-paste script that fixes the bind address and prints the API key. The whole loop runs from the Buddy connect screen — no SSH skills required on the Buddy user side.
 
