@@ -1,5 +1,7 @@
 'use strict';
 
+const { pythonSource } = require('./inference-proxy-template');
+
 /**
  * 生成一份给 Hermes 服务端跑的"准备脚本"。
  *
@@ -23,13 +25,25 @@
  *   无视请求 tools、注入约 1.2~4 万 token 的自有系统提示、在服务器本地执行命令。
  *   实测：model 填 hermes-agent 和填底层真实模型名（ark-code-latest）结果完全一样，
  *   两条请求都在服务器上真的跑了 `ls /root` 再返回文字 —— 换 model 名绕不过去。
+ *   /v1/responses 同理（input_tokens 12178、无 tool_calls）。
  * - hermes proxy 也**不是**本地推理端点：它把请求转发给 OAuth 供应商（Nous/xai），
  *   子命令是 start（不是 run），默认端口 8645（不是 8800）。
- * - 结论：Buddy 必须直连一个真正的 OpenAI 兼容推理端点，来源三选一：
- *   (a) Hermes 自己在用的上游供应商（脚本第 4 步负责把它挖出来）
- *   (b) hermes proxy start --host 0.0.0.0 --port 8645
- *   (c) 任意自建 OpenAI 兼容端点（Ark / DeepSeek / 通义 / vLLM / Ollama）
- * - 所以脚本第 4 步 = 侦察上游模型端点；第 5 步 = 用合法参数重启 Gateway（不带 --host）。
+ * - 22122 的路由表实测只有 5 个端点：/v1/models、/v1/chat/completions、/v1/responses、
+ *   /health、/api/sessions；/api/proxy、/api/passthrough、/api/inference、/api/models、
+ *   /api/providers 全部 404，也没有 openapi.json。
+ *   **即 Hermes 当前没有对外暴露任何"纯推理"能力。**
+ *
+ * 架构结论（回答"Buddy 为什么要知道 LLM"）：
+ * - Buddy 的语义是「收到 messages + tools → 返回 tool_call，但**不执行**」；
+ *   Hermes 的 /v1/* 是「收到 messages → 在**服务端**跑完整个 agent 循环 → 返回文本」。
+ *   两者是正交的 API 语义，不是同一件事的两种配置。
+ * - v2.3.9 让用户把上游供应商地址 + 密钥填进 Windows 客户端是**错误设计**：
+ *   密钥散落在每台客户端、违背"Hermes 是服务端"的定位、换供应商要改所有客户端。
+ * - 正确解法：在 Hermes 主机上跑一个零依赖「推理直通代理」（默认 :8811），
+ *   复用 Hermes 自己配好的上游（config.yaml 的 model.base_url / name / api_key），
+ *   对外提供标准 OpenAI 接口并**原样透传 tools**，用 Gateway 的 API Key 鉴权。
+ *   于是 Buddy 只认 Hermes 一个地址，上游密钥永不出服务器。
+ * - 所以脚本第 4 步 = 侦察上游 + 部署并实测直通代理；第 5 步 = 重启 Gateway（不带 --host）。
  *
  * 输出是一段字符串，前 4 行带 #!/usr/bin/env bash，用户可以直接 .sh 保存到 Hermes 上跑。
  * 不用 shebang 也行 —— Buddy 那边有个"复制"按钮和"导出 .sh"按钮都能用。
@@ -131,7 +145,17 @@ function generateBootstrapScript(input = {}) {
   // 换 model 名绕不过去；hermes proxy 又是转发到 OAuth 供应商（Nous/xai）的代理，
   // 子命令 start、默认 8645。所以第 4 步的目标改成：
   //   把「Hermes 自己在用的上游模型供应商」挖出来（base_url + 密钥 + 模型名），供 Buddy 直连。
-  lines.push('# ---- 4. 侦察纯推理端点（Buddy 真正要连的东西）----');
+  lines.push('# ---- 4. 在 Hermes 本机部署「推理直通代理」（Buddy 真正要连的东西）----');
+  lines.push('# 为什么需要它：');
+  lines.push('#   22122 的 /v1/chat/completions 和 /v1/responses 都是"服务端 agent 端点"——');
+  lines.push('#   无视请求里的 tools、注入约 1.2 万 token 自有系统提示、在服务器本地执行命令。');
+  lines.push('#   实测 22122 上没有 /api/proxy、/api/passthrough、/api/inference、/api/models（全 404），');
+  lines.push('#   即 Hermes 当前没有对外暴露任何纯推理能力。');
+  lines.push('# 解法：在本机起一个零依赖直通代理，复用 Hermes 自己配好的上游（base_url / model / api_key），');
+  lines.push('#       对外提供标准 OpenAI 接口并原样透传 tools，用 Gateway 的 API Key 鉴权。');
+  lines.push('#       于是 Buddy 只认 Hermes 一个地址，上游密钥永不出服务器。');
+  lines.push('PROXY_PORT="${BUDDY_PROXY_PORT:-8811}"');
+  lines.push('PROXY_KEY=$(grep -E "^API_SERVER_KEY=" "$HERMES_HOME/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\\r\\n" || true)');
   lines.push('SHOW_KEYS="${SHOW_KEYS:-0}"   # 需要看完整密钥时改用: SHOW_KEYS=1 ./本脚本.sh');
   lines.push('mask() { local v="$1"; if [[ "$SHOW_KEYS" == "1" || ${#v} -le 10 ]]; then printf "%s" "$v"; else printf "%s****%s" "${v:0:6}" "${v: -4}"; fi; }');
   lines.push('mkdir -p "$HERMES_HOME/logs"');
@@ -174,36 +198,225 @@ function generateBootstrapScript(input = {}) {
   lines.push('  echo "  未能定位 hermes 包目录（不影响结论）"');
   lines.push('fi');
   lines.push('');
-  lines.push('echo "[buddy-bootstrap] ---- 4e. hermes proxy（子命令是 start，默认端口 8645）----"');
-  lines.push('PROXY_PORT=""');
-  lines.push('for p in 8645 8800 8000; do');
-  lines.push('  if curl -s -m 5 "http://127.0.0.1:${p}/v1/models" >/dev/null 2>&1; then PROXY_PORT="$p"; break; fi');
-  lines.push('done');
-  lines.push('if [[ -n "$PROXY_PORT" ]]; then');
-  lines.push('  echo "  已有 OpenAI 兼容代理在跑：端口 $PROXY_PORT"');
-  lines.push('elif command -v hermes >/dev/null 2>&1; then');
-  lines.push('  echo "  尝试: hermes proxy start --host 0.0.0.0 --port 8645"');
-  lines.push('  nohup hermes proxy start --host 0.0.0.0 --port 8645 >> "$HERMES_HOME/logs/proxy.log" 2>&1 &');
-  lines.push('  sleep 8');
-  lines.push('  curl -s -m 5 http://127.0.0.1:8645/v1/models >/dev/null 2>&1 && PROXY_PORT=8645 || true');
-  lines.push('  if [[ -z "$PROXY_PORT" ]]; then');
-  lines.push('    echo "  未起来。proxy.log 末尾:"');
-  lines.push('    tail -n 15 "$HERMES_HOME/logs/proxy.log" 2>/dev/null || true');
-  lines.push('  fi');
+  // 4e. 部署「推理直通代理」—— Buddy 只认 Hermes 一个地址，上游由 Hermes 自己持有
+  lines.push('echo "[buddy-bootstrap] ---- 4e. 部署 Buddy 推理直通代理（端口 $PROXY_PORT）----"');
+  lines.push('mkdir -p "$HERMES_HOME/logs"');
+  lines.push('PROXY_FILE="$HERMES_HOME/buddy-inference-proxy.py"');
+  lines.push('cat > "$PROXY_FILE" <<\'PYEOF\'');
+  for (const srcLine of pythonSource().split('\n')) lines.push(srcLine);
+  lines.push('PYEOF');
+  lines.push('chmod +x "$PROXY_FILE"');
+  lines.push('echo "  已写入 $PROXY_FILE （零依赖，只用 Python 标准库）"');
+  lines.push('');
+  // 启动：systemd 优先（能开机自启），没有 systemd 就 nohup
+  lines.push('# 启动直通代理：优先 systemd（可开机自启），否则 nohup');
+  lines.push('if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then');
+  lines.push('  cat > /etc/systemd/system/hermes-buddy-inference.service <<SVCEOF');
+  lines.push('[Unit]');
+  lines.push('Description=Hermes Buddy inference pass-through proxy');
+  lines.push('After=network.target');
+  lines.push('');
+  lines.push('[Service]');
+  lines.push('Type=simple');
+  lines.push('Environment=HERMES_HOME=$HERMES_HOME');
+  lines.push('Environment=BUDDY_PROXY_PORT=$PROXY_PORT');
+  lines.push('ExecStart=/usr/bin/env python3 $PROXY_FILE');
+  lines.push('Restart=always');
+  lines.push('RestartSec=2');
+  lines.push('');
+  lines.push('[Install]');
+  lines.push('WantedBy=multi-user.target');
+  lines.push('SVCEOF');
+  lines.push('  systemctl daemon-reload 2>&1 | sed \'s/^/  /\' || true');
+  lines.push('  systemctl enable --now hermes-buddy-inference 2>&1 | sed \'s/^/  /\' || true');
+  lines.push('  sleep 3');
+  lines.push('  systemctl is-active hermes-buddy-inference 2>&1 | sed \'s/^/  /\' || true');
+  lines.push('else');
+  lines.push('  pkill -f "buddy-inference-proxy.py" 2>/dev/null || true');
+  lines.push('  nohup python3 "$PROXY_FILE" >> "$HERMES_HOME/logs/buddy-proxy.log" 2>&1 &');
+  lines.push('  sleep 3');
   lines.push('fi');
   lines.push('');
-  lines.push('echo "[buddy-bootstrap] ---- 4f. Buddy 的「推理端点（LLM）」该填什么 ----"');
-  lines.push('if [[ -n "$PROXY_PORT" ]]; then');
-  lines.push('  echo "  可选: http://' + host + ':$PROXY_PORT/v1/chat/completions  (hermes proxy，转发到 OAuth 供应商)"');
-  lines.push('fi');
-  lines.push('echo "  推荐: 用 4a/4b 挖出来的上游供应商 base_url + 密钥，在 Buddy 里直连（原生 function calling）"');
-  lines.push('echo "  例如: https://ark.cn-beijing.volces.com/api/v3/chat/completions  模型名见 4a"');
-  lines.push('echo "  禁止: http://' + host + ':' + (gatewayPort || 22122) + '/v1/chat/completions = 服务端 agent 端点，Buddy 用不了（已实测）"');
-  lines.push('if [[ -n "$PROXY_PORT" ]]; then');
+
+  // 4f. 自动探测上游 chat 路径 + 实测 function calling + 回写 buddy-proxy.env
+  lines.push('echo "[buddy-bootstrap] ---- 4f. 探测上游并实测 function calling ----"');
+  lines.push('HERMES_HOME="$HERMES_HOME" BUDDY_PROXY_PORT="$PROXY_PORT" BUDDY_PROXY_KEY="$PROXY_KEY" python3 - <<\'PYTEST\' 2>&1 | sed \'s/^/  /\' || true');
+  lines.push('import json, os, re, sys, urllib.request, urllib.error');
+  lines.push('');
+  lines.push('HOME = os.environ.get("HERMES_HOME", "/root/.hermes")');
+  lines.push('PORT = os.environ.get("BUDDY_PROXY_PORT", "8811")');
+  lines.push('PROXY_KEY = os.environ.get("BUDDY_PROXY_KEY", "")');
+  lines.push('');
+  lines.push('def read_env(path):');
+  lines.push('    d = {}');
+  lines.push('    try:');
+  lines.push('        for line in open(path, encoding="utf-8", errors="replace"):');
+  lines.push('            line = line.strip()');
+  lines.push('            if line and not line.startswith("#") and "=" in line:');
+  lines.push('                k, v = line.split("=", 1)');
+  lines.push('                d[k.strip()] = v.strip().strip(\'"\').strip("\'")');
+  lines.push('    except OSError:');
+  lines.push('        pass');
+  lines.push('    return d');
+  lines.push('');
+  lines.push('def load_cfg(path):');
+  lines.push('    try:');
+  lines.push('        import yaml');
+  lines.push('        d = yaml.safe_load(open(path, encoding="utf-8"))');
+  lines.push('        if isinstance(d, dict):');
+  lines.push('            return d');
+  lines.push('    except Exception:');
+  lines.push('        pass');
+  lines.push('    return {}');
+  lines.push('');
+  lines.push('def find_key(obj, keys, depth=0):');
+  lines.push('    if depth > 4:');
+  lines.push('        return ""');
+  lines.push('    if isinstance(obj, dict):');
+  lines.push('        for k in keys:');
+  lines.push('            v = obj.get(k)');
+  lines.push('            if isinstance(v, str) and v.strip():');
+  lines.push('                return v.strip()');
+  lines.push('        for v in obj.values():');
+  lines.push('            r = find_key(v, keys, depth + 1)');
+  lines.push('            if r:');
+  lines.push('                return r');
+  lines.push('    elif isinstance(obj, list):');
+  lines.push('        for v in obj[:10]:');
+  lines.push('            r = find_key(v, keys, depth + 1)');
+  lines.push('            if r:');
+  lines.push('                return r');
+  lines.push('    return ""');
+  lines.push('');
+  lines.push('env = read_env(os.path.join(HOME, ".env"))');
+  lines.push('cfg = load_cfg(os.path.join(HOME, "config.yaml"))');
+  lines.push('model = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}');
+  lines.push('');
+  lines.push('def expand(s):');
+  lines.push('    return re.sub(r"\\$\\{?([A-Za-z_][A-Za-z0-9_]*)\\}?", lambda m: env.get(m.group(1)) or os.environ.get(m.group(1)) or "", s or "")');
+  lines.push('');
+  lines.push('base = expand(model.get("base_url") or model.get("base-url") or model.get("endpoint") or find_key(cfg, ["base_url", "base-url", "endpoint"]) or env.get("OPENAI_BASE_URL") or "").rstrip("/")');
+  lines.push('name = expand(model.get("name") or model.get("model") or env.get("OPENAI_MODEL") or "hermes-agent")');
+  lines.push('key = expand(model.get("api_key") or model.get("apiKey") or find_key(model, ["api_key", "apiKey", "key", "token"]) or "")');
+  lines.push('if not key:');
+  lines.push('    for hint in ("ARK_API_KEY", "OPENAI_API_KEY", "CUSTOM_API_KEY", "LLM_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "DASHSCOPE_API_KEY"):');
+  lines.push('        if env.get(hint):');
+  lines.push('            key = env[hint]');
+  lines.push('            break');
+  lines.push('');
+  lines.push('def mask(s):');
+  lines.push('    return (s[:4] + "****" + s[-4:]) if s and len(s) > 10 else ("****" if s else "(空)")');
+  lines.push('');
+  lines.push('print("上游 base_url :", base or "(未找到)")');
+  lines.push('print("上游 model    :", name)');
+  lines.push('print("上游 api_key  :", mask(key))');
+  lines.push('if not base or not key:');
+  lines.push('    print("!! 拿不到上游 base_url 或 api_key，无法自动部署。")');
+  lines.push('    print("!! 请执行 hermes secrets list 找凭证，或手工写入 " + HOME + "/buddy-proxy.env：")');
+  lines.push('    print("!!   BUDDY_UPSTREAM_BASE=<上游 OpenAI 兼容地址>")');
+  lines.push('    print("!!   BUDDY_UPSTREAM_KEY=<上游密钥>")');
+  lines.push('    print("!!   BUDDY_UPSTREAM_MODEL=<模型名>")');
+  lines.push('    sys.exit(0)');
+  lines.push('');
+  lines.push('bases = [base]');
+  lines.push('if "/api/coding/" in base:');
+  lines.push('    bases.append(base.replace("/api/coding/", "/api/"))');
+  lines.push('if "/api/v3" in base and "/api/coding" not in base:');
+  lines.push('    bases.append(base.replace("/api/v3", "/api/coding/v3"))');
+  lines.push('uniq = []');
+  lines.push('for b in bases:');
+  lines.push('    if b not in uniq:');
+  lines.push('        uniq.append(b)');
+  lines.push('cands = []');
+  lines.push('for b in uniq:');
+  lines.push('    if b.endswith("/chat/completions"):');
+  lines.push('        cands.append((b, ""))');
+  lines.push('    else:');
+  lines.push('        for p in ("/chat/completions", "/v1/chat/completions", "/openai/chat/completions"):');
+  lines.push('            cands.append((b, p))');
+  lines.push('');
+  lines.push('TOOLS = [{"type": "function", "function": {"name": "probe_tool", "description": "probe", "parameters": {"type": "object", "properties": {}, "required": []}}}]');
+  lines.push('');
+  lines.push('def fc_test(url, api_key, model_name, force=True):');
+  lines.push('    body = {"model": model_name, "messages": [{"role": "user", "content": "Call probe_tool now."}], "tools": TOOLS, "max_tokens": 64}');
+  lines.push('    if force:');
+  lines.push('        body["tool_choice"] = "required"');
+  lines.push('    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key})');
+  lines.push('    try:');
+  lines.push('        with urllib.request.urlopen(req, timeout=90) as r:');
+  lines.push('            return json.loads(r.read().decode("utf-8", "replace")), None');
+  lines.push('    except urllib.error.HTTPError as e:');
+  lines.push('        return None, "HTTP %s: %s" % (e.code, e.read()[:200].decode("utf-8", "replace"))');
+  lines.push('    except Exception as e:');
+  lines.push('        return None, str(e)');
+  lines.push('');
+  lines.push('def got_tool(j):');
+  lines.push('    try:');
+  lines.push('        msg = (j.get("choices") or [{}])[0].get("message") or {}');
+  lines.push('    except Exception:');
+  lines.push('        return None, ""');
+  lines.push('    tc = msg.get("tool_calls")');
+  lines.push('    if tc:');
+  lines.push('        return tc[0]["function"]["name"], ""');
+  lines.push('    return None, (msg.get("content") or "")[:100]');
+  lines.push('');
+  lines.push('chosen = None');
+  lines.push('for b, p in cands:');
+  lines.push('    url = b if p == "" else b + p');
+  lines.push('    j, err = fc_test(url, key, name, True)');
+  lines.push('    if err:');
+  lines.push('        print("   x %s -> %s" % (url, err[:130]))');
+  lines.push('        continue');
+  lines.push('    fn, txt = got_tool(j)');
+  lines.push('    if fn:');
+  lines.push('        print("   OK %s -> tool_calls: %s" % (url, fn))');
+  lines.push('        chosen = (b, p)');
+  lines.push('        break');
+  lines.push('    j2, err2 = fc_test(url, key, name, False)');
+  lines.push('    if not err2:');
+  lines.push('        fn2, _ = got_tool(j2)');
+  lines.push('        if fn2:');
+  lines.push('            print("   OK %s -> tool_calls(auto): %s" % (url, fn2))');
+  lines.push('            chosen = (b, p)');
+  lines.push('            break');
+  lines.push('    print("   ~ %s -> 通但没有 tool_calls: %s" % (url, txt))');
+  lines.push('');
+  lines.push('if not chosen:');
+  lines.push('    print("!! 所有候选路径都拿不到 tool_calls —— 该上游可能不支持 function calling。")');
+  lines.push('    print("!! Buddy 的本地工具链路必须靠 FC，请换一个支持 function calling 的模型。")');
+  lines.push('    sys.exit(0)');
+  lines.push('');
+  lines.push('with open(os.path.join(HOME, "buddy-proxy.env"), "w", encoding="utf-8") as f:');
+  lines.push('    f.write("BUDDY_UPSTREAM_BASE=%s\\n" % chosen[0])');
+  lines.push('    f.write("BUDDY_UPSTREAM_CHAT_PATH=%s\\n" % chosen[1])');
+  lines.push('    f.write("BUDDY_UPSTREAM_MODEL=%s\\n" % name)');
+  lines.push('    f.write("BUDDY_UPSTREAM_KEY=%s\\n" % key)');
+  lines.push('print("已写入 " + HOME + "/buddy-proxy.env（上游密钥只存在服务端）")');
+  lines.push('');
+  lines.push('purl = "http://127.0.0.1:%s/v1/chat/completions" % PORT');
+  lines.push('j, err = fc_test(purl, PROXY_KEY or key, name, True)');
+  lines.push('if err:');
+  lines.push('    print("!! 经代理失败: %s" % err[:220])');
+  lines.push('else:');
+  lines.push('    fn, txt = got_tool(j)');
+  lines.push('    print("经代理 %s -> %s" % (purl, ("tool_calls: " + fn) if fn else ("无 tool_calls: " + txt)))');
+  lines.push('PYTEST');
+  lines.push('');
+
+  // 4g. 结论：Buddy 该填什么
+  lines.push('echo "[buddy-bootstrap] ---- 4g. 结论 ----"');
+  lines.push('PROXY_UP=0');
+  lines.push('if curl -s -m 5 "http://127.0.0.1:${PROXY_PORT}/health" >/dev/null 2>&1; then PROXY_UP=1; fi');
+  lines.push('if [[ "$PROXY_UP" == "1" ]]; then');
+  lines.push('  echo "  直通代理已就绪: http://0.0.0.0:$PROXY_PORT  (用 Gateway API Key 鉴权)"');
   lines.push('  LLM_PORT="$PROXY_PORT"');
   lines.push('else');
+  lines.push('  echo "  WARN: 直通代理未监听 $PROXY_PORT。buddy-proxy.log 末尾:"');
+  lines.push('  tail -n 20 "$HERMES_HOME/logs/buddy-proxy.log" 2>/dev/null || true');
+  lines.push('  echo "  或: systemctl status hermes-buddy-inference --no-pager | tail -20"');
   lines.push('  LLM_PORT="' + (gatewayPort || 22122) + '"');
   lines.push('fi');
+  lines.push('echo "  禁止: http://' + host + ':' + (gatewayPort || 22122) + '/v1/chat/completions = 服务端 agent 端点，Buddy 用不了（已实测）"');
   lines.push('');
 
 
@@ -268,7 +481,7 @@ function generateBootstrapScript(input = {}) {
   lines.push('  gw_restart');
   lines.push('fi');
   lines.push('');
-  lines.push('# 最终核验：Gateway 端口必须在监听（LLM 端点可能是外部地址，不在这里校验）');
+  lines.push('# 最终核验：Gateway 端口 + 直通代理端口都必须在监听');
   lines.push('sleep 2');
   lines.push('if ss -tln 2>/dev/null | grep -qE ":' + (gatewayPort || 22122) + '\\b" || netstat -tln 2>/dev/null | grep -qE ":' + (gatewayPort || 22122) + '\\b"; then');
   lines.push('  echo "[buddy-bootstrap] 最终核验 OK：Gateway 端口 ' + (gatewayPort || 22122) + ' 正在监听"');
@@ -276,14 +489,21 @@ function generateBootstrapScript(input = {}) {
   lines.push('  echo "[buddy-bootstrap] 最终核验 FAIL：Gateway 端口 ' + (gatewayPort || 22122) + ' 仍未监听。gateway.log 末尾如下："');
   lines.push('  tail -n 30 "$HERMES_HOME/gateway.log" 2>/dev/null || true');
   lines.push('fi');
+  lines.push('if ss -tln 2>/dev/null | grep -qE ":$PROXY_PORT\\b"; then');
+  lines.push('  echo "[buddy-bootstrap] 最终核验 OK：推理直通代理端口 $PROXY_PORT 正在监听"');
+  lines.push('else');
+  lines.push('  echo "[buddy-bootstrap] 最终核验 WARN：直通代理端口 $PROXY_PORT 未监听"');
+  lines.push('fi');
   lines.push('');
   lines.push('echo "[buddy-bootstrap] 完成。请在 Buddy 连接向导里按下面填写："');
   if (gatewayPort) {
     lines.push('echo "[buddy-bootstrap]   Gateway 地址: http://' + host + ':' + gatewayPort + '"');
     lines.push('echo "[buddy-bootstrap]   注意：Gateway 必须是 22122，填 22121/22123/8700 会报 404（不是 Gateway）"');
   }
-  lines.push('echo "[buddy-bootstrap]   Gateway API Key: $API_KEY"');
-  lines.push('echo "[buddy-bootstrap]   推理端点（LLM）: 填第 4f 步推荐的上游供应商地址 —— 不要填 Gateway 的 22122"');
+  lines.push('echo "[buddy-bootstrap]   API Key（Gateway 与推理端点共用同一个）: $API_KEY"');
+  lines.push('echo "[buddy-bootstrap]   推理端点（LLM）: http://' + host + ':$LLM_PORT/v1/chat/completions"');
+  lines.push('echo "[buddy-bootstrap]   —— 这就是 Hermes 本机上的直通代理，上游供应商由服务端持有，密钥不出服务器"');
+  lines.push('echo "[buddy-bootstrap]   —— 千万不要填 http://' + host + ':' + (gatewayPort || 22122) + '/v1/chat/completions（服务端 agent 端点，已实测不可用）"');
 
   return lines.join('\n') + '\n';
 }
