@@ -163,7 +163,8 @@ function deriveEndpoints(hostValue) {
   if (/^https?:\/\//i.test(raw)) {
     const url = new URL(raw);
     const host = url.hostname;
-    const port = url.port || '8800';
+    // LLM（api_server 平台）与 Gateway 同端口（22122），仅路径不同
+    const port = url.port || '22122';
     return {
       host,
       llmUrl: raw,
@@ -175,7 +176,8 @@ function deriveEndpoints(hostValue) {
   const m = raw.match(/^([^:]+)(?::(\d+))?$/);
   if (!m) return null;
   const host = m[1];
-  const port = m[2] || '8800';
+  // 默认端口即 Gateway 端口（22122）；LLM 与 Gateway 同端口，无需独立 8800
+  const port = m[2] || '22122';
   return {
     host,
     llmUrl: `http://${host}:${port}/v1/chat/completions`,
@@ -188,7 +190,7 @@ function hostFromConnection(status) {
   if (!status || !status.llmUrl) return '';
   try {
     const url = new URL(status.llmUrl);
-    const port = url.port || '8800';
+    const port = url.port || '22122';
     return `${url.hostname}:${port}`;
   } catch (_) {
     return status.llmUrl;
@@ -755,7 +757,7 @@ el.btnBootstrap.addEventListener('click', async () => {
     el.fieldHost.focus();
     return;
   }
-  const llmPort = portOf(derived.llmUrl) || 8800;
+  const llmPort = portOf(derived.llmUrl) || 22122;
   const gatewayPort = portOf(el.fieldBaseUrl.value.trim()) || 22122;
   const managementPort = portOf(el.fieldManagementUrl.value.trim()) || 8700;
   el.bootstrapStatus.textContent = '生成中…';
