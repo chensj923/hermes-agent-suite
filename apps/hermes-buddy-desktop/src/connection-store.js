@@ -20,7 +20,7 @@ const PERMISSIONS = ['read', 'read-write', 'full'];
  * Gateway baseUrl 是可选的——本机工具链路不依赖它，留空也能干活；
  * Hermes 服务端默认端口是 22122。推导关系：
  *   baseUrl 留空 → 由 llmUrl 同主机 + 端口 22122 推导
- *   llmUrl 留空 → 由 baseUrl 同主机 + 端口 8800 推导
+ *   llmUrl 留空 → 由 baseUrl 同主机 + 端口 22122 推导（LLM 与 Gateway 同端口）
  *   managementUrl 留空 → 由 baseUrl 同主机 + 端口 8700 推导
  */
 function normalizeConnectionInput(input) {
