@@ -153,6 +153,75 @@ class SessionManager {
   // ---------------------------------------------------------------- 连接
 
   /**
+   * 端点能力校验 + 自动纠正（v2.3.8）。
+   *
+   * 背景：Gateway 的 /v1/chat/completions（api_server 平台）是"服务端 agent 端点"——
+   * 它会无视请求里的 tools、注入自己的系统提示、在服务器上执行命令。
+   * Buddy 需要的是无状态纯推理端点（hermes proxy，默认 8800）。
+   *
+   * 流程：探测 llmUrl → 若是 agent 端点，依次尝试同主机候选纯推理端口（8800/8000），
+   * 找到无状态端点就自动切换；都找不到则抛出可操作的错误。
+   */
+  async resolveBrain(connection) {
+    const brain = new Brain({
+      endpoint: connection.llmUrl,
+      model: connection.model,
+      apiKey: connection.apiKey,
+      fetchImpl: this.fetchImpl
+    });
+    let probe;
+    try {
+      probe = await brain.probeCapability();
+    } catch (error) {
+      // 探测失败（网络/超时）不在这里定论，让后续 assertReachable 给出具体错误。
+      this.logger.warn('endpoint-probe-failed', { llmUrl: connection.llmUrl, error: error.message });
+      return { brain, llmUrl: connection.llmUrl, notice: null };
+    }
+
+    if (probe.verdict === 'stateless') return { brain, llmUrl: connection.llmUrl, notice: null };
+    if (probe.verdict === 'no_fc') {
+      // 模型没回 tool_calls 但也没有服务端注入的迹象：不致命，聊天时再观察。
+      this.logger.warn('endpoint-no-fc', { llmUrl: connection.llmUrl, detail: probe.detail });
+      return { brain, llmUrl: connection.llmUrl, notice: null };
+    }
+    if (probe.verdict === 'unknown') {
+      // 探测失败（网络/超时）不在这里定论，让后续 assertReachable 给出具体错误。
+      return { brain, llmUrl: connection.llmUrl, notice: null };
+    }
+
+    // verdict === 'agent_endpoint'：请求被服务端 agent 接管，尝试同主机纯推理端口。
+    this.logger.warn('endpoint-is-agent-mode', { llmUrl: connection.llmUrl, verdict: probe.verdict, detail: probe.detail });
+    for (const port of [8800, 8000]) {
+      let alt;
+      try { alt = withPort(connection.llmUrl, port); } catch (_) { continue; }
+      if (!alt || alt === connection.llmUrl) continue;
+      const altBrain = new Brain({
+        endpoint: alt,
+        model: connection.model,
+        apiKey: connection.apiKey,
+        fetchImpl: this.fetchImpl
+      });
+      try {
+        const altProbe = await altBrain.probeCapability();
+        if (altProbe.verdict === 'stateless') {
+          this.logger.info('endpoint-auto-switched', { from: connection.llmUrl, to: alt });
+          return {
+            brain: altBrain,
+            llmUrl: alt,
+            notice: `检测到 ${connection.llmUrl} 是服务端 agent 端点（会在服务器上执行命令，Buddy 无法使用），已自动切换到纯推理端点 ${alt}`
+          };
+        }
+      } catch (_) { /* 下一个候选 */ }
+    }
+
+    throw new Error(
+      `当前推理端点（${connection.llmUrl}）是 Hermes 服务端 agent 端点：它会忽略本地工具、在服务器上执行命令并返回文字，` +
+      'Buddy 的本地工具链路完全用不了。同主机上也没找到可用的纯推理端点（hermes proxy，默认 8800）。' +
+      '请在服务器上执行「hermes proxy run」启动纯推理代理（或用 Buddy 的「生成服务端准备脚本」自动处理），然后重新连接。'
+    );
+  }
+
+  /**
    * 连接 Hermes。LLM 推理端点必须通；Gateway 只用于会话与部署登记，
    * 不通也不影响本机干活，降级继续。
    */
@@ -164,12 +233,11 @@ class SessionManager {
     // 先建本地运行时：工作目录不存在就现在建好，后面所有操作才有落点。
     this.ensureRuntime(normalized);
 
-    const brain = new Brain({
-      endpoint: normalized.llmUrl,
-      model: normalized.model,
-      apiKey: normalized.apiKey,
-      fetchImpl: this.fetchImpl
-    });
+    // 端点能力校验：agent 端点自动切换到纯推理端口，找不到直接报可操作的错。
+    const resolved = await this.resolveBrain(normalized);
+    const brain = resolved.brain;
+    normalized.llmUrl = resolved.llmUrl;
+    const endpointNotice = resolved.notice;
 
     let models = [];
     try {
@@ -245,7 +313,8 @@ class SessionManager {
       health,
       models,
       workspace: this.describeWorkspace(),
-      gatewayWarning
+      gatewayWarning,
+      endpointNotice
     };
   }
 
@@ -255,12 +324,11 @@ class SessionManager {
     if (!stored) return { ok: false, reason: 'not_configured', message: '还没有配置 Hermes 连接' };
     try {
       this.ensureRuntime(stored);
-      const brain = new Brain({
-        endpoint: stored.llmUrl,
-        model: stored.model,
-        apiKey: stored.apiKey,
-        fetchImpl: this.fetchImpl
-      });
+      // 恢复时同样做端点能力校验（agent 端点自动切到纯推理端口并持久化纠正结果）。
+      const resolved = await this.resolveBrain(stored);
+      const brain = resolved.brain;
+      stored.llmUrl = resolved.llmUrl;
+      const endpointNotice = resolved.notice;
       await brain.assertReachable();
 
       // 恢复时也尝试连 Gateway（和 connect 一样降级），这样重启后会话登记与部署清单能恢复，
@@ -294,7 +362,7 @@ class SessionManager {
           ? describeGatewayError(this.lastGatewayError)
           : 'Gateway 未连通（重启时鉴权失败或不可达），聊天和本机工具不受影响。';
       }
-      return { ok: true, connection: publicView(stored), workspace: this.describeWorkspace(), gatewayWarning };
+      return { ok: true, connection: publicView(stored), workspace: this.describeWorkspace(), gatewayWarning, endpointNotice };
     } catch (error) {
       this.logger.warn('resume-failed', { error: error.message, code: error.code });
       return { ok: false, reason: error.code || 'error', message: describeBrainError(error) };
@@ -681,6 +749,17 @@ function summarizeArgs(args) {
   if (!args || typeof args !== 'object') return '';
   const value = args.command || args.path || args.pattern || '';
   return String(value).slice(0, 40);
+}
+
+/** 把 URL 的端口换成 port，其余（主机/路径）保持不变；解析失败返回 null。 */
+function withPort(urlString, port) {
+  try {
+    const url = new URL(urlString);
+    url.port = String(port);
+    return url.toString();
+  } catch (_) {
+    return null;
+  }
 }
 
 module.exports = { SessionManager, MAX_HISTORY_MESSAGES, PERSONA_FILE, summarizeArgs };
