@@ -3,8 +3,9 @@
 const { GatewayError } = require('@hermes/connection');
 
 const DEFAULT_TIMEOUT_MS = 120000;
-// Hermes 部署里 Gateway 在 22122、模型路由在 8800，填一个就能推出另一个。
-const LLM_PORT_CANDIDATES = ['8800', '8000', '11434'];
+// Hermes 部署中，LLM 推理端点（/v1/chat/completions）不是独立进程，
+// 而是 Gateway 的一个 api_server 平台，与 Gateway 共用同一个端口（默认 22122）。
+// 因此填一个地址即可推出另一个——二者主机与端口相同，只是路径不同。
 
 class BrainError extends Error {
   constructor(message, code = 'brain_error', status = undefined) {
@@ -17,6 +18,7 @@ class BrainError extends Error {
 
 /**
  * 从 Gateway 地址推导 LLM 推理端点。
+ * LLM（api_server 平台）与 Gateway 同主机同端口（22122），仅路径不同。
  * 用户只填一个地址是最省事的，但推导错了要能一眼看懂报错，所以保留原文兜底。
  */
 function deriveLlmEndpoint(gatewayUrl, explicit) {
@@ -29,8 +31,7 @@ function deriveLlmEndpoint(gatewayUrl, explicit) {
     throw new BrainError(`Hermes 地址无法解析: ${source}`, 'invalid_endpoint');
   }
   const port = url.port || '22122';
-  const next = LLM_PORT_CANDIDATES.includes(port) ? port : '8800';
-  url.port = next;
+  url.port = port; // LLM 与 Gateway 同端口（22122），仅路径不同
   url.pathname = '/v1/chat/completions';
   url.search = '';
   url.hash = '';
@@ -300,8 +301,7 @@ module.exports = {
   normalizeLlmEndpoint,
   parseCompletionSse,
   normalizeToolCalls,
-  DEFAULT_TIMEOUT_MS,
-  LLM_PORT_CANDIDATES
+  DEFAULT_TIMEOUT_MS
 };
 
 // GatewayError 仍在主进程其它链路上使用，这里一并保持引用清晰。
