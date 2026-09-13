@@ -84,7 +84,7 @@ test('connect: 建立运行时、建好工作区、落盘配置', async () => {
 
   assert.equal(result.connection.configured, true);
   assert.equal(result.connection.workspace, workspace);
-  assert.equal(result.connection.llmUrl, 'http://192.168.0.246:8800/v1/chat/completions');
+  assert.equal(result.connection.llmUrl, 'http://192.168.0.246:22122/v1/chat/completions');
   assert.ok(fs.existsSync(path.join(workspace, 'AGENTS.md')), '应自动生成 AGENTS.md');
   assert.ok(fs.existsSync(path.join(workspace, '.hermes', 'skills')));
   assert.deepEqual(result.models, ['hermes-agent']);
