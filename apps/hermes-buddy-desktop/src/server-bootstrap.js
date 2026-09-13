@@ -14,9 +14,14 @@
  *
  * 输入参数：
  *   - host           Hermes 主机（必填，用来给生成出来的脚本头部 echo 提示用）
- *   - llmPort        LLM 端点端口（默认 8800）
+ *   - llmPort        LLM 端点端口（默认 22122；实际以服务端配置为准，脚本会自动读取）
  *   - gatewayPort    Gateway 端口（默认 22122；用户填 0 表示"没填 gateway"，脚本里就跳过这一段）
  *   - managementPort 部署管理端口（默认 8700；同上）
+
+ * 重要认知：在 Hermes 当前部署里，LLM 推理端点（/v1/chat/completions）不是独立进程，
+ * 而是 Gateway 的一个 api_server 平台，和 Gateway 共用同一个端口（默认 22122）。
+ * 所以 LLM 是否可用 = Gateway 是否在跑 + config.yaml 是否启用了 api_server 平台。
+ * 脚本不再去“启动 8800 的 LLM”（那是错误的方向），而是确认/修复 api_server 平台配置。
  *
  * 输出是一段字符串，前 4 行带 #!/usr/bin/env bash，用户可以直接 .sh 保存到 Hermes 上跑。
  * 不用 shebang 也行 —— Buddy 那边有个"复制"按钮和"导出 .sh"按钮都能用。
@@ -24,7 +29,7 @@
 
 function generateBootstrapScript(input = {}) {
   const host = String(input.host || '<hermes-host>').replace(/[^a-zA-Z0-9.\-_]/g, '');
-  const llmPort = clampPort(input.llmPort, 8800);
+  const llmPort = clampPort(input.llmPort, 22122);
   const gatewayPort = input.gatewayPort === 0 ? 0 : clampPort(input.gatewayPort, 22122);
   const managementPort = input.managementPort === 0 ? 0 : clampPort(input.managementPort, 8700);
 
@@ -42,7 +47,7 @@ function generateBootstrapScript(input = {}) {
   lines.push('HERMES_HOME="${HERMES_HOME:-/root/.hermes}"');
   lines.push('echo "[buddy-bootstrap] Hermes 主机:  ' + host + '"');
   lines.push('echo "[buddy-bootstrap] Hermes_HOME:    $HERMES_HOME"');
-  lines.push('echo "[buddy-bootstrap] 预期 LLM 端口:    ' + llmPort + '"');
+  lines.push('echo "[buddy-bootstrap] 说明: LLM 推理端点与 Gateway 共用端口（默认 22122），详见第 4 步"');
   if (gatewayPort) lines.push('echo "[buddy-bootstrap] 预期 Gateway 端口: ' + gatewayPort + '"');
   if (managementPort) lines.push('echo "[buddy-bootstrap] 预期 Management 端口: ' + managementPort + '"');
   lines.push('');
@@ -62,9 +67,9 @@ function generateBootstrapScript(input = {}) {
   // 2. 当前监听清单
   lines.push('# ---- 2. 当前监听端口 ----');
   lines.push('if command -v ss >/dev/null 2>&1; then');
-  lines.push('  ss -tlnp 2>/dev/null | grep -E ":' + llmPort + '|' + (gatewayPort || '00000') + '|' + (managementPort || '00000') + '" || echo "  （预期端口未监听，下面要修）"');
+  lines.push('  ss -tlnp 2>/dev/null | grep -E ":' + (gatewayPort || '00000') + (managementPort ? '|:' + managementPort : '') + '" || echo "  （预期端口未监听，下面要修）"');
   lines.push('else');
-  lines.push('  netstat -tlnp 2>/dev/null | grep -E ":' + llmPort + '|' + (gatewayPort || '00000') + '|' + (managementPort || '00000') + '" || true');
+  lines.push('  netstat -tlnp 2>/dev/null | grep -E ":' + (gatewayPort || '00000') + (managementPort ? '|:' + managementPort : '') + '" || true');
   lines.push('fi');
   lines.push('');
 
@@ -84,43 +89,56 @@ function generateBootstrapScript(input = {}) {
   lines.push('fi');
   lines.push('');
 
-  // 4. 先确保 LLM / api_server 在跑（8800 必须通，Buddy 才能聊天）
-  lines.push('# ---- 4. 启动 / 检查 LLM（api_server）----');
-  lines.push('# LLM 端口（' + llmPort + '）和 Gateway 是两个独立进程。');
-  lines.push('# 下面会先用 `hermes --help` 自动识别 LLM 子命令，不再写死猜命令；');
-  lines.push('# 若自动启动失败，会把真实报错和子命令列表打印出来，方便定位。');
-  lines.push('ensure_llm_running() {');
-  lines.push('  local port="$1"');
-  lines.push('  if ss -tln 2>/dev/null | grep -qE ":${port}\\b" || netstat -tln 2>/dev/null | grep -qE ":${port}\\b"; then');
-  lines.push('    echo "[buddy-bootstrap] LLM 端口 ${port} 已在监听"');
-  lines.push('    return 0');
-  lines.push('  fi');
-  lines.push('  echo "[buddy-bootstrap] LLM 端口 ${port} 未监听，尝试自动启动..."');
-  lines.push('  mkdir -p "$HERMES_HOME/logs"');
-  lines.push('  # 先打印 hermes 子命令清单，便于定位真正的 LLM 启动命令');
-  lines.push('  echo "[buddy-bootstrap] hermes 顶层可用子命令（来自 --help）："');
-  lines.push('  if command -v hermes >/dev/null 2>&1; then hermes --help 2>&1 | sed -n "1,40p" || true; else python3 -m hermes_cli.main --help 2>&1 | sed -n "1,40p" || true; fi');
-  lines.push('  # 候选子命令（按优先级）；逐个验证 --help 是否真实存在，再尝试启动');
-  lines.push('  local candidates="api_server llm serve router model server"');
-  lines.push('  local sub verb');
-  lines.push('  for sub in $candidates; do');
-  lines.push('    hermes "$sub" --help >/dev/null 2>&1 || { echo "[buddy-bootstrap]   - 跳过不存在的子命令: $sub"; continue; }');
-  lines.push('    for verb in run ""; do');
-  lines.push('      if [ -n "$verb" ]; then echo "[buddy-bootstrap] 尝试: hermes $sub $verb --host 0.0.0.0"; nohup hermes $sub $verb --host 0.0.0.0 >> "$HERMES_HOME/logs/api_server.log" 2>&1 &');
-  lines.push('      else echo "[buddy-bootstrap] 尝试: hermes $sub --host 0.0.0.0"; nohup hermes $sub --host 0.0.0.0 >> "$HERMES_HOME/logs/api_server.log" 2>&1 & fi');
-  lines.push('      sleep 6');
-  lines.push('      if ss -tln 2>/dev/null | grep -qE ":${port}\\b" || netstat -tln 2>/dev/null | grep -qE ":${port}\\b"; then');
-  lines.push('        if [ -n "$verb" ]; then echo "[buddy-bootstrap] OK LLM 端口 ${port} 已启动（命令: hermes $sub $verb --host 0.0.0.0）"; else echo "[buddy-bootstrap] OK LLM 端口 ${port} 已启动（命令: hermes $sub --host 0.0.0.0）"; fi');
-  lines.push('        return 0');
-  lines.push('      fi');
-  lines.push('    done');
-  lines.push('  done');
-  lines.push('  echo "[buddy-bootstrap] 自动启动 LLM 失败。以下是 api_server.log 末尾（含真实报错）："');
-  lines.push('  tail -n 40 "$HERMES_HOME/logs/api_server.log" 2>/dev/null || echo "  (无日志，可能 hermes 没有单独的 LLM 子命令，需手动确认启动方式)"');
-  lines.push('  return 1');
-  lines.push('}');
-  lines.push('ensure_llm_running ' + llmPort + ' || echo "[buddy-bootstrap] （LLM 未自动启动，详见上方日志；后续步骤仍会执行）"');
+  // 4. 确认 LLM（api_server 平台）配置与监听
+  // 关键认知：在 Hermes 当前部署里，LLM 推理端点（/v1/chat/completions）不是独立进程，
+  // 而是 Gateway 的一个 api_server 平台，和 Gateway 共用同一个端口（默认 22122）。
+  // 所以 LLM 是否可用 = Gateway 是否在跑 + config.yaml 是否启用了 api_server 平台。
+  // 之前去“启动 8800 的 LLM”是方向性错误，这里改为确认 + 自动修复配置。
+  lines.push('# ---- 4. 确认 LLM（api_server 平台）----');
+  lines.push('# LLM 推理端点（/v1/chat/completions）是 Gateway 的 api_server 平台，与 Gateway 同端口（默认 22122）。');
+  lines.push('# 下面从服务端配置读取真实的 api_server 端口，并确认是否启用。');
+  lines.push('CONFIG="$HERMES_HOME/config.yaml"');
+  lines.push('# 先从 .env 读 API_SERVER_PORT，再从 config.yaml 读 platforms.api_server.extra.port');
+  lines.push('DETECTED_PORT=""');
+  lines.push('if [[ -f "$HERMES_HOME/.env" ]]; then');
+  lines.push('  DETECTED_PORT=$(grep -oE "^API_SERVER_PORT=[0-9]+" "$HERMES_HOME/.env" 2>/dev/null | head -1 | cut -d= -f2)');
+  lines.push('fi');
+  lines.push('if [[ -z "$DETECTED_PORT" ]] && [[ -f "$CONFIG" ]]; then');
+  lines.push('  DETECTED_PORT=$(awk \'/# api_server:/{f=1} f&&/extra:/{e=1} e&&/port:/{match($0,/[0-9]+/);print substr($0,RSTART,RLENGTH);exit}\' "$CONFIG" 2>/dev/null)');
+  lines.push('fi');
+  lines.push('LLM_PORT="${DETECTED_PORT:-' + (gatewayPort || 22122) + '}"');
+  lines.push('echo "[buddy-bootstrap] 实际 LLM（api_server）端口: $LLM_PORT"');
   lines.push('');
+  lines.push('# 确认 api_server 平台已启用（未启用则 LLM 端点不可用，脚本会尝试自动写入）');
+  lines.push('API_SERVER_ENABLED=0');
+  lines.push('if [[ -f "$CONFIG" ]] && grep -qE "^[[:space:]]*api_server:" "$CONFIG" && grep -qE "enabled:[[:space:]]*true" "$CONFIG"; then');
+  lines.push('  API_SERVER_ENABLED=1');
+  lines.push('  echo "[buddy-bootstrap] config.yaml 已启用 api_server 平台（LLM 端点由 Gateway 在 $LLM_PORT 提供）"');
+  lines.push('else');
+  lines.push('  echo "[buddy-bootstrap] WARN: config.yaml 未启用 api_server 平台，LLM 端点将不可用"');
+  lines.push('  # 自动尝试写入 api_server 平台配置（仅当 config.yaml 里还没有 api_server 段时）');
+  lines.push('  if [[ -f "$CONFIG" ]] && ! grep -qE "api_server:" "$CONFIG"; then');
+  lines.push('    echo "" >> "$CONFIG"');
+  lines.push('    echo "platforms:" >> "$CONFIG"');
+  lines.push('    echo "  api_server:" >> "$CONFIG"');
+  lines.push('    echo "    enabled: true" >> "$CONFIG"');
+  lines.push('    echo "    extra:" >> "$CONFIG"');
+  lines.push('    echo "      host: 0.0.0.0" >> "$CONFIG"');
+  lines.push('    echo "      port: $LLM_PORT" >> "$CONFIG"');
+  lines.push('    echo "[buddy-bootstrap] 已自动写入 api_server 平台配置到 $CONFIG（第 5 步重启后生效）"');
+  lines.push('  else');
+  lines.push('    echo "[buddy-bootstrap]   请人工在 $CONFIG 增加：platforms.api_server.enabled: true（host: 0.0.0.0, port: $LLM_PORT）"');
+  lines.push('  fi');
+  lines.push('fi');
+  lines.push('');
+  lines.push('# 确认 LLM 端口在监听（它和 Gateway 是同一个进程）');
+  lines.push('if ss -tln 2>/dev/null | grep -qE ":$LLM_PORT\\b" || netstat -tln 2>/dev/null | grep -qE ":$LLM_PORT\\b"; then');
+  lines.push('  echo "[buddy-bootstrap] LLM 端口 $LLM_PORT 已在监听（由 Gateway api_server 平台提供）"');
+  lines.push('else');
+  lines.push('  echo "[buddy-bootstrap] WARN: $LLM_PORT 未监听 —— 请确认 Gateway 在跑（第 5 步会重启）"');
+  lines.push('fi');
+  lines.push('');
+
 
   // 5. 重启 gateway
   lines.push('# ---- 5. 重启 gateway（如果改了绑定地址，必须重启） ----');
@@ -148,10 +166,8 @@ function generateBootstrapScript(input = {}) {
   lines.push('# ---- 6. 重启后再听一次端口 ----');
   lines.push('sleep 3');
   lines.push('if command -v ss >/dev/null 2>&1; then');
-  lines.push('  ss -tlnp 2>/dev/null | grep -E ":' + llmPort + (gatewayPort ? '|:' + gatewayPort : '') + (managementPort ? '|:' + managementPort : '') + '" || echo "  还是没监听 —— 检查 gateway.log / api_server.log"');
+  lines.push('  ss -tlnp 2>/dev/null | grep -E ":' + (gatewayPort || '00000') + (managementPort ? '|:' + managementPort : '') + '" || echo "  还是没监听 —— 检查 gateway.log"');
   lines.push('fi');
-  lines.push('echo "[buddy-bootstrap] api_server.log 最近 20 行:"');
-  lines.push('tail -n 20 "$HERMES_HOME/logs/api_server.log" 2>/dev/null || echo "  (api_server.log 不存在)"');
   lines.push('echo "[buddy-bootstrap] gateway.log 最近 20 行:"');
   lines.push('tail -n 20 "$HERMES_HOME/gateway.log" 2>/dev/null || true');
   lines.push('');
@@ -210,7 +226,7 @@ function generateBootstrapScript(input = {}) {
     lines.push('echo "[buddy-bootstrap]   Gateway 地址: http://' + host + ':' + gatewayPort + '"');
     lines.push('echo "[buddy-bootstrap]   注意：Gateway 必须是 22122，填 22121/22123/8700 会报 404（不是 Gateway）"');
   }
-  lines.push('echo "[buddy-bootstrap]   LLM 地址:     http://' + host + ':' + llmPort + '/v1/chat/completions"');
+  lines.push('echo "[buddy-bootstrap]   LLM 地址:     http://' + host + ':$LLM_PORT/v1/chat/completions"');
   lines.push('echo "[buddy-bootstrap]   API Key:      $API_KEY"');
 
   return lines.join('\n') + '\n';
