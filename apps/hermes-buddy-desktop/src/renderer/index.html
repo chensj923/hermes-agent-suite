@@ -24,7 +24,7 @@
         <label class="connect-field">
           <span>Hermes 主机</span>
           <input id="field-host" name="host" placeholder="192.168.0.246" spellcheck="false" required>
-          <small>支持 IP、域名，或带端口的地址。会自动推导 LLM :8800、Gateway :22122；部署管理地址（可选）默认留空。</small>
+          <small>支持 IP、域名，或带端口的地址。LLM 推理端点与 Gateway 共用端口（默认 :22122），无需独立填写；部署管理地址（可选）默认留空。</small>
         </label>
 
         <label class="connect-field">
@@ -38,7 +38,7 @@
           <div class="advanced-body">
             <label class="connect-field">
               <span>推理端点（LLM）</span>
-              <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8800/v1/chat/completions" spellcheck="false">
+              <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:22122/v1/chat/completions" spellcheck="false">
             </label>
             <label class="connect-field">
               <span>Gateway 地址</span>
