@@ -160,15 +160,18 @@ function deriveEndpoints(hostValue) {
   const raw = String(hostValue || '').trim();
   if (!raw) return null;
 
+  // 推理端点默认指向同主机上的 Buddy 直通代理（8811，由「服务端准备脚本」部署）。
+  // 它不是 Gateway 的 22122 —— 那是服务端 agent 端点，会忽略 tools 并在服务器上执行命令（已实测）。
+  // 这样用户只填「Hermes 主机 + API Key」就能连，上游供应商由服务端持有，密钥不出服务器。
+  const llmFor = (h) => `http://${h}:8811/v1/chat/completions`;
+
   if (/^https?:\/\//i.test(raw)) {
     const url = new URL(raw);
     const host = url.hostname;
-    // 主机框只用来推导 Gateway；推理端点必须单独填（22122 是服务端 agent 端点，不能用）
-    const port = url.port || '22122';
     return {
       host,
-      llmUrl: '',
-      baseUrl: `http://${host}:${port}`,
+      llmUrl: llmFor(host),
+      baseUrl: `http://${host}:${url.port || '22122'}`,
       managementUrl: ''
     };
   }
@@ -176,13 +179,10 @@ function deriveEndpoints(hostValue) {
   const m = raw.match(/^([^:]+)(?::(\d+))?$/);
   if (!m) return null;
   const host = m[1];
-  // Gateway 端口（会话登记用）。推理端点不再从这里推导：
-  // Gateway 的 22122 是服务端 agent 端点，当推理端点用会失效（已实测）。
-  const port = m[2] || '22122';
   return {
     host,
-    llmUrl: '',
-    baseUrl: `http://${host}:${port}`,
+    llmUrl: llmFor(host),
+    baseUrl: `http://${host}:${m[2] || '22122'}`,
     managementUrl: ''
   };
 }
@@ -632,13 +632,9 @@ el.connectForm.addEventListener('submit', async (event) => {
     return;
   }
 
-  // 推理端点必填且不能由 Gateway 推导：Gateway 的 22122 是服务端 agent 端点，用不了。
-  const llmUrl = el.fieldLlmUrl.value.trim();
-  if (!llmUrl) {
-    setConnectStatus('请填写「推理端点（LLM）」：必须是原生支持 function calling 的 OpenAI 兼容端点（如火山方舟 Ark / DeepSeek / 服务器上的 hermes proxy），不能用 Gateway 的 22122。不确定就点「生成服务端准备脚本」看第 4 步。', 'error');
-    el.fieldLlmUrl.focus();
-    return;
-  }
+  // 推理端点默认留空 = 用 Hermes 本机上的直通代理（8811，由「服务端准备脚本」部署）。
+  // 只有想直连别的 OpenAI 兼容端点时才需要手填（高级用法，密钥会存在本机）。
+  const llmUrl = el.fieldLlmUrl.value.trim() || derived.llmUrl;
 
   const payload = {
     llmUrl,
