@@ -312,6 +312,22 @@ function renderToolResult({ id, ok, durationMs, text, name }) {
   state.pendingTools.delete(id);
 }
 
+// 命令在执行过程中实时吐出的片段：直接追加到卡片输出区，让用户看到进度。
+function renderToolOutput({ id, chunk }) {
+  const entry = state.pendingTools.get(id);
+  if (!entry) return;
+  const card = entry.card;
+  const out = card.querySelector('.tool-output');
+  out.hidden = false;
+  // 流式片段累加；最终 tool_result 会用完整文本重置一次，这里只负责"边跑边显"。
+  out.textContent = (out.textContent || '') + chunk;
+  // 执行中的卡片标个"流式"语气，结果回来后再改回 完成/失败。
+  if (card.dataset.status === 'running') {
+    card.querySelector('.tool-status').dataset.tone = 'running';
+  }
+  scrollTools();
+}
+
 function secondsPrecision(ms) {
   if (ms < 200) return 2;
   if (ms < 2000) return 1;
@@ -366,6 +382,9 @@ api.onChatEvent((event) => {
       break;
     case 'tool_result':
       renderToolResult(event);
+      break;
+    case 'tool_output':
+      renderToolOutput(event);
       break;
     case 'notice':
       renderNotice(event);
@@ -1206,7 +1225,13 @@ el.bannerAction.addEventListener('click', async () => {
   if (state.bannerActionClick) { state.bannerActionClick(); return; }
   await api.openExternal(state.bannerActionUrl).catch((error) => showBanner(error.message || '无法打开链接', 'error'));
 });
-el.bannerDismiss.addEventListener('click', hideBanner);
+// 关闭按钮同时响应 click 与 pointerdown，并阻止冒泡，避免被横幅其他区域吞掉事件。
+function dismissBanner(event) {
+  if (event) event.stopPropagation();
+  hideBanner();
+}
+el.bannerDismiss.addEventListener('click', dismissBanner);
+el.bannerDismiss.addEventListener('pointerdown', dismissBanner);
 
 // ---- 自动更新：探测 → 后台下载（聊天不受影响）→ 一键重启静默安装 ----
 
