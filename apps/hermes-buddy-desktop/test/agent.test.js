@@ -31,9 +31,9 @@ function fakeFetch(handler) {
   };
 }
 
-test('端点推导：Gateway 22122 → 推理 8800', () => {
-  assert.equal(deriveLlmEndpoint('http://192.168.0.246:22122'), 'http://192.168.0.246:8800/v1/chat/completions');
-  assert.equal(deriveLlmEndpoint('192.168.0.246'), 'http://192.168.0.246:8800/v1/chat/completions');
+test('端点推导：推理端点与 Gateway 同端口（22122）', () => {
+  assert.equal(deriveLlmEndpoint('http://192.168.0.246:22122'), 'http://192.168.0.246:22122/v1/chat/completions');
+  assert.equal(deriveLlmEndpoint('192.168.0.246'), 'http://192.168.0.246:22122/v1/chat/completions');
   assert.equal(deriveLlmEndpoint('http://h:22122', 'http://h:9000/v1/chat/completions'), 'http://h:9000/v1/chat/completions');
   assert.equal(normalizeLlmEndpoint('http://h:9000'), 'http://h:9000/v1/chat/completions');
   assert.throws(() => normalizeLlmEndpoint('ftp://h'), /HTTP/);
