@@ -21,18 +21,20 @@ test('generateBootstrapScript: emits a bash header', () => {
   const out = generateBootstrapScript({ host: 'h', llmPort: 8800 });
   assert.match(out, /^#!\/usr\/bin\/env bash/);
   assert.ok(out.includes('set -euo pipefail'));
-  // LLM 与 Gateway 同端口（22122）；脚本会确认 api_server 平台
-  assert.ok(out.includes('22122'));
-  assert.ok(out.includes('api_server'));
-  assert.ok(!out.includes('8800'));
+  // v2.3.8：脚本第 4 步 = 探测/启动 hermes proxy 纯推理端点（默认 8800）
+  assert.ok(out.includes('hermes proxy'));
+  assert.ok(out.includes('probe_stateless'));
+  assert.ok(out.includes('8800'));
+  // Gateway 重启绝不带 --host（v2.3.7 教训）
+  assert.ok(!/gateway run --host/.test(out));
 });
 
 test('generateBootstrapScript: skips gateway block when port is 0', () => {
   const out = generateBootstrapScript({ host: 'h', llmPort: 8800, gatewayPort: 0 });
   // gatewayPort=0 时不应出现“预期 Gateway 端口”提示
   assert.ok(!out.includes('预期 Gateway 端口'));
-  // 但 LLM（api_server）平台确认逻辑仍在（默认端口 22122）
-  assert.ok(out.includes('api_server'));
+  // 但纯推理端点（hermes proxy）探测/启动逻辑仍在
+  assert.ok(out.includes('hermes proxy'));
 });
 
 test('generateBootstrapScript: includes API key discovery block', () => {
