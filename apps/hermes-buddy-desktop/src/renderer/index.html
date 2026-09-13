@@ -24,7 +24,7 @@
         <label class="connect-field">
           <span>Hermes 主机</span>
           <input id="field-host" name="host" placeholder="192.168.0.246" spellcheck="false" required>
-          <small>支持 IP、域名，或带端口的地址。LLM 推理端点与 Gateway 共用端口（默认 :22122），无需独立填写；部署管理地址（可选）默认留空。</small>
+          <small>支持 IP、域名，或带端口的地址。连接时会自动探测推理端点：若检测到服务端 agent 端点，会自动切换到纯推理端点（hermes proxy，默认 :8800）；部署管理地址（可选）默认留空。</small>
         </label>
 
         <label class="connect-field">
