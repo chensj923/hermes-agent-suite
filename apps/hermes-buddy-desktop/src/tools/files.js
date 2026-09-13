@@ -65,17 +65,25 @@ function detectBinary(buffer) {
 const GLOB_DOUBLE_STAR = '\u0000';
 
 function globToRegExp(pattern) {
+  const hadSlash = String(pattern).includes('/');
   const escaped = String(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&');
   const body = escaped
     .replace(/\*\*\/?/g, GLOB_DOUBLE_STAR)
     .replace(/\*/g, '[^/\\\\]*')
     .split(GLOB_DOUBLE_STAR).join('.*');
-  return new RegExp(`^${body}$`, 'i');
+  // 没写斜杠的短模式（如 *.pem、*pass*）既要能命中子目录里的文件，
+  // 也要能命中工作区根目录下的文件——所以目录前缀做成可选。
+  // 显式带了斜杠（如 src/**/*.js）则保持原结构，不做宽松匹配。
+  const anchored = hadSlash ? `^${body}$` : `^(?:.*/)?${body}$`;
+  return new RegExp(anchored, 'i');
 }
 
-/** 递归收集文件，带硬上限，防止在大仓库里跑飞。 */
-function walk(dir, { includeDirs = false, maxFiles = MAX_SCAN_FILES } = {}, acc = []) {
-  if (acc.length >= maxFiles) return acc;
+/**
+ * 递归收集文件，带硬上限，防止在大仓库/网络同步盘里跑飞。
+ * maxDepth：最多下钻的目录层数（含根层），默认 Infinity 不限制。
+ */
+function walk(dir, { includeDirs = false, maxFiles = MAX_SCAN_FILES, maxDepth = Infinity } = {}, acc = [], depth = 0) {
+  if (acc.length >= maxFiles || depth >= maxDepth) return acc;
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return acc; }
   for (const entry of entries) {
@@ -84,7 +92,7 @@ function walk(dir, { includeDirs = false, maxFiles = MAX_SCAN_FILES } = {}, acc 
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue;
       if (includeDirs) acc.push(full);
-      walk(full, { includeDirs, maxFiles }, acc);
+      if (depth + 1 < maxDepth) walk(full, { includeDirs, maxFiles, maxDepth }, acc, depth + 1);
     } else {
       acc.push(full);
     }
@@ -159,15 +167,32 @@ class FileTools {
 
   findFiles(input) {
     const base = this.workspace.resolve(input.path || '.');
-    const pattern = String(input.pattern || '*').trim() || '*';
-    const matcher = globToRegExp(pattern.includes('/') ? pattern : `**/${pattern}`);
+    // 支持逗号分隔的多个模式：*.pem,*.key,*.p12 —— 一次调用就能覆盖多种扩展名，
+    // 不用像 Get-ChildItem -Include 那样把整盘递归一遍又一遍。
+    const rawPatterns = String(input.pattern || '*')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const patterns = rawPatterns.length ? rawPatterns : ['*'];
+    const matchers = patterns.map((p) => globToRegExp(p));
+    const maxDepth = Number(input.maxDepth) > 0 ? Number(input.maxDepth) : Infinity;
     const stat = fs.statSync(base);
-    const files = stat.isDirectory() ? walk(base, { maxFiles: MAX_SCAN_FILES }) : [base];
+    const files = stat.isDirectory() ? walk(base, { maxFiles: MAX_SCAN_FILES, maxDepth }) : [base];
     const hits = files
-      .filter((file) => matcher.test(this.workspace.relative(file).split(path.sep).join('/')))
-      .slice(0, 200)
+      .filter((file) => {
+        const rel = this.workspace.relative(file).split(path.sep).join('/');
+        return matchers.some((m) => m.test(rel));
+      })
+      .slice(0, 300)
       .map((file) => this.workspace.relative(file).split(path.sep).join('/'));
-    return { ok: true, pattern, count: hits.length, files: hits };
+    return {
+      ok: true,
+      patterns,
+      count: hits.length,
+      files: hits,
+      capped: files.length >= MAX_SCAN_FILES,
+      truncated: hits.length >= 300
+    };
   }
 
   searchContent(input) {
@@ -181,7 +206,7 @@ class FileTools {
       regex = new RegExp(source, flags);
     } catch (_) { return { ok: false, error: `无效的正则表达式: ${needle}` }; }
     const base = this.workspace.resolve(input.path || '.');
-    const fileMatcher = input.filePattern ? globToRegExp(`**/${input.filePattern}`) : null;
+    const fileMatcher = input.filePattern ? globToRegExp(input.filePattern) : null;
     const maxResults = Number(input.maxResults) > 0 ? Math.min(Number(input.maxResults), 200) : DEFAULT_MAX_RESULTS;
 
     const stat = fs.statSync(base);
