@@ -6,7 +6,9 @@
 
 Buddy 不是一个远程 agent 的 Web 包装。它做的是**让远端 Hermes 做决策、让本机 Windows 做执行**：
 
-- **决策**：把消息、工具 schema、本地工作区描述发给一个**原生支持 function calling 的 OpenAI 兼容推理端点**（上游供应商 / 自建 vLLM / `hermes proxy`）。连接时 Buddy 会自动探测端点能力，误填成服务端 agent 端点会直接报错拦下。
+- **决策**：把消息、工具 schema、本地工作区描述发给 **Hermes 主机上的推理直通代理**（`:8811`，由「服务端准备脚本」一键部署）。
+  它复用 Hermes 自己配好的上游模型，**原样透传 tools**，因此**上游密钥永远不出服务器**，Buddy 只需认 Hermes 一个地址。
+  连接时会自动探测端点能力；误填成 Gateway 的 22122（服务端 agent 端点）会自动纠正或明确报错。
 - **执行**：本机 Electron 主进程按 function name 调本地工具（PowerShell / 文件系统 / Git…），把结果回灌给模型，直到模型不再要工具为止。
 - **落点**：所有执行强制限制在用户选的工作区目录里；越界路径与黑名单命令由工具层的 `guard.js` 拦截。
 
@@ -55,8 +57,8 @@ render → IPC(buddyApi) → main.js
                   │                        │
           SessionManager             Window Dialog
                   │                        │
-   brain.chat() ───→ 推理端点(function calling)    危险命令弹窗
-   (OpenAI compat)   (function calling)   (用户点头/拒绝)
+    brain.chat() ─→ Hermes:8811 直通代理 ─→ 上游模型    危险命令弹窗
+    (OpenAI compat)  (原样透传 tools)   (Ark/DeepSeek/…)  (用户点头/拒绝)
                   │                        │
                   ↓                        │
            AgentLoop.run()                 │
@@ -156,7 +158,9 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 
 | 字段 | 必填 | 填什么 | 备注 |
 |------|------|--------|------|
-| 推理端点（LLM） | **是** | `https://ark.cn-beijing.volces.com/api/v3/chat/completions` | **必须是原生支持 function calling 的 OpenAI 兼容端点**。可填火山方舟 Ark / DeepSeek / 通义 / 本地 vLLM、Ollama，或服务器上的 `hermes proxy`（`hermes proxy start --host 0.0.0.0 --port 8645`）。⚠️ **不要填 Gateway 的 22122**——那是服务端 agent 端点，会忽略 tools、在服务器上执行命令（已实测，换模型名也绕不过去）。 |
+| Hermes 主机 | **是** | `192.168.0.246` | Buddy **只需要这一个地址**。填了它，Gateway 自动推导为 `:22122`、推理端点自动推导为 `:8811`。 |
+| API Key | **是** | `A4Ux-...` | 服务端 `~/.hermes/.env` 里的 `API_SERVER_KEY`。Gateway 与推理端点**共用同一个 Key**。 |
+| 推理端点（LLM） | 否 | 留空 | 留空 = 用 Hermes 本机上的**直通代理 `:8811`**（推荐）。只有在你想让 Buddy 直连别的 OpenAI 兼容端点时才手填（此时密钥存在本机）。⚠️ **不要填 22122**——那是服务端 agent 端点。 |
 | Hermes Gateway 地址 | 否 | `http://192.168.0.246:22122` | **Hermes 服务端默认端口是 22122，不是 22124**。用于会话登记与部署清单；留空 Buddy 仍能干活（降级模式）。 |
 | 部署管理地址 | 否 | 留空按 Gateway 同主机 `:8700` 推导 | 不通不影响本地工具链路 |
 | API Key | **是** | `~/.hermes/data/.env` 中的 `API_SERVER_KEY` | 走 Windows DPAPI 加密保存 |
@@ -171,16 +175,37 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
   ⚠️ 它上面的 `/v1/chat/completions`（api_server 平台）是**服务端 agent 端点**：实测（2026-09-13/14）会
   无视请求里的 tools、注入 1.2~4 万 token 的自有系统提示、在服务器本地执行命令——Buddy **不能**用它。
   补充实测：把 `model` 换成底层真实模型名（`ark-code-latest`）结果完全一样，**换模型名绕不过去**。
+- **8811**：**Buddy 推理直通代理**（v2.3.10 起，由「服务端准备脚本」第 4 步在 Hermes 主机上部署）。
+  它读 Hermes 自己的 `config.yaml`（`model.base_url` / `name` / `api_key`），对外提供标准 OpenAI 兼容
+  `/v1/chat/completions`，**原样透传 tools**、不做任何 agent 编排、不注入系统提示，用 Gateway 的 API Key 鉴权。
+  零第三方依赖（只用 Python 标准库），注册为 systemd 服务 `hermes-buddy-inference`，开机自启。
 - **8645**：`hermes proxy` 的默认端口。注意它**不是本地推理端点**，而是把请求转发给 OAuth 供应商
-  （Nous Portal / xai）的代理；子命令是 `start`（不是 `run`）：`hermes proxy start --host 0.0.0.0 --port 8645`。
+  （Nous Portal / xai）的代理；子命令是 `start`（不是 `run`）。它需要 OAuth 登录，当前环境用不上。
 - **外部 / 自建推理端点**：火山方舟 Ark、DeepSeek、通义、本地 vLLM、Ollama 等，
-  只要原生支持 function calling 就能直接填进 Buddy 的「推理端点」。
+  只要原生支持 function calling 就能直接填进 Buddy 的「推理端点」（高级用法，密钥存在本机）。
 - **8700**：Hermes 部署管理服务（`/api/provisioning/products`）
 - **22124**：仅 Windows 端 Buddy Gateway 端口（**非 Hermes 默认**，仅当你在 Windows 上跑了 hermes-buddy-gateway 时才用）
 
 > 版本历史教训：v2.3.6 曾认为「LLM 与 Gateway 同端口 22122」，v2.3.8 曾认为「hermes proxy 是本地推理端点、默认 8800」，
-> 两条都被实测证伪。**当前（v2.3.9）结论：推理端点必须是一个原生 function calling 的 OpenAI 兼容端点，
-> 与 Gateway 完全解耦。**
+> v2.3.9 曾让用户把上游供应商地址 + 密钥填进 Windows 客户端 —— 三条都被实测或架构评审证伪。
+> **当前（v2.3.10）结论：Hermes 不对外提供纯推理能力（22122 上只有 5 个端点，全是 agent 语义或管理用途），
+> 所以在 Hermes 主机上补一层零依赖直通代理 `:8811`；Buddy 只认 Hermes 一个地址，上游密钥不出服务器。**
+
+### 8.2 为什么 Buddy 不能直接用 22122（架构说明）
+
+Buddy 与 Hermes 的 `/v1/chat/completions` 是**两种正交的 API 语义**，不是同一件事的两种配置：
+
+| | Buddy 需要的语义 | Hermes 22122 的语义 |
+|---|---|---|
+| 收到 | `messages` + `tools` | `messages` |
+| 返回 | 一个 `tool_call`（**不执行**） | 最终文本（**已在服务端执行完工具**） |
+
+实测证据：向 22122 发带 `tools` 的请求，`tool_calls` 恒为 `null`、`prompt_tokens` 恒为 12178（被注入自有系统提示）、
+在服务器 `/root` 真的跑了 `ls`；换成底层真实模型名 `ark-code-latest` 结果完全一样。
+`/v1/responses` 同理。22122 的路由表只有 `/v1/models`、`/v1/chat/completions`、`/v1/responses`、
+`/health`、`/api/sessions`，`/api/proxy`、`/api/passthrough`、`/api/inference`、`/api/models` 全是 404。
+
+所以 v2.3.10 在 Hermes 主机上补了直通代理：它只做"转发 + 鉴权"，把 Hermes 配好的上游以 Buddy 需要的语义暴露出来。
 
 > 旧版本文档把 22124 列为默认是错的——它只是 Windows 端 Buddy 自身的 gateway。Hermes Linux 服务端实际是 22122。Buddy 现在会在 Gateway 留空时自动从 LLM 端点推导到 :22122；不通也只是降级，不会阻塞。
 
@@ -199,23 +224,25 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 
 | 项 | 默认状态 | 需要做什么 |
 |----|----------|-----------|
-| **推理端点**（原生 function calling） | Hermes 自己不对外提供 | 在 Buddy 里直连上游供应商（Ark / DeepSeek / …），或在服务器跑 `hermes proxy start --host 0.0.0.0 --port 8645` |
-| API Key（推理端点用） | 上游供应商自己的 Key | 用「生成服务端准备脚本」第 4 步把它挖出来（默认打码，`SHOW_KEYS=1` 显示完整值） |
-| Gateway `:22122` 对外（可选） | 通常绑 `127.0.0.1` | 只用于会话登记/部署清单；不通 Buddy 仍能干活（降级模式） |
+| **推理直通代理 `:8811`** | 未部署 | 跑一次「生成服务端准备脚本」即可自动部署（见下），它会读 Hermes 自己的上游配置 |
+| API Key | 服务端随机生成 | 用「生成服务端准备脚本」最后一步打印出来；Gateway 与推理端点**共用同一个 Key** |
+| Gateway `:22122` 对外（可选） | 通常绑 `0.0.0.0` | 只用于会话登记/部署清单；不通 Buddy 仍能干活（降级模式） |
 
-**最省事的做法**：
+**最省事的做法（只需要填主机 + API Key）**：
 
-1. 在 Buddy 连接页填推理端点（必填），其他留空也行。
-2. 点「先诊断 Hermes 是否可达」 —— Buddy 会同时探 `:8800`（纯推理端点）/ `:22122`（Gateway）/ `:8700`，每个端口给出具体原因与建议（端口未监听 / 鉴权失败 / 网络层失败 / 协议错误 …）。
-3. 如果不知道该填哪个推理端点，点「生成服务端准备脚本」 —— Buddy 会基于你填的端点生成一份 shell 脚本，复制到 Hermes 主机以 root 身份执行：
+1. 在 Buddy 连接页填「Hermes 主机」（如 `192.168.0.246`）和 API Key，**推理端点留空**。
+2. 点「生成服务端准备脚本」 —— 复制脚本到 Hermes 主机以 root 身份执行一次：
    - 检查 Hermes 进程状态 + pid 文件 + **全部 TCP 监听端口**
    - 看 `config.yaml` 里的 `host` / `bind` 字段，提醒 127.0.0.1 改成 0.0.0.0
-   - **第 4 步（核心）：侦察可用的推理端点** —— 打印配置里的模型与供应商、上游密钥（默认打码）、
-     `hermes model list` / `hermes proxy providers`，并给出「Buddy 该填什么」的结论
+   - **第 4 步（核心）：部署 Buddy 推理直通代理** ——
+     (a) 打印 Hermes 正在用的上游模型与凭证（密钥打码）；
+     (b) 写出零依赖 Python 代理（只用标准库）并注册为 systemd 服务 `hermes-buddy-inference`，开机自启；
+     (c) 自动探测上游 chat 路径（方舟有 `/api/v3` 与 `/api/coding/v3` 两种形态）并**实测 function calling**；
+     (d) 把验证通过的上游写进 `~/.hermes/buddy-proxy.env`，再经代理复验一次
    - 重启 gateway（优先 systemd / `hermes gateway restart`，绝不带 `--host`、绝不盲杀）
-   - 打印当前 Gateway API Key
-4. 把第 4 步推荐的上游供应商地址 + 密钥填进 Buddy 的「推理端点」和 API Key。
-5. 点「验证并配置 Buddy」；若端点不支持 function calling，Buddy 会在连接时明确告诉你。
+   - 打印 API Key 与最终该填的三项
+3. 回到 Buddy 点「验证并配置 Buddy」。若端点不支持 function calling，Buddy 会在连接时明确告诉你。
+4. 想看完整密钥就 `SHOW_KEYS=1 ./脚本.sh`（默认打码，方便把输出贴出来求助）。
 
 > If the Hermes Linux server has gateway / LLM ports bound to `127.0.0.1` (the default), Buddy cannot reach them. Use **"先诊断"** to see which ports are blocked, then **"生成服务端准备脚本"** to get a copy-paste script that fixes the bind address and prints the API key. The whole loop runs from the Buddy connect screen — no SSH skills required on the Buddy user side.
 
