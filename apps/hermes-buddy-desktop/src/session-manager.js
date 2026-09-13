@@ -6,7 +6,7 @@ const { describeGatewayError } = require('@hermes/connection');
 const { publicView } = require('./connection-store');
 const { Workspace } = require('./workspace');
 const { ToolRegistry } = require('./tools');
-const { Brain, describeBrainError } = require('./agent/brain');
+const { Brain, describeBrainError, BUDDY_PROXY_PORT } = require('./agent/brain');
 const { AgentLoop } = require('./agent/loop');
 const { buildSystemPrompt, DEFAULT_PERSONA } = require('./agent/prompts');
 const { MemoryStore, rememberLine } = require('./memory');
@@ -194,10 +194,10 @@ class SessionManager {
       return { brain, llmUrl: connection.llmUrl, notice: null };
     }
 
-    // verdict === 'agent_endpoint'：请求被服务端 agent 接管。
-    // 8645 是 hermes proxy 的真实默认端口（8800 是早期误判，已实测证伪）。
+    // verdict === 'agent_endpoint'：请求被服务端 agent 接管，尝试同主机上的纯推理候选端口。
+    // 8811 = Buddy 直通代理（服务端准备脚本部署，首选）；8645 = hermes proxy 默认端口。
     this.logger.warn('endpoint-is-agent-mode', { llmUrl: connection.llmUrl, verdict: probe.verdict, detail: probe.detail });
-    for (const port of [8645, 8800, 8000]) {
+    for (const port of [BUDDY_PROXY_PORT, '8645', '8800', '8000']) {
       let alt;
       try { alt = withPort(connection.llmUrl, port); } catch (_) { continue; }
       if (!alt || alt === connection.llmUrl) continue;
@@ -224,11 +224,12 @@ class SessionManager {
       `当前推理端点（${connection.llmUrl}）是 Hermes 服务端 agent 端点：` +
       '它会忽略请求里的 tools、注入自己的系统提示，并在服务器上执行命令后返回文字，' +
       '所以 Buddy 的本地工具链路完全用不了（换模型名也绕不过去，已实测）。\n' +
-      '请把「推理端点（LLM）」改成原生支持 function calling 的 OpenAI 兼容端点，例如：\n' +
+      `修复办法：在连接页点「生成服务端准备脚本」，到 Hermes 服务器上跑一次 ——\n` +
+      `它会在本机部署 Buddy 推理直通代理（:${BUDDY_PROXY_PORT}），复用 Hermes 自己配好的上游模型\n` +
+      `并原样透传 tools；完成后把「推理端点」填 http://<hermes-host>:${BUDDY_PROXY_PORT}/v1/chat/completions。\n` +
+      '也可以手填任意原生支持 function calling 的 OpenAI 兼容端点，例如：\n' +
       '  · 火山方舟 Ark：https://ark.cn-beijing.volces.com/api/v3/chat/completions\n' +
-      '  · DeepSeek：    https://api.deepseek.com/v1/chat/completions\n' +
-      '  · 服务器上的 hermes proxy：http://<hermes-host>:8645/v1/chat/completions（hermes proxy start --host 0.0.0.0 --port 8645）\n' +
-      '不知道该填哪个：在连接页点「生成服务端准备脚本」，到服务器上跑一次，看第 4 步输出的上游供应商地址。'
+      '  · DeepSeek：    https://api.deepseek.com/v1/chat/completions'
     );
   }
 
