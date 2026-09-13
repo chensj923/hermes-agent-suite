@@ -21,13 +21,18 @@ test('generateBootstrapScript: emits a bash header', () => {
   const out = generateBootstrapScript({ host: 'h', llmPort: 8800 });
   assert.match(out, /^#!\/usr\/bin\/env bash/);
   assert.ok(out.includes('set -euo pipefail'));
-  assert.ok(out.includes('8800'));
+  // LLM 与 Gateway 同端口（22122）；脚本会确认 api_server 平台
+  assert.ok(out.includes('22122'));
+  assert.ok(out.includes('api_server'));
+  assert.ok(!out.includes('8800'));
 });
 
 test('generateBootstrapScript: skips gateway block when port is 0', () => {
   const out = generateBootstrapScript({ host: 'h', llmPort: 8800, gatewayPort: 0 });
-  assert.ok(!out.includes('22122'));
-  assert.ok(out.includes('预期 LLM 端口'));
+  // gatewayPort=0 时不应出现“预期 Gateway 端口”提示
+  assert.ok(!out.includes('预期 Gateway 端口'));
+  // 但 LLM（api_server）平台确认逻辑仍在（默认端口 22122）
+  assert.ok(out.includes('api_server'));
 });
 
 test('generateBootstrapScript: includes API key discovery block', () => {
