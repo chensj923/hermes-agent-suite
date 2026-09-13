@@ -26,8 +26,8 @@ test('normalizes user input and derives the llm url', () => {
   assert.equal(connection.baseUrl, 'http://192.168.0.246:22124');
   // managementUrl 不再自动推导（服务端 8700 没有 /api/provisioning 端点），仅显式填写时保留
   assert.equal(connection.managementUrl, '');
-  // llmUrl 没填，按 baseUrl 同端口推导（LLM 与 Gateway 同端口）
-  assert.equal(connection.llmUrl, 'http://192.168.0.246:22124/v1/chat/completions');
+  // llmUrl 没填 → 同主机上的 Buddy 直通代理 8811（22122 是 agent 端点，不能用）
+  assert.equal(connection.llmUrl, 'http://192.168.0.246:8811/v1/chat/completions');
   assert.equal(connection.apiKey, 'secret');
   assert.equal(connection.profile, 'buddy');
   assert.equal(connection.model, 'hermes-agent');
@@ -72,8 +72,8 @@ test('migrates v1 connection files in place', () => {
   const migrated = migrate({ baseUrl: 'http://h:22124', apiKey: 'k' });
   assert.equal(migrated.schemaVersion, SCHEMA_VERSION);
   assert.equal(migrated.managementUrl, '');
-  // migrate 先把 baseUrl 的 22124 纠正为 22122，llmUrl 再按同端口推导
-  assert.equal(migrated.llmUrl, 'http://h:22122/v1/chat/completions');
+  // migrate 先把 baseUrl 的 22124 纠正为 22122，llmUrl 再落到同主机的直通代理 8811
+  assert.equal(migrated.llmUrl, 'http://h:8811/v1/chat/completions');
   assert.equal(migrated.migratedFrom, 1);
   // 没有 baseUrl 也能迁：apiKey 是唯一硬性要求
   const llmOnly = migrate({ llmUrl: 'http://h:8800/v1', apiKey: 'k', schemaVersion: 1 });
