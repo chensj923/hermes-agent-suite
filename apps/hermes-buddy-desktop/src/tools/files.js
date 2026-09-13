@@ -15,6 +15,46 @@ function stripBom(text) {
   return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
 }
 
+/**
+ * 把 PCRE/Python/Java 风格的内联标志前缀转成 JS 的 flags。
+ * 支持 (?i)、(?im)、(?i:pattern)、(?im:pattern) 等。
+ * 例如: (?i)(password|secret)  -> { source: '(password|secret)', flags: 'gi' }
+ *       (?i:foo)              -> { source: 'foo', flags: 'gi' }
+ *       ^(?i)hello             -> { source: '^hello', flags: 'gi' }
+ * 不带前缀的返回 { source: 原样, flags: 'g' }。
+ */
+function normalizeRegex(needle) {
+  const PCRE_FLAG_MAP = { i: 'i', m: 'm', s: 's', g: 'g', y: 'y', u: 'u', d: 'd' };
+  let source = needle;
+  let flags = 'g'; // 默认 global
+  // (?flags:pattern) 或 (?flags)pattern
+  const inlineGroup = source.match(/^\(\?([a-z]+):([\s\S]*)\)$/i);
+  if (inlineGroup) {
+    const rawFlags = inlineGroup[1].toLowerCase();
+    const body = inlineGroup[2];
+    for (const ch of rawFlags) if (PCRE_FLAG_MAP[ch]) flags += PCRE_FLAG_MAP[ch];
+    // 去重
+    flags = [...new Set(flags.split(''))].join('');
+    source = body;
+  } else {
+    // (?flags)开头的前缀，可能在行首
+    const prefixMatch = source.match(/^\(\?([a-z]+)\)/i);
+    if (prefixMatch) {
+      const rawFlags = prefixMatch[1].toLowerCase();
+      for (const ch of rawFlags) if (PCRE_FLAG_MAP[ch]) flags += PCRE_FLAG_MAP[ch];
+      flags = [...new Set(flags.split(''))].join('');
+      source = source.slice(prefixMatch[0].length);
+    }
+    // 也可能在非行首位置（(?i)出现在模式中间）
+    source = source.replace(/\(\?([a-z]+)\)/gi, (match, fl) => {
+      const lower = fl.toLowerCase();
+      for (const ch of lower) if (PCRE_FLAG_MAP[ch] && !flags.includes(PCRE_FLAG_MAP[ch])) flags += PCRE_FLAG_MAP[ch];
+      return '';
+    });
+  }
+  return { source, flags };
+}
+
 function detectBinary(buffer) {
   const probe = buffer.subarray(0, 4096);
   return probe.includes(0);
@@ -134,7 +174,12 @@ class FileTools {
     const needle = String(input.pattern || '').trim();
     if (!needle) return { ok: false, error: '搜索内容不能为空' };
     let regex;
-    try { regex = new RegExp(needle, 'g'); } catch (_) { return { ok: false, error: `无效的正则表达式: ${needle}` }; }
+    try {
+      // 兼容 PCRE/Python 风格的内联标志前缀 (?i)、(?im)、(?i:...) 等，转成 JS flags。
+      // JS 的 RegExp 不认 (?i)，直接抛 SyntaxError。
+      const { source, flags } = normalizeRegex(needle);
+      regex = new RegExp(source, flags);
+    } catch (_) { return { ok: false, error: `无效的正则表达式: ${needle}` }; }
     const base = this.workspace.resolve(input.path || '.');
     const fileMatcher = input.filePattern ? globToRegExp(`**/${input.filePattern}`) : null;
     const maxResults = Number(input.maxResults) > 0 ? Math.min(Number(input.maxResults), 200) : DEFAULT_MAX_RESULTS;
