@@ -21,10 +21,12 @@ test('generateBootstrapScript: emits a bash header', () => {
   const out = generateBootstrapScript({ host: 'h', llmPort: 8800 });
   assert.match(out, /^#!\/usr\/bin\/env bash/);
   assert.ok(out.includes('set -euo pipefail'));
-  // v2.3.8：脚本第 4 步 = 探测/启动 hermes proxy 纯推理端点（默认 8800）
+  // v2.3.9：脚本第 4 步 = 侦察上游模型端点（hermes proxy 子命令是 start，默认 8645）
   assert.ok(out.includes('hermes proxy'));
-  assert.ok(out.includes('probe_stateless'));
-  assert.ok(out.includes('8800'));
+  assert.ok(out.includes('hermes proxy start --host 0.0.0.0 --port 8645'));
+  assert.ok(!out.includes('hermes proxy run')); // run 不是合法子命令（v2.3.8 教训）
+  assert.ok(out.includes('8645'));
+  assert.ok(out.includes('SHOW_KEYS')); // 密钥默认打码，便于把输出贴出来求助
   // Gateway 重启绝不带 --host（v2.3.7 教训）
   assert.ok(!/gateway run --host/.test(out));
 });
