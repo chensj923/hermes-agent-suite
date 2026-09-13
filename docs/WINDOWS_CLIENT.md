@@ -199,7 +199,8 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 2. 点「先诊断 Hermes 是否可达」 —— Buddy 会同时探 `:8800` / `:22122` / `:8700`，每个端口给出具体原因与建议（端口未监听 / 鉴权失败 / 网络层失败 / 协议错误 …）。
 3. 如果端口未监听，点「生成服务端准备脚本」 —— Buddy 会基于你填的端点生成一份 shell 脚本，复制到 Hermes 主机以 root 身份执行：
    - 检查 Hermes 进程状态 + pid 文件
-   - 看 `config.yaml` 里的 `host` / `bind` 字段，提醒 127.0.0.1 改成 0.0.0.0
+   - 看 `config.yaml` 里的 `host` / `bind` / `api_server_host` / `llm_host` 字段，提醒 127.0.0.1 改成 0.0.0.0
+   - 自动尝试启动 LLM（`hermes api_server run --host 0.0.0.0`；失败则给出手动命令）
    - 重启 gateway（优先 systemd，回落 `hermes gateway run`）
    - 打印当前 API Key
 4. 把脚本最后一行打印的 Key 复制回 Buddy 的 API Key 字段。
