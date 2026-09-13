@@ -218,10 +218,14 @@ class Brain {
    * 端点能力探测：区分「无状态纯推理端点（hermes proxy，Buddy 适用）」与
    * 「服务端 agent 端点（Gateway 的 api_server 平台，Buddy 不适用）」。
    *
-   * 实测（2026-09-13，192.168.0.231:22122）：Gateway 的 /v1/chat/completions 会
+   * 实测（2026-09-13/14，192.168.0.231:22122）：Gateway 的 /v1/chat/completions 会
    * 1) 无视请求里的 tools（返回 tool_calls: null）；
-   * 2) 注入约 1.2 万 token 的服务端 agent 系统提示（prompt_tokens 远超发送量）；
-   * 3) 在服务器本地执行命令（ls /root）并把文字结果返回。
+   * 2) 注入约 1.2~4 万 token 的服务端 agent 系统提示（prompt_tokens 远超发送量）；
+   * 3) 在服务器本地执行命令（真的跑了 ls /root）并把文字结果返回。
+   * 补充实测：把 model 换成底层真实模型名（ark-code-latest）结果完全一样 —— 换 model 名绕不过去。
+   * 另：hermes proxy 不是本地推理端点，它把请求转发给 OAuth 供应商（Nous/xai），
+   *     子命令是 start、默认端口 8645（早期以为 8800 是错的）。
+   * 结论：Buddy 必须直连原生支持 function calling 的 OpenAI 兼容端点（上游供应商 / 自建 vLLM 等）。
    * Buddy 的本地工具循环对这种端点完全不工作——模型会把"在服务器上跑的命令"
    * 当作对话内容叙述出来，本地执行记录永远是空的。
    *
