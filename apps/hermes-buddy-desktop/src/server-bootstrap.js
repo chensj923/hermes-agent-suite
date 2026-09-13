@@ -18,11 +18,18 @@
  *   - gatewayPort    Gateway 端口（默认 22122；用户填 0 表示"没填 gateway"，脚本里就跳过这一段）
  *   - managementPort 部署管理端口（默认 8700；同上）
 
- * 重要认知（2026-09-13 实测订正）：
+ * 重要认知（2026-09-14 实测终版，推翻了 2026-09-13 的假设）：
  * - Gateway 的 /v1/chat/completions（api_server 平台，22122）是"服务端 agent 端点"：
- *   无视请求 tools、注入自有系统提示、在服务器本地执行命令 —— Buddy 不能用它。
- * - Buddy 需要无状态纯推理端点：hermes proxy（OpenAI 兼容 + function calling 透传，默认 8800）。
- * - 所以脚本第 4 步 = 探测/启动 hermes proxy；第 5 步 = 用合法参数重启 Gateway（不带 --host）。
+ *   无视请求 tools、注入约 1.2~4 万 token 的自有系统提示、在服务器本地执行命令。
+ *   实测：model 填 hermes-agent 和填底层真实模型名（ark-code-latest）结果完全一样，
+ *   两条请求都在服务器上真的跑了 `ls /root` 再返回文字 —— 换 model 名绕不过去。
+ * - hermes proxy 也**不是**本地推理端点：它把请求转发给 OAuth 供应商（Nous/xai），
+ *   子命令是 start（不是 run），默认端口 8645（不是 8800）。
+ * - 结论：Buddy 必须直连一个真正的 OpenAI 兼容推理端点，来源三选一：
+ *   (a) Hermes 自己在用的上游供应商（脚本第 4 步负责把它挖出来）
+ *   (b) hermes proxy start --host 0.0.0.0 --port 8645
+ *   (c) 任意自建 OpenAI 兼容端点（Ark / DeepSeek / 通义 / vLLM / Ollama）
+ * - 所以脚本第 4 步 = 侦察上游模型端点；第 5 步 = 用合法参数重启 Gateway（不带 --host）。
  *
  * 输出是一段字符串，前 4 行带 #!/usr/bin/env bash，用户可以直接 .sh 保存到 Hermes 上跑。
  * 不用 shebang 也行 —— Buddy 那边有个"复制"按钮和"导出 .sh"按钮都能用。
@@ -48,7 +55,7 @@ function generateBootstrapScript(input = {}) {
   lines.push('HERMES_HOME="${HERMES_HOME:-/root/.hermes}"');
   lines.push('echo "[buddy-bootstrap] Hermes 主机:  ' + host + '"');
   lines.push('echo "[buddy-bootstrap] Hermes_HOME:    $HERMES_HOME"');
-  lines.push('echo "[buddy-bootstrap] 说明: Buddy 需要纯推理端点（hermes proxy，默认 8800），详见第 4 步"');
+  lines.push('echo "[buddy-bootstrap] 说明: Buddy 需要「原生 function calling 的纯推理端点」，22122 是服务端 agent 端点用不了，详见第 4 步"');
   if (gatewayPort) lines.push('echo "[buddy-bootstrap] 预期 Gateway 端口: ' + gatewayPort + '"');
   if (managementPort) lines.push('echo "[buddy-bootstrap] 预期 Management 端口: ' + managementPort + '"');
   lines.push('');
@@ -94,11 +101,12 @@ function generateBootstrapScript(input = {}) {
   lines.push('');
 
   // 2. 当前监听清单
-  lines.push('# ---- 2. 当前监听端口 ----');
+  lines.push('# ---- 2. 当前监听端口（打全表，方便一眼看出还有没有别的推理端点） ----');
+  lines.push('echo "[buddy-bootstrap] 全部 TCP 监听:"');
   lines.push('if command -v ss >/dev/null 2>&1; then');
-  lines.push('  ss -tlnp 2>/dev/null | grep -E ":' + (gatewayPort || '00000') + (managementPort ? '|:' + managementPort : '') + '" || echo "  （预期端口未监听，下面要修）"');
+  lines.push('  ss -tlnp 2>/dev/null | head -40 | sed "s/^/  /" || true');
   lines.push('else');
-  lines.push('  netstat -tlnp 2>/dev/null | grep -E ":' + (gatewayPort || '00000') + (managementPort ? '|:' + managementPort : '') + '" || true');
+  lines.push('  netstat -tlnp 2>/dev/null | head -40 | sed "s/^/  /" || true');
   lines.push('fi');
   lines.push('');
 
@@ -118,67 +126,84 @@ function generateBootstrapScript(input = {}) {
   lines.push('fi');
   lines.push('');
 
-  // 4. 找到 / 启动纯推理端点（hermes proxy）
-  // 关键认知（2026-09-13 实测 192.168.0.231）：Gateway 的 /v1/chat/completions（api_server 平台，22122）
-  // 是"服务端 agent 端点"——它无视请求里的 tools、注入约 1.2 万 token 的自有系统提示、
-  // 在服务器本地执行命令再把文字返回。Buddy 的本地工具循环对它完全不工作。
-  // Buddy 需要的是无状态纯推理端点：hermes proxy（默认 8800）。
-  // 判别方法：发一个极小请求看 usage.prompt_tokens —— 被注入后远超发送量（>2000）即 agent 端点。
-  lines.push('# ---- 4. 找到 / 启动纯推理端点（hermes proxy）----');
+  // 4. 侦察「可用的纯推理端点」
+  // 2026-09-14 实测终版：22122 的 /v1/chat/completions 无论 model 填什么都走服务端 agent，
+  // 换 model 名绕不过去；hermes proxy 又是转发到 OAuth 供应商（Nous/xai）的代理，
+  // 子命令 start、默认 8645。所以第 4 步的目标改成：
+  //   把「Hermes 自己在用的上游模型供应商」挖出来（base_url + 密钥 + 模型名），供 Buddy 直连。
+  lines.push('# ---- 4. 侦察纯推理端点（Buddy 真正要连的东西）----');
+  lines.push('SHOW_KEYS="${SHOW_KEYS:-0}"   # 需要看完整密钥时改用: SHOW_KEYS=1 ./本脚本.sh');
+  lines.push('mask() { local v="$1"; if [[ "$SHOW_KEYS" == "1" || ${#v} -le 10 ]]; then printf "%s" "$v"; else printf "%s****%s" "${v:0:6}" "${v: -4}"; fi; }');
   lines.push('mkdir -p "$HERMES_HOME/logs"');
-  lines.push('PROBE_KEY=""');
-  lines.push('if [[ -f "$HERMES_HOME/.env" ]]; then');
-  lines.push('  PROBE_KEY=$(grep -E "^API_SERVER_KEY=" "$HERMES_HOME/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\\r\\n" || true)');
-  lines.push('fi');
-  lines.push('# probe_stateless <port>：向该端口发一个极小补全请求，prompt_tokens < 2000 视为无状态纯推理端点');
-  lines.push('probe_stateless() {');
-  lines.push('  local port="$1" tokens');
-  lines.push('  command -v curl >/dev/null 2>&1 || return 1');
-  lines.push('  tokens=$(curl -s -m 20 -X POST "http://127.0.0.1:${port}/v1/chat/completions" \\');
-  lines.push('    -H "Content-Type: application/json" \\');
-  lines.push('    ${PROBE_KEY:+-H "Authorization: Bearer $PROBE_KEY"} \\');
-  lines.push('    -d \'{"model":"hermes-agent","messages":[{"role":"user","content":"hi"}]}\' 2>/dev/null \\');
-  lines.push('    | grep -oE "\\"prompt_tokens\\":[ ]*[0-9]+" | grep -oE "[0-9]+" | head -1)');
-  lines.push('  [[ -n "$tokens" ]] && [[ "$tokens" -lt 2000 ]]');
-  lines.push('}');
   lines.push('');
+  lines.push('echo "[buddy-bootstrap] ---- 4a. 配置里的模型与供应商 ----"');
+  lines.push('for f in "$HERMES_HOME/config.yaml" "$HERMES_HOME/.env" "$HERMES_HOME/data/.env"; do');
+  lines.push('  [[ -f "$f" ]] || continue');
+  lines.push('  echo "  -- $f"');
+  lines.push('  grep -nEi "(model|provider|base_url|api_base|endpoint|ark|volc|openai|deepseek|anthropic|nous|xai|qwen|doubao|moonshot|zhipu)" "$f" 2>/dev/null | grep -vE "^[0-9]+:[[:space:]]*#" | head -40 | sed "s/^/     /" || true');
+  lines.push('done');
+  lines.push('');
+  lines.push('echo "[buddy-bootstrap] ---- 4b. 上游供应商密钥（默认打码）与 base_url ----"');
+  lines.push('for f in "$HERMES_HOME/.env" "$HERMES_HOME/data/.env" "$HERMES_HOME/config.yaml"; do');
+  lines.push('  [[ -f "$f" ]] || continue');
+  lines.push('  while IFS= read -r line; do');
+  lines.push('    name="${line%%=*}"; value="${line#*=}"');
+  lines.push('    [[ "$name" =~ (KEY|TOKEN|SECRET|PASSWORD) ]] || continue');
+  lines.push('    printf "     %-38s %s   (%s)\\n" "$name" "$(mask "$value")" "$f"');
+  lines.push('  done < <(grep -E "^[A-Za-z_][A-Za-z0-9_]*=" "$f" 2>/dev/null || true)');
+  lines.push('done');
+  lines.push('echo "  -- 配置里出现的 URL（非机密，直接打印）:"');
+  lines.push('grep -hoE "https?://[A-Za-z0-9._/-]+" "$HERMES_HOME/config.yaml" "$HERMES_HOME/.env" "$HERMES_HOME/data/.env" 2>/dev/null | sort -u | sed "s/^/     /" || true');
+  lines.push('');
+  lines.push('echo "[buddy-bootstrap] ---- 4c. hermes CLI 的模型 / 代理能力 ----"');
+  lines.push('if command -v hermes >/dev/null 2>&1; then');
+  lines.push('  echo "  $ hermes model --help";     hermes model --help     2>&1 | head -25 || true');
+  lines.push('  echo "  $ hermes model list";       hermes model list       2>&1 | head -25 || true');
+  lines.push('  echo "  $ hermes proxy providers";  hermes proxy providers  2>&1 | head -20 || true');
+  lines.push('  echo "  $ hermes proxy status";     hermes proxy status     2>&1 | head -20 || true');
+  lines.push('else');
+  lines.push('  echo "  未找到 hermes 命令"');
+  lines.push('fi');
+  lines.push('');
+  lines.push('echo "[buddy-bootstrap] ---- 4d. Hermes 源码里的推理端点线索 ----"');
+  lines.push('PKG_DIR=$(python3 -c "import importlib.util as u, os; ms=[x for x in (\'hermes_cli\',\'hermes\') if u.find_spec(x)]; print(os.path.dirname(u.find_spec(ms[0]).origin) if ms else \'\')" 2>/dev/null || true)');
+  lines.push('if [[ -n "$PKG_DIR" && -d "$PKG_DIR" ]]; then');
+  lines.push('  echo "  包目录: $PKG_DIR"');
+  lines.push('  grep -rn "chat/completions" "$PKG_DIR" --include=*.py 2>/dev/null | head -12 | sed "s/^/     /" || true');
+  lines.push('else');
+  lines.push('  echo "  未能定位 hermes 包目录（不影响结论）"');
+  lines.push('fi');
+  lines.push('');
+  lines.push('echo "[buddy-bootstrap] ---- 4e. hermes proxy（子命令是 start，默认端口 8645）----"');
   lines.push('PROXY_PORT=""');
-  lines.push('for p in 8800 8000; do');
-  lines.push('  if probe_stateless "$p"; then PROXY_PORT="$p"; break; fi');
+  lines.push('for p in 8645 8800 8000; do');
+  lines.push('  if curl -s -m 5 "http://127.0.0.1:${p}/v1/models" >/dev/null 2>&1; then PROXY_PORT="$p"; break; fi');
   lines.push('done');
   lines.push('if [[ -n "$PROXY_PORT" ]]; then');
-  lines.push('  echo "[buddy-bootstrap] 已有纯推理端点在跑：端口 $PROXY_PORT"');
-  lines.push('else');
-  lines.push('  echo "[buddy-bootstrap] 未发现纯推理端点，尝试启动 hermes proxy..."');
-  lines.push('  if command -v hermes >/dev/null 2>&1; then');
-  lines.push('    echo "[buddy-bootstrap] hermes proxy --help（用于确认启动参数）："; hermes proxy --help 2>&1 | sed -n "1,25p" || true');
-  lines.push('    PROXY_STARTED=0');
-  lines.push('    for cmd in "hermes proxy run" "hermes proxy"; do');
-  lines.push('      echo "[buddy-bootstrap] 尝试: $cmd"');
-  lines.push('      nohup $cmd >> "$HERMES_HOME/logs/proxy.log" 2>&1 &');
-  lines.push('      sleep 8');
-  lines.push('      for p in 8800 8000; do');
-  lines.push('        if probe_stateless "$p"; then PROXY_PORT="$p"; PROXY_STARTED=1; break; fi');
-  lines.push('      done');
-  lines.push('      if [[ "$PROXY_STARTED" == "1" ]]; then break; fi');
-  lines.push('    done');
-  lines.push('  fi');
-  lines.push('  if [[ -n "$PROXY_PORT" ]]; then');
-  lines.push('    echo "[buddy-bootstrap] OK 已启动纯推理端点：端口 $PROXY_PORT"');
-  lines.push('  else');
-  lines.push('    echo "[buddy-bootstrap] WARN: 未能找到/启动纯推理端点（hermes proxy，默认 8800）"');
-  lines.push('    echo "[buddy-bootstrap]   注意：Gateway 22122 上的 /v1/chat/completions 是服务端 agent 端点，"');
-  lines.push('    echo "[buddy-bootstrap]   它会忽略本地工具、在服务器上执行命令，Buddy 无法使用。"');
-  lines.push('    echo "[buddy-bootstrap]   proxy.log 末尾："');
-  lines.push('    tail -n 20 "$HERMES_HOME/logs/proxy.log" 2>/dev/null || true');
+  lines.push('  echo "  已有 OpenAI 兼容代理在跑：端口 $PROXY_PORT"');
+  lines.push('elif command -v hermes >/dev/null 2>&1; then');
+  lines.push('  echo "  尝试: hermes proxy start --host 0.0.0.0 --port 8645"');
+  lines.push('  nohup hermes proxy start --host 0.0.0.0 --port 8645 >> "$HERMES_HOME/logs/proxy.log" 2>&1 &');
+  lines.push('  sleep 8');
+  lines.push('  curl -s -m 5 http://127.0.0.1:8645/v1/models >/dev/null 2>&1 && PROXY_PORT=8645 || true');
+  lines.push('  if [[ -z "$PROXY_PORT" ]]; then');
+  lines.push('    echo "  未起来。proxy.log 末尾:"');
+  lines.push('    tail -n 15 "$HERMES_HOME/logs/proxy.log" 2>/dev/null || true');
   lines.push('  fi');
   lines.push('fi');
+  lines.push('');
+  lines.push('echo "[buddy-bootstrap] ---- 4f. Buddy 的「推理端点（LLM）」该填什么 ----"');
+  lines.push('if [[ -n "$PROXY_PORT" ]]; then');
+  lines.push('  echo "  可选: http://' + host + ':$PROXY_PORT/v1/chat/completions  (hermes proxy，转发到 OAuth 供应商)"');
+  lines.push('fi');
+  lines.push('echo "  推荐: 用 4a/4b 挖出来的上游供应商 base_url + 密钥，在 Buddy 里直连（原生 function calling）"');
+  lines.push('echo "  例如: https://ark.cn-beijing.volces.com/api/v3/chat/completions  模型名见 4a"');
+  lines.push('echo "  禁止: http://' + host + ':' + (gatewayPort || 22122) + '/v1/chat/completions = 服务端 agent 端点，Buddy 用不了（已实测）"');
   lines.push('if [[ -n "$PROXY_PORT" ]]; then');
   lines.push('  LLM_PORT="$PROXY_PORT"');
   lines.push('else');
   lines.push('  LLM_PORT="' + (gatewayPort || 22122) + '"');
   lines.push('fi');
-  lines.push('echo "[buddy-bootstrap] Buddy 使用的 LLM 端口: $LLM_PORT"');
   lines.push('');
 
 
@@ -243,12 +268,12 @@ function generateBootstrapScript(input = {}) {
   lines.push('  gw_restart');
   lines.push('fi');
   lines.push('');
-  lines.push('# 最终核验：LLM/Gateway 端口必须在监听，否则给出 gateway.log 末尾帮助定位');
+  lines.push('# 最终核验：Gateway 端口必须在监听（LLM 端点可能是外部地址，不在这里校验）');
   lines.push('sleep 2');
-  lines.push('if ss -tln 2>/dev/null | grep -qE ":$LLM_PORT\\b" || netstat -tln 2>/dev/null | grep -qE ":$LLM_PORT\\b"; then');
-  lines.push('  echo "[buddy-bootstrap] 最终核验 OK：端口 $LLM_PORT（Gateway + LLM）正在监听"');
+  lines.push('if ss -tln 2>/dev/null | grep -qE ":' + (gatewayPort || 22122) + '\\b" || netstat -tln 2>/dev/null | grep -qE ":' + (gatewayPort || 22122) + '\\b"; then');
+  lines.push('  echo "[buddy-bootstrap] 最终核验 OK：Gateway 端口 ' + (gatewayPort || 22122) + ' 正在监听"');
   lines.push('else');
-  lines.push('  echo "[buddy-bootstrap] 最终核验 FAIL：端口 $LLM_PORT 仍未监听。gateway.log 末尾如下："');
+  lines.push('  echo "[buddy-bootstrap] 最终核验 FAIL：Gateway 端口 ' + (gatewayPort || 22122) + ' 仍未监听。gateway.log 末尾如下："');
   lines.push('  tail -n 30 "$HERMES_HOME/gateway.log" 2>/dev/null || true');
   lines.push('fi');
   lines.push('');
@@ -257,8 +282,8 @@ function generateBootstrapScript(input = {}) {
     lines.push('echo "[buddy-bootstrap]   Gateway 地址: http://' + host + ':' + gatewayPort + '"');
     lines.push('echo "[buddy-bootstrap]   注意：Gateway 必须是 22122，填 22121/22123/8700 会报 404（不是 Gateway）"');
   }
-  lines.push('echo "[buddy-bootstrap]   LLM 地址:     http://' + host + ':$LLM_PORT/v1/chat/completions"');
-  lines.push('echo "[buddy-bootstrap]   API Key:      $API_KEY"');
+  lines.push('echo "[buddy-bootstrap]   Gateway API Key: $API_KEY"');
+  lines.push('echo "[buddy-bootstrap]   推理端点（LLM）: 填第 4f 步推荐的上游供应商地址 —— 不要填 Gateway 的 22122"');
 
   return lines.join('\n') + '\n';
 }
