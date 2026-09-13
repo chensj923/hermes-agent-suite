@@ -106,12 +106,30 @@ class AgentLoop {
         const started = Date.now();
         emit({ type: 'tool_start', id: call.id, name: call.name, args: call.arguments });
 
+        // 命令输出实时回传：节流后发 tool_output 事件，让右侧执行卡片边跑边显示，
+        // 长命令（如大目录扫描）不必等结束才看到进度，超时时也能拿到已产出的部分结果。
+        let pendingOutput = '';
+        let outputTimer = null;
+        const flushOutput = () => {
+          outputTimer = null;
+          if (!pendingOutput) return;
+          const chunk = pendingOutput;
+          pendingOutput = '';
+          emit({ type: 'tool_output', id: call.id, name: call.name, chunk });
+        };
+        const onData = ({ chunk }) => {
+          pendingOutput += chunk;
+          if (!outputTimer) outputTimer = setTimeout(flushOutput, 200);
+        };
+
         const outcome = await this.tools.invoke(call.name, call.arguments, {
           signal,
+          onData,
           onConfirm: (request) => (typeof onConfirm === 'function'
             ? onConfirm({ ...request, tool: call.name, id: call.id })
             : Promise.resolve(false))
         });
+        if (outputTimer) { clearTimeout(outputTimer); flushOutput(); }
 
         const durationMs = Date.now() - started;
         const record = { id: call.id, name: call.name, args: call.arguments, ok: outcome.ok, durationMs, text: outcome.text };
