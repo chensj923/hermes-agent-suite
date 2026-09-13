@@ -153,14 +153,19 @@ class SessionManager {
   // ---------------------------------------------------------------- 连接
 
   /**
-   * 端点能力校验 + 自动纠正（v2.3.8）。
+   * 端点能力校验 + 自动纠正（v2.3.9）。
    *
-   * 背景：Gateway 的 /v1/chat/completions（api_server 平台）是"服务端 agent 端点"——
-   * 它会无视请求里的 tools、注入自己的系统提示、在服务器上执行命令。
-   * Buddy 需要的是无状态纯推理端点（hermes proxy，默认 8800）。
+   * 背景（2026-09-14 实测终版）：
+   * Gateway 的 /v1/chat/completions（api_server 平台，22122）是"服务端 agent 端点"——
+   * 无视请求里的 tools、注入自有系统提示、在服务器上执行命令；
+   * 换 model 名（填 hermes-agent 或底层真实模型 ark-code-latest）都绕不过去。
+   * `hermes proxy` 也不是本地推理端点：它把请求转发给 OAuth 供应商（Nous/xai），
+   * 子命令是 start、默认端口 8645。
    *
-   * 流程：探测 llmUrl → 若是 agent 端点，依次尝试同主机候选纯推理端口（8800/8000），
-   * 找到无状态端点就自动切换；都找不到则抛出可操作的错误。
+   * 所以：Buddy 必须直连一个原生支持 function calling 的 OpenAI 兼容端点
+   * （上游供应商 / hermes proxy / 自建 vLLM 等）。
+   * 这里只做「检测到 agent 端点 → 顺带试一下同主机 8645 是不是 hermes proxy」，
+   * 找不到就抛出可直接照做的错误，不再瞎猜端口。
    */
   async resolveBrain(connection) {
     const brain = new Brain({
@@ -189,9 +194,10 @@ class SessionManager {
       return { brain, llmUrl: connection.llmUrl, notice: null };
     }
 
-    // verdict === 'agent_endpoint'：请求被服务端 agent 接管，尝试同主机纯推理端口。
+    // verdict === 'agent_endpoint'：请求被服务端 agent 接管。
+    // 8645 是 hermes proxy 的真实默认端口（8800 是早期误判，已实测证伪）。
     this.logger.warn('endpoint-is-agent-mode', { llmUrl: connection.llmUrl, verdict: probe.verdict, detail: probe.detail });
-    for (const port of [8800, 8000]) {
+    for (const port of [8645, 8800, 8000]) {
       let alt;
       try { alt = withPort(connection.llmUrl, port); } catch (_) { continue; }
       if (!alt || alt === connection.llmUrl) continue;
@@ -215,9 +221,14 @@ class SessionManager {
     }
 
     throw new Error(
-      `当前推理端点（${connection.llmUrl}）是 Hermes 服务端 agent 端点：它会忽略本地工具、在服务器上执行命令并返回文字，` +
-      'Buddy 的本地工具链路完全用不了。同主机上也没找到可用的纯推理端点（hermes proxy，默认 8800）。' +
-      '请在服务器上执行「hermes proxy run」启动纯推理代理（或用 Buddy 的「生成服务端准备脚本」自动处理），然后重新连接。'
+      `当前推理端点（${connection.llmUrl}）是 Hermes 服务端 agent 端点：` +
+      '它会忽略请求里的 tools、注入自己的系统提示，并在服务器上执行命令后返回文字，' +
+      '所以 Buddy 的本地工具链路完全用不了（换模型名也绕不过去，已实测）。\n' +
+      '请把「推理端点（LLM）」改成原生支持 function calling 的 OpenAI 兼容端点，例如：\n' +
+      '  · 火山方舟 Ark：https://ark.cn-beijing.volces.com/api/v3/chat/completions\n' +
+      '  · DeepSeek：    https://api.deepseek.com/v1/chat/completions\n' +
+      '  · 服务器上的 hermes proxy：http://<hermes-host>:8645/v1/chat/completions（hermes proxy start --host 0.0.0.0 --port 8645）\n' +
+      '不知道该填哪个：在连接页点「生成服务端准备脚本」，到服务器上跑一次，看第 4 步输出的上游供应商地址。'
     );
   }
 
