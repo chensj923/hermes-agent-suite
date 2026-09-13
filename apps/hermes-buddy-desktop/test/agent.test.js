@@ -31,9 +31,11 @@ function fakeFetch(handler) {
   };
 }
 
-test('端点推导：推理端点与 Gateway 同端口（22122）', () => {
-  assert.equal(deriveLlmEndpoint('http://192.168.0.246:22122'), 'http://192.168.0.246:22122/v1/chat/completions');
-  assert.equal(deriveLlmEndpoint('192.168.0.246'), 'http://192.168.0.246:22122/v1/chat/completions');
+test('端点推导：推理端点默认走 Hermes 本机直通代理（8811），不是 Gateway 的 22122', () => {
+  // 22122 是服务端 agent 端点（忽略 tools、在服务器执行命令），所以从 Gateway 地址推导时
+  // 必须落到同主机上的 Buddy 直通代理 8811。
+  assert.equal(deriveLlmEndpoint('http://192.168.0.246:22122'), 'http://192.168.0.246:8811/v1/chat/completions');
+  assert.equal(deriveLlmEndpoint('192.168.0.246'), 'http://192.168.0.246:8811/v1/chat/completions');
   assert.equal(deriveLlmEndpoint('http://h:22122', 'http://h:9000/v1/chat/completions'), 'http://h:9000/v1/chat/completions');
   assert.equal(normalizeLlmEndpoint('http://h:9000'), 'http://h:9000/v1/chat/completions');
   assert.throws(() => normalizeLlmEndpoint('ftp://h'), /HTTP/);
