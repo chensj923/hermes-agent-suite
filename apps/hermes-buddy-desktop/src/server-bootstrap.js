@@ -52,6 +52,34 @@ function generateBootstrapScript(input = {}) {
   if (managementPort) lines.push('echo "[buddy-bootstrap] 预期 Management 端口: ' + managementPort + '"');
   lines.push('');
 
+  // 统一的重启函数：绝不给 `hermes gateway run` 传 --host（CLI 不认，绑定地址由 config.yaml 的 host 决定）。
+  lines.push('# 重启 Gateway 的统一入口：在跑用 restart，没跑直接 run；绑定地址一律来自 config.yaml');
+  lines.push('gw_running() { pgrep -f "hermes.*gateway" >/dev/null 2>&1; }');
+  lines.push('gw_restart() {');
+  lines.push('  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q hermes-gateway; then');
+  lines.push('    echo "[buddy-bootstrap] 用 systemd 重启..."');
+  lines.push('    systemctl restart hermes-gateway 2>&1 || true');
+  lines.push('  elif command -v hermes >/dev/null 2>&1; then');
+  lines.push('    if gw_running; then');
+  lines.push('      echo "[buddy-bootstrap] Gateway 在跑，执行 hermes gateway restart..."');
+  lines.push('      hermes gateway restart >> "$HERMES_HOME/gateway.log" 2>&1 || {');
+  lines.push('        echo "[buddy-bootstrap]   restart 失败，尝试 stop + run..."');
+  lines.push('        hermes gateway stop 2>&1 || true');
+  lines.push('        sleep 2');
+  lines.push('        nohup hermes gateway run >> "$HERMES_HOME/gateway.log" 2>&1 &');
+  lines.push('      }');
+  lines.push('    else');
+  lines.push('      echo "[buddy-bootstrap] Gateway 未在跑，直接 hermes gateway run（绑定地址取 config.yaml 的 host，无需 --host 参数）..."');
+  lines.push('      nohup hermes gateway run >> "$HERMES_HOME/gateway.log" 2>&1 &');
+  lines.push('    fi');
+  lines.push('  else');
+  lines.push('    echo "[buddy-bootstrap] 未找到 hermes 命令，尝试 python 模块方式启动..."');
+  lines.push('    nohup python3 -m hermes_cli.main gateway run >> "$HERMES_HOME/gateway.log" 2>&1 &');
+  lines.push('  fi');
+  lines.push('  sleep 5');
+  lines.push('}');
+  lines.push('');
+
   // 1. Hermes 是否在跑
   lines.push('# ---- 1. Hermes 进程状态 ----');
   lines.push('if [[ -f "$HERMES_HOME/gateway.pid" ]]; then');
@@ -141,26 +169,10 @@ function generateBootstrapScript(input = {}) {
 
 
   // 5. 重启 gateway
-  lines.push('# ---- 5. 重启 gateway（如果改了绑定地址，必须重启） ----');
-  lines.push('# 先停掉所有已存在的 hermes gateway 进程，避免多实例抢占端口导致连错端口');
-  lines.push('for p in $(pgrep -f "hermes.*gateway.*run" 2>/dev/null); do kill "$p" 2>/dev/null || true; done');
-  lines.push('sleep 2');
-  lines.push('if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q hermes-gateway; then');
-  lines.push('  echo "[buddy-bootstrap] 用 systemd 重启..."');
-  lines.push('  systemctl restart hermes-gateway 2>&1 || echo "  (systemctl 失败，尝试下面的手动方式)"');
-  lines.push('elif command -v hermes >/dev/null 2>&1; then');
-  lines.push('  echo "[buddy-bootstrap] 用 hermes CLI 重启..."');
-  lines.push('  if [[ -f "$HERMES_HOME/gateway.pid" ]]; then');
-  lines.push('    PID=$(grep -oE "\\"pid\\":\\s*[0-9]+" "$HERMES_HOME/gateway.pid" 2>/dev/null | grep -oE "[0-9]+" || true)');
-  lines.push('    [[ -n "${PID:-}" ]] && kill "$PID" 2>/dev/null || true');
-  lines.push('    sleep 2');
-  lines.push('  fi');
-  lines.push('  nohup hermes gateway run --host 0.0.0.0 >> "$HERMES_HOME/gateway.log" 2>&1 &');
-  lines.push('  sleep 2');
-  lines.push('else');
-  lines.push('  echo "[buddy-bootstrap] WARN: 没找到 hermes 命令，也没 systemd 单元，请手动重启"');
-  lines.push('fi');
-  lines.push('');
+  // 教训：绝不能先盲杀再重启 —— v2.3.6 之前"先 kill 再用非法参数 run"直接把 Gateway 干死了。
+  // 现在统一走 gw_restart()：在跑用 hermes gateway restart，没跑用 hermes gateway run（不带 --host）。
+  lines.push('# ---- 5. 重启 Gateway（若第 3 步改过绑定地址，此步必须执行） ----');
+  lines.push('gw_restart');
 
   // 6. 验证 + 打印 API Key
   lines.push('# ---- 6. 重启后再听一次端口 ----');
@@ -195,30 +207,35 @@ function generateBootstrapScript(input = {}) {
   lines.push('');
   lines.push('# 关键修复：确保 .env 文件包含 API_SERVER_KEY，否则 Gateway 的 createSession 会返回 401');
   lines.push('ENV_FILE="$HERMES_HOME/.env"');
+  lines.push('ENV_WRITTEN=0');
   lines.push('if [[ -f "$ENV_FILE" ]]; then');
   lines.push('  if ! grep -q "^API_SERVER_KEY=" "$ENV_FILE" 2>/dev/null; then');
   lines.push('    echo "[buddy-bootstrap] .env 缺少 API_SERVER_KEY，正在自动写入..."');
   lines.push('    echo "API_SERVER_KEY=$API_KEY" >> "$ENV_FILE"');
   lines.push('    echo "[buddy-bootstrap] 已写入 API_SERVER_KEY 到 $ENV_FILE"');
+  lines.push('    ENV_WRITTEN=1');
   lines.push('  else');
   lines.push('    echo "[buddy-bootstrap] .env 已包含 API_SERVER_KEY"');
   lines.push('  fi');
   lines.push('else');
   lines.push('  echo "[buddy-bootstrap] .env 不存在，正在创建并写入 API_SERVER_KEY..."');
   lines.push('  echo "API_SERVER_KEY=$API_KEY" > "$ENV_FILE"');
+  lines.push('  ENV_WRITTEN=1');
   lines.push('fi');
   lines.push('');
-  lines.push('# 如果 .env 刚被修改，需要重启 Gateway 使其生效');
-  lines.push('if [[ -f "$HERMES_HOME/.env" ]] && grep -q "^API_SERVER_KEY=" "$HERMES_HOME/.env" 2>/dev/null; then');
+  lines.push('# 只有刚写入过 Key 才需要再重启一次让配置生效（复用统一的 gw_restart，不带 --host）');
+  lines.push('if [[ "$ENV_WRITTEN" == "1" ]]; then');
   lines.push('  echo "[buddy-bootstrap] 重启 Gateway 使 API_SERVER_KEY 生效..."');
-  lines.push('  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q hermes-gateway; then');
-  lines.push('    systemctl restart hermes-gateway 2>&1 || echo "  (systemctl 重启失败，尝试手动方式)"');
-  lines.push('  else');
-  lines.push('    kill $(pgrep -f "hermes_cli.*gateway.*run" | head -1) 2>/dev/null || true');
-  lines.push('    sleep 2');
-  lines.push('    cd "$HERMES_HOME" && nohup /usr/bin/python3 -m hermes_cli.main gateway run --host 0.0.0.0 >> "$HERMES_HOME/logs/gateway.log" 2>&1 &');
-  lines.push('    sleep 3');
-  lines.push('  fi');
+  lines.push('  gw_restart');
+  lines.push('fi');
+  lines.push('');
+  lines.push('# 最终核验：LLM/Gateway 端口必须在监听，否则给出 gateway.log 末尾帮助定位');
+  lines.push('sleep 2');
+  lines.push('if ss -tln 2>/dev/null | grep -qE ":$LLM_PORT\\b" || netstat -tln 2>/dev/null | grep -qE ":$LLM_PORT\\b"; then');
+  lines.push('  echo "[buddy-bootstrap] 最终核验 OK：端口 $LLM_PORT（Gateway + LLM）正在监听"');
+  lines.push('else');
+  lines.push('  echo "[buddy-bootstrap] 最终核验 FAIL：端口 $LLM_PORT 仍未监听。gateway.log 末尾如下："');
+  lines.push('  tail -n 30 "$HERMES_HOME/gateway.log" 2>/dev/null || true');
   lines.push('fi');
   lines.push('');
   lines.push('echo "[buddy-bootstrap] 完成。请在 Buddy 连接向导里按下面填写："');
