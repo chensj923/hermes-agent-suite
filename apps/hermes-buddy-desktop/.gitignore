@@ -1,0 +1,4 @@
+# 构建产物（由 scripts/build-server-deploy-bundle.js 在 build:win 前生成）
+server-deploy/
+dist/
+node_modules/

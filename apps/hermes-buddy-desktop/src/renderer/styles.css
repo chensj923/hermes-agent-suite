@@ -64,7 +64,7 @@ button:disabled { opacity: .5; cursor: default; }
 .ghost.danger:hover:not(:disabled) { background: rgba(248,113,113,.1); }
 .link { background: none; border: 0; color: var(--accent-hover); padding: 0 6px; text-decoration: underline; cursor: pointer; }
 .link.danger { color: var(--danger); }
-.link.dismiss { color: var(--muted); text-decoration: none; font-size: 18px; line-height: 1; }
+.link.dismiss { color: var(--muted); text-decoration: none; font-size: 18px; line-height: 1; padding: 4px 8px; margin: -4px -8px; cursor: pointer; z-index: 1; position: relative; }
 
 /* ---------- 连接页（WorkBuddy 风格） ---------- */
 .connect-overlay {
@@ -182,6 +182,21 @@ button:disabled { opacity: .5; cursor: default; }
 .perm-option input { margin-top: 4px; }
 .perm-option span { font-size: 12px; color: var(--text); line-height: 1.5; }
 .perm-option strong { color: var(--accent-hover); }
+
+.mode-fieldset {
+  border: 1px solid var(--accent, #4f7cff);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 14px 0 6px;
+  background: color-mix(in srgb, var(--accent, #4f7cff) 8%, transparent);
+}
+.mode-fieldset legend { color: var(--accent-hover, #4f7cff); font-size: 12px; padding: 0 6px; font-weight: 600; }
+.mode-option { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; cursor: pointer; }
+.mode-option input { margin-top: 4px; }
+.mode-option span { font-size: 12px; color: var(--text); line-height: 1.5; }
+.mode-option strong { color: var(--accent-hover, #4f7cff); }
+.mode-hint { display: block; font-size: 11px; color: var(--muted); margin: 2px 0 4px 0; line-height: 1.5; }
+.mode-hint code { background: var(--border); padding: 0 4px; border-radius: 3px; }
 
 /* ---------- 诊断报告 ---------- */
 .diagnose-report {
@@ -778,6 +793,15 @@ button:disabled { opacity: .5; cursor: default; }
 
 .modal-card.wide { width: min(720px, 95%); }
 .modal-card.wide pre { max-height: 360px; font-size: 11px; }
+
+/* ---------- 部署压缩包区块 ---------- */
+.modal-sep { border: none; border-top: 1px solid var(--border); margin: 16px 0 12px; }
+.deploy-title { margin: 0 0 6px; font-size: 14px; color: var(--text); }
+.deploy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 10px 0; }
+.deploy-grid .connect-field { margin: 0; }
+.deploy-grid .connect-field > span { font-size: 12px; color: var(--muted); }
+.deploy-grid input { width: 100%; }
+#deploy-output { max-height: 280px; min-height: 80px; }
 
 /* ---------- 底部 ---------- */
 .foot {

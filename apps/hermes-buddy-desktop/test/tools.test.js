@@ -88,8 +88,9 @@ test('guard: 空命令与未知档位', () => {
 });
 
 test('glob: * 与 ** 语义', () => {
+  // 无斜杠的短模式（如 *.md / *.pem）匹配任意深度，便于整树扫描（如找敏感文件）
   assert.ok(globToRegExp('*.md').test('readme.md'));
-  assert.ok(!globToRegExp('*.md').test('src/readme.md'));
+  assert.ok(globToRegExp('*.md').test('src/readme.md'));
   assert.ok(globToRegExp('**/*.js').test('src/a/b.js'));
   assert.ok(globToRegExp('**/*.js').test('a.js'));
 });

@@ -3,8 +3,9 @@
 const { GatewayError } = require('@hermes/connection');
 
 const DEFAULT_TIMEOUT_MS = 120000;
-// Hermes 部署里 Gateway 在 22122、模型路由在 8800，填一个就能推出另一个。
-const LLM_PORT_CANDIDATES = ['8800', '8000', '11434'];
+// Hermes 部署中，LLM 推理端点（/v1/chat/completions）不是独立进程，
+// 而是 Gateway 的一个 api_server 平台，与 Gateway 共用同一个端口（默认 22122）。
+// 因此填一个地址即可推出另一个——二者主机与端口相同，只是路径不同。
 
 class BrainError extends Error {
   constructor(message, code = 'brain_error', status = undefined) {
@@ -16,8 +17,19 @@ class BrainError extends Error {
 }
 
 /**
+ * Buddy 推理直通代理端口（在 Hermes 主机上由「服务端准备脚本」部署）。
+ *
+ * 为什么不是 22122：Gateway 的 /v1/chat/completions 与 /v1/responses 都是服务端 agent 端点——
+ * 无视请求 tools、注入约 1.2 万 token 系统提示、在服务器本地执行命令（2026-09-14 实测）。
+ * 8811 上跑的是零依赖直通代理，复用 Hermes 自己配好的上游并原样透传 tools。
+ */
+const BUDDY_PROXY_PORT = '8811';
+
+/**
  * 从 Gateway 地址推导 LLM 推理端点。
- * 用户只填一个地址是最省事的，但推导错了要能一眼看懂报错，所以保留原文兜底。
+ *
+ * 只给 Hermes 主机时，推理端点默认是**同主机上的 Buddy 直通代理**（8811），
+ * 而不是 Gateway 自己的 22122（那是服务端 agent 端点，Buddy 用不了）。
  */
 function deriveLlmEndpoint(gatewayUrl, explicit) {
   const raw = String(explicit || '').trim();
@@ -28,9 +40,7 @@ function deriveLlmEndpoint(gatewayUrl, explicit) {
   try { url = new URL(/^https?:\/\//i.test(source) ? source : `http://${source}`); } catch (_) {
     throw new BrainError(`Hermes 地址无法解析: ${source}`, 'invalid_endpoint');
   }
-  const port = url.port || '22122';
-  const next = LLM_PORT_CANDIDATES.includes(port) ? port : '8800';
-  url.port = next;
+  url.port = BUDDY_PROXY_PORT; // 同主机上的直通代理；Gateway 的 22122 是 agent 端点，不能当推理端点
   url.pathname = '/v1/chat/completions';
   url.search = '';
   url.hash = '';
@@ -213,6 +223,54 @@ class Brain {
     try { return await this.fetchModels(); } catch (_) { return [this.model]; }
   }
 
+  /**
+   * 端点能力探测：区分「无状态纯推理端点（hermes proxy，Buddy 适用）」与
+   * 「服务端 agent 端点（Gateway 的 api_server 平台，Buddy 不适用）」。
+   *
+   * 实测（2026-09-13/14，192.168.0.231:22122）：Gateway 的 /v1/chat/completions 会
+   * 1) 无视请求里的 tools（返回 tool_calls: null）；
+   * 2) 注入约 1.2~4 万 token 的服务端 agent 系统提示（prompt_tokens 远超发送量）；
+   * 3) 在服务器本地执行命令（真的跑了 ls /root）并把文字结果返回。
+   * 补充实测：把 model 换成底层真实模型名（ark-code-latest）结果完全一样 —— 换 model 名绕不过去。
+   * 另：hermes proxy 不是本地推理端点，它把请求转发给 OAuth 供应商（Nous/xai），
+   *     子命令是 start、默认端口 8645（早期以为 8800 是错的）。
+   * 结论：Buddy 必须直连原生支持 function calling 的 OpenAI 兼容端点（上游供应商 / 自建 vLLM 等）。
+   * Buddy 的本地工具循环对这种端点完全不工作——模型会把"在服务器上跑的命令"
+   * 当作对话内容叙述出来，本地执行记录永远是空的。
+   *
+   * 探测方法：发一个最小 function-calling 请求，看返回：
+   * - 有 tool_calls → 无状态纯推理端点（stateless）；
+   * - 无 tool_calls 且 prompt_tokens 远超发送量（服务端注入）→ agent 端点（agent_endpoint）；
+   * - 无 tool_calls 且无明显注入 → 模型可能不支持 FC（no_fc）。
+   */
+  async probeCapability(signal) {
+    const messages = [
+      { role: 'system', content: 'You are a local Windows desktop assistant. All tools execute locally on the user\'s Windows machine.' },
+      { role: 'user', content: 'List the files in the current working directory. You must call the provided tool to do this.' }
+    ];
+    const tools = [{
+      type: 'function',
+      function: {
+        name: 'list_dir',
+        description: 'List entries of a directory on the local Windows machine',
+        parameters: { type: 'object', properties: { path: { type: 'string', description: 'Directory path' } }, required: [] }
+      }
+    }];
+    const result = await this.complete({ messages, tools, toolChoice: 'auto', stream: false, signal });
+    if (result.toolCalls && result.toolCalls.length) {
+      return { verdict: 'stateless', detail: '端点按 OpenAI function calling 返回了工具调用' };
+    }
+    const promptTokens = result.usage && Number(result.usage.prompt_tokens) || 0;
+    const sentTokens = 60; // 上面的消息 + 工具 schema 估个下限，足够区分「注入」与「没注入」
+    if (promptTokens > 2000) {
+      return { verdict: 'agent_endpoint', promptTokens, detail: `服务端注入了约 ${promptTokens} token 的自有系统提示（实际发送不足 ${sentTokens}），请求被服务端 agent 接管` };
+    }
+    if (/\/root\b|\/home\//.test(result.content || '')) {
+      return { verdict: 'agent_endpoint', promptTokens, detail: '回复中出现服务端路径（如 /root），说明命令在服务端执行' };
+    }
+    return { verdict: 'no_fc', promptTokens, detail: '端点没有返回 tool_calls，模型可能不支持 function calling' };
+  }
+
   /** 严格的连通性检查：拿不到模型清单就抛错，用于连接校验。 */
   async assertReachable() {
     const models = await this.fetchModels();
@@ -301,7 +359,7 @@ module.exports = {
   parseCompletionSse,
   normalizeToolCalls,
   DEFAULT_TIMEOUT_MS,
-  LLM_PORT_CANDIDATES
+  BUDDY_PROXY_PORT
 };
 
 // GatewayError 仍在主进程其它链路上使用，这里一并保持引用清晰。

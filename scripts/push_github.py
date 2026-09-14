@@ -63,36 +63,23 @@ def main():
     # 仓库根
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
-    # 要推送的文件列表（相对仓库根）
+    # 要推送的文件列表（相对仓库根）—— v2.3.9-dev 改动（推理端点与 Gateway 解耦 + 上游端点侦察脚本）
     files = [
         "apps/hermes-buddy-desktop/package.json",
-        "apps/hermes-buddy-desktop/src/fetch-lenient.js",
-        "apps/hermes-buddy-desktop/src/connection-store.js",
-        "apps/hermes-buddy-desktop/src/main.js",
-        "apps/hermes-buddy-desktop/src/session-manager.js",
-        "apps/hermes-buddy-desktop/src/update-checker.js",
-        "apps/hermes-buddy-desktop/src/updater.js",
-        "apps/hermes-buddy-desktop/src/renderer/app.js",
-        "apps/hermes-buddy-desktop/src/renderer/styles.css",
-        "apps/hermes-buddy-desktop/src/renderer/index.html",
-        "apps/hermes-buddy-desktop/src/preload.js",
-        "apps/hermes-buddy-desktop/src/agent-store.js",
         "apps/hermes-buddy-desktop/src/agent/brain.js",
-        "apps/hermes-buddy-desktop/src/agent/loop.js",
-        "apps/hermes-buddy-desktop/src/tools/guard.js",
-        "apps/hermes-buddy-desktop/src/tools/index.js",
-        "apps/hermes-buddy-desktop/src/tools/shell.js",
-        "apps/hermes-buddy-desktop/src/tools/files.js",
-        "apps/hermes-buddy-desktop/src/workspace.js",
-        "apps/hermes-buddy-desktop/src/diagnostics.js",
+        "apps/hermes-buddy-desktop/src/session-manager.js",
+        "apps/hermes-buddy-desktop/src/connection-store.js",
         "apps/hermes-buddy-desktop/src/server-bootstrap.js",
-        "apps/hermes-buddy-desktop/src/memory.js",
-        "apps/hermes-buddy-desktop/src/skills.js",
-        "apps/hermes-buddy-desktop/src/toolchain.js",
-        "apps/hermes-buddy-desktop/src/logger.js",
-        "apps/hermes-buddy-desktop/src/agent-loop.js",
-        "scripts/release_github.py",
-        "scripts/build-buddy-windows.ps1",
+        "apps/hermes-buddy-desktop/src/renderer/app.js",
+        "apps/hermes-buddy-desktop/src/renderer/index.html",
+        "apps/hermes-buddy-desktop/test/session-manager.test.js",
+        "apps/hermes-buddy-desktop/test/server-bootstrap.test.js",
+        "docs/WINDOWS_CLIENT.md",
+        "scripts/_gen_recon.js",
+        "scripts/_probe_endpoint.js",
+        "scripts/_probe_openapi.js",
+        "scripts/_probe_model_passthrough.js",
+        "scripts/_scan_ports.js",
     ]
 
     ok = 0

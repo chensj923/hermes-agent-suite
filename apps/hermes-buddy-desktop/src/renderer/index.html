@@ -21,10 +21,20 @@
       </div>
 
       <form id="connect-form" autocomplete="off">
+        <fieldset class="mode-fieldset">
+          <legend>连接模式</legend>
+          <label class="mode-option"><input type="radio" name="connMode" value="local" checked>
+            <span><strong>本地模式</strong> · 本机跑 ReAct 循环，直连一个推理端点（默认，密钥可能在本机）</span></label>
+          <label class="mode-option"><input type="radio" name="connMode" value="channel">
+            <span><strong>通道模式</strong> · 决策在 Hermes 服务端外挂通道，本机只筛选+执行工具（推荐，密钥不出服务器）</span></label>
+          <small class="mode-hint" id="mode-hint-local">本地模式：填「Hermes 主机 + API Key」即可，推理端点默认指向同主机上的 Buddy 直通代理（<code>:8811</code>）。</small>
+          <small class="mode-hint" id="mode-hint-channel" hidden>通道模式：Hermes 主机上需先跑外挂通道（「生成服务端准备脚本」一键部署，监听 <code>:8822</code>）。本机只执行被命令护栏放行的工具，服务端做 LLM 决策。</small>
+        </fieldset>
+
         <label class="connect-field">
           <span>Hermes 主机</span>
           <input id="field-host" name="host" placeholder="192.168.0.246" spellcheck="false" required>
-          <small>支持 IP、域名，或带端口的地址。会自动推导 LLM :8800、Gateway :22122；部署管理地址（可选）默认留空。</small>
+          <small>支持 IP、域名，或带端口的地址。这是 <strong>Gateway</strong> 地址（会话登记用，默认端口 22122），同时用于推导同主机上的推理端点（本地模式）或 WS 通道（通道模式）。<strong>填这一个地址 + API Key 就够了</strong>。</small>
         </label>
 
         <label class="connect-field">
@@ -37,12 +47,18 @@
           <summary>高级设置</summary>
           <div class="advanced-body">
             <label class="connect-field">
-              <span>推理端点（LLM）</span>
-              <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8800/v1/chat/completions" spellcheck="false">
-            </label>
-            <label class="connect-field">
               <span>Gateway 地址</span>
               <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22122" spellcheck="false">
+            </label>
+            <label class="connect-field" id="field-llmUrl-wrap">
+              <span>推理端点（LLM）· 选填（默认留空）</span>
+              <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8811/v1/chat/completions" spellcheck="false">
+              <small>仅<strong>本地模式</strong>需要。留空 = 用 Hermes 本机上的<strong>直通代理 :8811</strong>（推荐，由服务端准备脚本部署）。只有在你想让 Buddy 直连别的 OpenAI 兼容端点时才手填（火山方舟 Ark、DeepSeek、通义、本地 vLLM/Ollama 等）——注意此时密钥存在本机。<strong>不要填 Gateway 的 22122</strong>——那是服务端 agent 端点，会忽略本地工具、在服务器上执行命令。</small>
+            </label>
+            <label class="connect-field" id="field-channelUrl-wrap" hidden>
+              <span>通道地址（WS）· 选填（默认留空，自动推导）</span>
+              <input id="field-channelUrl" name="channelUrl" placeholder="ws://192.168.0.246:8822/api/buddy/channel" spellcheck="false">
+              <small>仅<strong>通道模式</strong>需要。留空 = 自动按 Hermes 主机推导为 <code>ws(s)://&lt;host&gt;:8822/api/buddy/channel</code>。只有当你把通道部署到了非默认端口或走了 wss 反向代理时才手填。</small>
             </label>
             <label class="connect-field">
               <span>部署管理地址</span>
@@ -196,6 +212,33 @@
         <button class="primary" id="btn-bootstrap-close" type="button">关闭</button>
       </div>
       <div class="status-line" id="bootstrap-status" role="status"></div>
+
+      <hr class="modal-sep">
+      <h4 class="deploy-title">服务端部署压缩包（随安装包自带）</h4>
+      <p class="hint">把推理代理（8811）与 WS 通道（8822）两个外挂组件、执行脚本一起打成压缩包，随 Buddy 安装包发出。
+        可手动拷到 Hermes 解开跑 <code>deploy.sh</code>，也可在 Windows 一键推送部署。</p>
+      <div class="modal-actions">
+        <button class="ghost" id="btn-export-bundle" type="button">导出部署包 (.tar.gz)</button>
+        <button class="ghost" id="btn-deploy-init" type="button">重新初始化</button>
+        <button class="ghost" id="btn-deploy-toggle" type="button" aria-expanded="false">部署到服务器 ▾</button>
+      </div>
+      <div id="deploy-panel" hidden>
+        <div class="deploy-grid">
+          <label class="connect-field"><span>Hermes 主机</span><input id="deploy-host" placeholder="192.168.0.231" spellcheck="false"></label>
+          <label class="connect-field"><span>登录用户</span><input id="deploy-user" value="root" spellcheck="false"></label>
+          <label class="connect-field"><span>SSH 端口</span><input id="deploy-port" value="22" spellcheck="false"></label>
+          <label class="connect-field"><span>SSH 私钥路径</span>
+            <div class="workspace-row">
+              <input id="deploy-key" placeholder="C:\Users\...\id_rsa" spellcheck="false">
+              <button class="ghost" id="btn-deploy-keypick" type="button">浏览…</button>
+            </div>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="primary" id="btn-deploy-server" type="button">推送并部署</button>
+        </div>
+        <pre id="deploy-output" class="report-pre" tabindex="0"></pre>
+      </div>
     </div>
   </div>
 

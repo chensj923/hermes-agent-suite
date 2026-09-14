@@ -2,6 +2,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
 const { app, BrowserWindow, ipcMain, safeStorage, shell, dialog } = require('electron');
 const provisioning = require('@hermes/provisioning');
 const registry = require('@hermes/capability-registry');
@@ -190,6 +191,150 @@ function registerIpc() {
     const filePath = path.join(app.getPath('downloads'), `${safeName}.sh`);
     await fs.promises.writeFile(filePath, String(script || ''), { encoding: 'utf8', mode: 0o600 });
     return { path: filePath };
+  });
+
+  // ---- 服务端部署压缩包（随安装包自带，含 8811 代理 + 8822 通道 + 执行脚本） ----
+  // 安装包只打一个 tar.gz 进 extraResources；安装后初始化时从 tar.gz 解包到
+  // userData/server-deploy/（可读写、路径稳定），之后导出/推送都从那里走。
+  const DEPLOY_DIR = path.join(app.getPath('userData'), 'server-deploy');
+
+  /** 在 resources/ 和开发路径里找 tar.gz。 */
+  function resolveBundleInResources() {
+    const candidates = [
+      path.join((process.resourcesPath || ''), 'server-deploy', 'hermes-buddy-server-deploy.tar.gz'),
+      path.join(app.getAppPath(), 'server-deploy', 'hermes-buddy-server-deploy.tar.gz'),
+      path.join(__dirname, '..', 'server-deploy', 'hermes-buddy-server-deploy.tar.gz'),
+    ];
+    for (const c of candidates) {
+      try { if (fs.existsSync(c)) return c; } catch (_) { /* 下一个 */ }
+    }
+    return null;
+  }
+
+  /**
+   * 初始化：从安装包里的 tar.gz 解包到 userData/server-deploy/。
+   * 用系统 tar（Windows 10+ / Linux / macOS 都自带）解压。
+   * 首次解包后写 .initialized 标记；后续调用跳过（除非 force=true）。
+   */
+  async function extractBundle(bundlePath, destDir) {
+    await fs.promises.mkdir(destDir, { recursive: true });
+    return new Promise((resolve, reject) => {
+      const child = spawn('tar', ['-xzf', bundlePath, '-C', destDir], { windowsHide: true });
+      let err = '';
+      child.stderr.on('data', (d) => { err += d.toString(); });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code !== 0) reject(new Error('tar 解压失败(退出码 ' + code + '): ' + err));
+        else resolve();
+      });
+    });
+  }
+
+  handle('buddy:deploy-init', async (_event, { force = false } = {}) => {
+    const marker = path.join(DEPLOY_DIR, '.initialized');
+    if (!force) {
+      try { if (fs.existsSync(marker)) return { ok: true, dir: DEPLOY_DIR, cached: true }; } catch (_) { /* 继续 */ }
+    }
+    const bundle = resolveBundleInResources();
+    if (!bundle) {
+      return { ok: false, dir: DEPLOY_DIR, error: '安装包内未找到 hermes-buddy-server-deploy.tar.gz' };
+    }
+    try {
+      await extractBundle(bundle, DEPLOY_DIR);
+    } catch (e) {
+      return { ok: false, dir: DEPLOY_DIR, error: e.message };
+    }
+    // 解包后给脚本加可执行权限
+    for (const f of ['deploy.sh', 'deploy.ps1']) {
+      try { fs.chmodSync(path.join(DEPLOY_DIR, f), 0o755); } catch (_) { /* Windows 上无妨 */ }
+    }
+    await fs.promises.writeFile(marker, new Date().toISOString(), 'utf8');
+    const files = fs.existsSync(DEPLOY_DIR) ? fs.readdirSync(DEPLOY_DIR).filter(f => !f.startsWith('.')) : [];
+    return { ok: true, dir: DEPLOY_DIR, files, cached: false };
+  });
+
+  /** 初始化后的路径优先；没初始化过就回退到 resources/ 里的 tar.gz。 */
+  function resolveDeployBundle() {
+    const local = path.join(DEPLOY_DIR, 'hermes-buddy-server-deploy.tar.gz');
+    try { if (fs.existsSync(local)) return local; } catch (_) { /* 下一个 */ }
+    return resolveBundleInResources();
+  }
+  function resolveDeployPs1() {
+    const local = path.join(DEPLOY_DIR, 'deploy.ps1');
+    try { if (fs.existsSync(local)) return local; } catch (_) { /* 下一个 */ }
+    return null;  // 只在初始化后才有
+  }
+
+  /** 如果还没初始化过就解包一次（用于 deploy-to-server 自动前置）。 */
+  async function initDeployIfNeeded() {
+    const marker = path.join(DEPLOY_DIR, '.initialized');
+    try { if (fs.existsSync(marker)) return { ok: true, dir: DEPLOY_DIR, cached: true }; } catch (_) { /* 继续 */ }
+    const bundle = resolveBundleInResources();
+    if (!bundle) return { ok: false, error: '安装包内未找到 hermes-buddy-server-deploy.tar.gz' };
+    try {
+      await extractBundle(bundle, DEPLOY_DIR);
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+    for (const f of ['deploy.sh', 'deploy.ps1']) {
+      try { fs.chmodSync(path.join(DEPLOY_DIR, f), 0o755); } catch (_) { /* Windows 上无妨 */ }
+    }
+    await fs.promises.writeFile(marker, new Date().toISOString(), 'utf8');
+    return { ok: true, dir: DEPLOY_DIR, cached: false };
+  }
+
+  handle('buddy:deploy-bundle-path', () => resolveDeployBundle());
+  handle('buddy:export-deploy-bundle', async () => {
+    const src = resolveDeployBundle();
+    if (!src) return { error: '未找到部署压缩包（请先点「初始化部署包」，或确认安装包完整）' };
+    const target = path.join(app.getPath('downloads'), 'hermes-buddy-server-deploy.tar.gz');
+    await fs.promises.copyFile(src, target);
+    return { path: target, source: src };
+  });
+  handle('buddy:deploy-keypick', async () => {
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: '选择 SSH 私钥',
+      properties: ['openFile'],
+      filters: [{ name: 'SSH 私钥', extensions: ['pem', 'key', 'rsa', 'ppk', 'ed25519', 'ecdsa'] }],
+    });
+    if (res.canceled || !res.filePaths.length) return { path: '' };
+    return { path: res.filePaths[0] };
+  });
+  handle('buddy:deploy-to-server', (event, opts = {}) => {
+    return new Promise(async (resolve) => {
+      // 确保部署包已初始化到 userData（首次运行自动提取）
+      const initResult = await initDeployIfNeeded();
+      if (!initResult.ok) {
+        safeSend(event.sender, 'buddy:deploy:progress', { text: 'ERROR: ' + initResult.error + '\n' });
+        return resolve({ ok: false, error: initResult.error });
+      }
+      const ps1 = resolveDeployPs1();
+      const bundle = resolveDeployBundle();
+      if (!ps1 || !bundle) {
+        safeSend(event.sender, 'buddy:deploy:progress', { text: 'ERROR: 未找到 deploy.ps1 或压缩包（请确认安装包完整）\n' });
+        return resolve({ ok: false, error: 'missing deploy files' });
+      }
+      const args = [
+        '-ExecutionPolicy', 'Bypass', '-File', ps1,
+        '-Host', String(opts.host || ''),
+        '-User', String(opts.user || 'root'),
+        '-KeyPath', String(opts.keyPath || ''),
+        '-SshPort', String(opts.sshPort || 22),
+        '-Bundle', bundle,
+      ];
+      const child = spawn('powershell.exe', args, { windowsHide: true });
+      const push = (d) => safeSend(event.sender, 'buddy:deploy:progress', { text: d.toString() });
+      child.stdout.on('data', push);
+      child.stderr.on('data', push);
+      child.on('error', (e) => {
+        safeSend(event.sender, 'buddy:deploy:progress', { text: 'ERROR: ' + e.message + '\n' });
+        resolve({ ok: false, error: e.message });
+      });
+      child.on('close', (code) => {
+        safeSend(event.sender, 'buddy:deploy:progress', { text: `\n[deploy] 进程退出码: ${code}\n` });
+        resolve({ ok: code === 0, code: code || 0 });
+      });
+    });
   });
 
   // ---- 对话 ----

@@ -1,6 +1,6 @@
 {
   "name": "@hermes/buddy-desktop",
-  "version": "2.3.2-dev",
+  "version": "2.3.10",
   "description": "Windows desktop client and guided provisioning for Hermes Buddy",
   "author": "Hermes Agent Suite",
   "main": "src/main.js",
@@ -8,24 +8,52 @@
     "start": "electron .",
     "test": "node --test",
     "smoke": "electron . --smoke-test --no-sandbox --disable-gpu --disable-gpu-sandbox --use-gl=disabled",
-    "build:win": "electron-builder --win nsis --x64"
+    "build:bundle": "node scripts/build-server-deploy-bundle.js",
+    "build:win": "node scripts/build-server-deploy-bundle.js && electron-builder --win nsis --x64"
   },
   "dependencies": {
     "@hermes/connection": "*",
     "@hermes/provisioning": "*",
     "@hermes/capability-registry": "*"
   },
-  "devDependencies": { "electron": "35.7.5", "electron-builder": "26.15.3" },
+  "devDependencies": {
+    "electron": "35.7.5",
+    "electron-builder": "26.15.3"
+  },
   "build": {
     "appId": "com.hermes.buddy",
     "productName": "Hermes Buddy",
     "artifactName": "hermes-suite-windows-x86_64.${ext}",
-    "directories": { "output": "dist" },
-    "files": ["src/**/*", "package.json", "!test/**", "!dist/**"],
-    "extraResources": [
-      { "from": "skills", "to": "skills" }
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "!test/**",
+      "!dist/**"
     ],
-    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
+    "extraResources": [
+      {
+        "from": "skills",
+        "to": "skills"
+      },
+      {
+        "from": "server-deploy",
+        "to": "server-deploy",
+        "filter": ["**/*.tar.gz"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
     "npmRebuild": false,
     "nodeGypRebuild": false,
     "nsis": {
@@ -36,6 +64,13 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Hermes Buddy"
     },
-    "publish": [{ "provider": "github", "owner": "chensj923", "repo": "hermes-agent-suite", "releaseType": "release" }]
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "chensj923",
+        "repo": "hermes-agent-suite",
+        "releaseType": "release"
+      }
+    ]
   }
 }

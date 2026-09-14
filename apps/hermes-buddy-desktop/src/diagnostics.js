@@ -39,15 +39,19 @@ class DiagnosticError extends Error {
   }
 }
 
-/** 把形如 "192.168.0.246:22122" / "http://host:8800" 解析成 URL 字符串，失败抛错。 */
+/** 把形如 "192.168.0.246:22122" / "http://host:8800" 解析成 URL 字符串，失败抛错。
+ * 这里会把常见的复制粘贴污染（零宽空格、首尾不可见字符）清掉，避免误报协议错误。 */
 function parseEndpoint(value, label) {
-  const raw = String(value || '').trim();
+  let raw = String(value || '')
+    .replace(/^[\s\u200B-\u200F\uFEFF]+|[\s\u200B-\u200F\uFEFF]+$/g, '');
   if (!raw) throw new DiagnosticError(`${label} 未填写`, 'no_endpoint');
   let url;
   try {
     url = new URL(/^https?:\/\//i.test(raw) ? raw : `http://${raw}`);
-  } catch (_) {
-    throw new DiagnosticError(`${label} 地址无法解析: ${raw}`, 'wrong_protocol');
+  } catch (error) {
+    // 解析失败和协议错误是两回事：前者可能是地址里有特殊字符或格式不对。
+    const reason = /^(file|ssh|ftp|sftp|mailto|ws|wss):/i.test(raw) ? 'wrong_protocol' : 'invalid_url';
+    throw new DiagnosticError(`${label} 地址无法解析: ${raw}`, reason);
   }
   if (!['http:', 'https:'].includes(url.protocol)) {
     throw new DiagnosticError(`${label} 必须是 HTTP 或 HTTPS 协议`, 'wrong_protocol');
@@ -146,6 +150,11 @@ const GUIDANCE = {
   wrong_protocol: {
     label: '协议错误',
     userMessage: '地址必须是 http:// 或 https://，不能填 file://、ssh:// 之类。',
+    actionHint: null
+  },
+  invalid_url: {
+    label: '地址格式错误',
+    userMessage: '地址无法被解析，请检查是否有多余空格、换行或特殊字符。',
     actionHint: null
   },
   no_endpoint: {

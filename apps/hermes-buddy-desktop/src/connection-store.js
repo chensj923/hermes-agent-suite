@@ -20,7 +20,7 @@ const PERMISSIONS = ['read', 'read-write', 'full'];
  * Gateway baseUrl 是可选的——本机工具链路不依赖它，留空也能干活；
  * Hermes 服务端默认端口是 22122。推导关系：
  *   baseUrl 留空 → 由 llmUrl 同主机 + 端口 22122 推导
- *   llmUrl 留空 → 由 baseUrl 同主机 + 端口 8800 推导
+ *   llmUrl 留空 → 由 baseUrl 同主机 + 端口 22122 推导（LLM 与 Gateway 同端口）
  *   managementUrl 留空 → 由 baseUrl 同主机 + 端口 8700 推导
  */
 function normalizeConnectionInput(input) {
@@ -37,6 +37,12 @@ function normalizeConnectionInput(input) {
   if (!path.isAbsolute(workspace)) throw new Error('工作目录必须是绝对路径');
   const permission = PERMISSIONS.includes(source.permission) ? source.permission : 'read-write';
 
+  // 两种模式：
+  //  · local  —— 本地跑 ReAct 循环，需要直连一个原生支持 function calling 的 LLM 端点（llmUrl）。
+  //  · channel —— 决策在 Hermes 主机上的外挂通道（hermes-buddy-channel），本地只执行工具。
+  //               不需要 llmUrl；channelUrl 默认同主机 :8822 的 WS 通道。
+  const mode = source.mode === 'channel' ? 'channel' : 'local';
+
   // Gateway 可选：先尝试用用户填的，失败/留空就用 llmUrl 推导。
   let baseUrl = '';
   const rawBase = String(source.baseUrl || '').trim();
@@ -45,10 +51,18 @@ function normalizeConnectionInput(input) {
       throw new Error(`Gateway 地址无效：${error.message}`);
     }
   }
-  // llmUrl 必填（核心决策端点）。这里先解析出来，下面用它推导缺失的 baseUrl。
-  const llmUrl = deriveLlmEndpoint(baseUrl, source.llmUrl);
-  if (!baseUrl) {
-    try { baseUrl = deriveGatewayFromLlm(llmUrl); } catch (_) { baseUrl = ''; }
+
+  let llmUrl = '';
+  let channelUrl = '';
+  if (mode === 'channel') {
+    if (!rawBase) throw new Error('通道模式需要填写 Hermes 主机地址（Gateway 地址）');
+    channelUrl = deriveChannelUrl(rawBase, source.channelUrl);
+  } else {
+    // llmUrl 必填（核心决策端点）。这里先解析出来，下面用它推导缺失的 baseUrl。
+    llmUrl = deriveLlmEndpoint(baseUrl, source.llmUrl);
+    if (!baseUrl) {
+      try { baseUrl = deriveGatewayFromLlm(llmUrl); } catch (_) { baseUrl = ''; }
+    }
   }
   // managementUrl 是可选能力：当前 Hermes 服务端 8700 跑的是 WorkBuddy 前端代理，
   // 并没有 /api/provisioning/* 端点。因此不再默认推导；只有用户显式填写时才保留。
@@ -58,7 +72,23 @@ function normalizeConnectionInput(input) {
     managementUrl = fixManagementPort(normalizeGatewayUrl(rawManagement), baseUrl);
   }
 
-  return { schemaVersion: SCHEMA_VERSION, baseUrl, managementUrl, llmUrl, apiKey, profile, model, workspace, permission };
+  return { schemaVersion: SCHEMA_VERSION, mode, baseUrl, managementUrl, llmUrl, channelUrl, apiKey, profile, model, workspace, permission };
+}
+
+/** 通道模式：WS 端点默认同主机 :8822，scheme 跟随 Gateway（https→wss）。可显式覆盖。 */
+function deriveChannelUrl(rawBase, explicit) {
+  const raw = String(explicit || '').trim();
+  if (raw) {
+    if (!/^wss?:\/\//i.test(raw)) throw new Error('通道地址必须是 ws:// 或 wss:// 开头');
+    return raw;
+  }
+  const url = new URL(/^https?:\/\//i.test(rawBase) ? rawBase : `http://${rawBase}`);
+  const scheme = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.port = '8822';
+  url.pathname = '/api/buddy/channel';
+  url.search = '';
+  url.hash = '';
+  return `${scheme}//${url.host}/api/buddy/channel`;
 }
 
 /** 当用户没填 Gateway 时，按 LLM 端点同主机 + Hermes 默认 22122 推导。 */
@@ -77,9 +107,11 @@ function publicView(connection) {
   if (!connection) return { configured: false };
   return {
     configured: true,
+    mode: connection.mode || 'local',
     baseUrl: connection.baseUrl,
     managementUrl: connection.managementUrl,
     llmUrl: connection.llmUrl,
+    channelUrl: connection.channelUrl || '',
     profile: connection.profile || DEFAULT_PROFILE,
     model: connection.model || DEFAULT_MODEL,
     workdir: connection.workdir || '',
@@ -89,12 +121,12 @@ function publicView(connection) {
   };
 }
 
-/** 已知会冒充 Hermes Gateway 的非 Gateway 端口。 */
-const NON_GATEWAY_PORTS = new Set(['22121', '22123', '22124', '22125']);
+/** 已知会冒充 Hermes Gateway 的非 Gateway 端口（含 8811 推理直通代理、8645 hermes proxy）。 */
+const NON_GATEWAY_PORTS = new Set(['22121', '22123', '22124', '22125', '8811', '8645']);
 
-/** 用户容易把 LLM（8800）或 Gateway（22122）端口填进部署管理地址里，纠正为 8700。 */
+/** 用户容易把推理端点（8811 直通代理 / 8800）或 Gateway（22122）端口填进部署管理地址里，纠正为 8700。 */
 const MANAGEMENT_PORT = '8700';
-const NON_MANAGEMENT_PORTS = new Set(['8800', '22122', '22121', '22123', '22124', '22125']);
+const NON_MANAGEMENT_PORTS = new Set(['8811', '8800', '8645', '22122', '22121', '22123', '22124', '22125']);
 
 /** 把用户错填的 openclaw / 旧 Gateway 端口纠正为 22122。 */
 function fixGatewayPort(urlString, defaultPort = '22122') {
@@ -135,12 +167,15 @@ function fixManagementPort(urlString, baseUrl) {
 function migrate(raw) {
   if (!raw || typeof raw !== 'object') return null;
   if (!raw.apiKey) return null;
+  // 旧配置没有 mode/channelUrl：默认 local，通道模式需用户重新在向导里选。
+  const mode = raw.mode === 'channel' ? 'channel' : 'local';
   // 不管 schemaVersion 是多少，都做一次端口纠错：用户可能在当前版本里把 openclaw
   //（22121/22123）、旧 Gateway（22124）或管理端口（8700）错存成 Gateway。
-  let llmUrl = raw.llmUrl || '';
   let baseUrl = raw.baseUrl || '';
   baseUrl = fixGatewayPort(baseUrl);
-  if (!llmUrl) {
+  // 通道模式不依赖本地 LLM 端点，不要从 baseUrl 反推 llmUrl（否则会污染通道配置）。
+  let llmUrl = raw.llmUrl || '';
+  if (mode !== 'channel' && !llmUrl) {
     try { llmUrl = deriveLlmEndpoint(baseUrl); } catch (_) { llmUrl = ''; }
   }
   if (!baseUrl && llmUrl) {
@@ -149,11 +184,14 @@ function migrate(raw) {
   // 旧版本可能把 LLM(8800)/Gateway(22122) 端口错存成 Management 地址；
   // 服务端当前没有 Management 服务，历史残留一律清空，需要时用户在向导里重新填。
   const managementUrl = '';
+  const channelUrl = raw.channelUrl || (mode === 'channel' ? deriveChannelUrl(baseUrl) : '');
   return {
     schemaVersion: SCHEMA_VERSION,
+    mode,
     baseUrl,
     managementUrl,
     llmUrl,
+    channelUrl,
     apiKey: raw.apiKey,
     profile: raw.profile || DEFAULT_PROFILE,
     model: raw.model || DEFAULT_MODEL,

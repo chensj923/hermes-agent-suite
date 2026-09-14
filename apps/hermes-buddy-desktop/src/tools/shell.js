@@ -129,13 +129,13 @@ class ShellRunner {
     const limit = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : this.timeoutMs;
 
     try {
-      return await this.execute(scriptFile, cwd, limit, options.signal);
+      return await this.execute(scriptFile, cwd, limit, options.signal, options.onData);
     } finally {
       try { fs.unlinkSync(scriptFile); } catch (_) { /* 清不掉就算了 */ }
     }
   }
 
-  execute(scriptFile, cwd, timeoutMs, signal) {
+  execute(scriptFile, cwd, timeoutMs, signal, onData) {
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
       const child = spawn(this.shellPath, this.argsFor(scriptFile), {
@@ -170,8 +170,16 @@ class ShellRunner {
       };
 
       // 超大数据量时直接裁剪，避免内存被一条失控命令吃光。
-      child.stdout.on('data', (chunk) => { if (stdout.length < this.maxOutputChars * 4) stdout += chunk.toString('utf8'); });
-      child.stderr.on('data', (chunk) => { if (stderr.length < this.maxOutputChars * 4) stderr += chunk.toString('utf8'); });
+      child.stdout.on('data', (chunk) => {
+        const s = chunk.toString('utf8');
+        if (stdout.length < this.maxOutputChars * 4) stdout += s;
+        if (onData) { try { onData({ stream: 'stdout', chunk: s }); } catch (_) { /* 回调出错不影响主流程 */ } }
+      });
+      child.stderr.on('data', (chunk) => {
+        const s = chunk.toString('utf8');
+        if (stderr.length < this.maxOutputChars * 4) stderr += s;
+        if (onData) { try { onData({ stream: 'stderr', chunk: s }); } catch (_) { /* 回调出错不影响主流程 */ } }
+      });
       child.on('error', (error) => finish(reject, error));
       child.on('close', (exitCode) => {
         const out = this.truncate(stdout);

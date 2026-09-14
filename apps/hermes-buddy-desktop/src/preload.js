@@ -80,6 +80,14 @@ const api = {
   bootstrapScript: (options) => invoke('buddy:bootstrap-script', options || {}),
   exportBootstrap: (payload) => invoke('buddy:bootstrap-export', payload || {}),
 
+  // ---- 服务端部署压缩包 ----
+  deployInit: (opts) => invoke('buddy:deploy-init', opts || {}),
+  deployBundlePath: () => invoke('buddy:deploy-bundle-path'),
+  exportDeployBundle: () => invoke('buddy:export-deploy-bundle'),
+  pickSshKey: () => invoke('buddy:deploy-keypick'),
+  deployToServer: (opts) => invoke('buddy:deploy-to-server', opts || {}),
+  onDeployProgress: (handler) => subscribe('buddy:deploy:progress', handler),
+
   // ---- 其它 ----
   update: () => invoke('buddy:update'),
   downloadUpdate: (info) => invoke('buddy:update:download', info || {}),

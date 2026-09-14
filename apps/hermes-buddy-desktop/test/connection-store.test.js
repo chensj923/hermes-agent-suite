@@ -21,12 +21,13 @@ function fakeSafeStorage({ available = true, failDecrypt = false } = {}) {
 
 function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'buddy-store-')); }
 
-test('normalizes user input and derives the management url', () => {
+test('normalizes user input and derives the llm url', () => {
   const connection = normalizeConnectionInput({ baseUrl: '192.168.0.246:22124', apiKey: ' secret ' });
   assert.equal(connection.baseUrl, 'http://192.168.0.246:22124');
-  assert.equal(connection.managementUrl, 'http://192.168.0.246:8700');
-  // llmUrl 没填，按 baseUrl 端口推导：22122/8800 保留，否则落到 :8800
-  assert.equal(connection.llmUrl, 'http://192.168.0.246:8800/v1/chat/completions');
+  // managementUrl 不再自动推导（服务端 8700 没有 /api/provisioning 端点），仅显式填写时保留
+  assert.equal(connection.managementUrl, '');
+  // llmUrl 没填 → 同主机上的 Buddy 直通代理 8811（22122 是 agent 端点，不能用）
+  assert.equal(connection.llmUrl, 'http://192.168.0.246:8811/v1/chat/completions');
   assert.equal(connection.apiKey, 'secret');
   assert.equal(connection.profile, 'buddy');
   assert.equal(connection.model, 'hermes-agent');
@@ -39,15 +40,15 @@ test('baseUrl is optional — LLM-only mode derives gateway from llmUrl', () => 
     apiKey: 'k'
   });
   assert.equal(connection.baseUrl, 'http://192.168.0.246:22122');
-  assert.equal(connection.managementUrl, 'http://192.168.0.246:8700');
+  assert.equal(connection.managementUrl, '');
   assert.equal(connection.llmUrl, 'http://192.168.0.246:8800/v1/chat/completions');
 });
 
 test('blank baseUrl + blank managementUrl: gateway stays empty (degraded mode)', () => {
   const connection = normalizeConnectionInput({ llmUrl: 'http://h:8800/v1', apiKey: 'k' });
   assert.equal(connection.baseUrl, 'http://h:22122');
-  // managementUrl 由 baseUrl 推导到 :8700
-  assert.equal(connection.managementUrl, 'http://h:8700');
+  // managementUrl 不再自动推导，留空
+  assert.equal(connection.managementUrl, '');
 });
 
 test('rejects unusable input before touching the disk', () => {
@@ -70,8 +71,9 @@ test('publicView never exposes the api key', () => {
 test('migrates v1 connection files in place', () => {
   const migrated = migrate({ baseUrl: 'http://h:22124', apiKey: 'k' });
   assert.equal(migrated.schemaVersion, SCHEMA_VERSION);
-  assert.equal(migrated.managementUrl, 'http://h:8700');
-  assert.equal(migrated.llmUrl, 'http://h:8800/v1/chat/completions');
+  assert.equal(migrated.managementUrl, '');
+  // migrate 先把 baseUrl 的 22124 纠正为 22122，llmUrl 再落到同主机的直通代理 8811
+  assert.equal(migrated.llmUrl, 'http://h:8811/v1/chat/completions');
   assert.equal(migrated.migratedFrom, 1);
   // 没有 baseUrl 也能迁：apiKey 是唯一硬性要求
   const llmOnly = migrate({ llmUrl: 'http://h:8800/v1', apiKey: 'k', schemaVersion: 1 });
@@ -120,4 +122,39 @@ test('quarantines corrupted json instead of crashing at startup', () => {
   fs.writeFileSync(store.filePath, Buffer.from('enc:not-json', 'utf8'));
   assert.equal(store.load(), null);
   assert.equal(fs.existsSync(`${store.filePath}.parse-failed`), true);
+});
+
+// ---------- 通道模式（决策在 Hermes 服务端外挂通道，本机只执行工具）----------
+
+test('channel mode derives ws channel url from host and skips llmUrl', () => {
+  const c = normalizeConnectionInput({ mode: 'channel', baseUrl: '192.168.0.246', apiKey: 'k' });
+  assert.equal(c.mode, 'channel');
+  assert.equal(c.channelUrl, 'ws://192.168.0.246:8822/api/buddy/channel');
+  assert.equal(c.llmUrl, '', '通道模式不需要本地 LLM 端点');
+  assert.equal(c.baseUrl, 'http://192.168.0.246');
+});
+
+test('channel mode maps https host to wss and honors explicit override', () => {
+  const tls = normalizeConnectionInput({ mode: 'channel', baseUrl: 'https://hermes.example.com', apiKey: 'k' });
+  assert.equal(tls.channelUrl, 'wss://hermes.example.com:8822/api/buddy/channel');
+  const overridden = normalizeConnectionInput({
+    mode: 'channel', baseUrl: 'h:22122', channelUrl: 'ws://h:9999/custom', apiKey: 'k'
+  });
+  assert.equal(overridden.channelUrl, 'ws://h:9999/custom');
+});
+
+test('channel mode rejects when host (baseUrl) is missing', () => {
+  assert.throws(() => normalizeConnectionInput({ mode: 'channel', apiKey: 'k' }), /通道模式需要填写/);
+});
+
+test('channel mode round-trips through publicView and migrate', () => {
+  const c = normalizeConnectionInput({ mode: 'channel', baseUrl: 'h:22122', apiKey: 'k' });
+  const v = publicView(c);
+  assert.equal(v.mode, 'channel');
+  assert.equal(v.channelUrl, 'ws://h:8822/api/buddy/channel');
+  assert.equal(v.llmUrl, '');
+  const m = migrate({ mode: 'channel', baseUrl: 'http://h:22122', apiKey: 'k', schemaVersion: 1 });
+  assert.equal(m.mode, 'channel');
+  assert.equal(m.channelUrl, 'ws://h:8822/api/buddy/channel');
+  assert.equal(m.llmUrl, '', '迁移后通道模式仍不应带 LLM 端点');
 });
