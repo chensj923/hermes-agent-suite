@@ -77,3 +77,37 @@ test('diagnose: 200 on llm means ok even when gateway is down', async () => {
   assert.equal(gw.reason, 'refused');
   assert.equal(gw.critical, false);
 });
+
+test('diagnose: channel mode skips llmUrl and probes channelUrl', async () => {
+  const fetchImpl = async (url) => {
+    // 期望把 ws://192.168.0.231:8822/api/buddy/channel 转成 http://192.168.0.231:8822/health
+    if (url === 'http://192.168.0.231:8822/health') return { status: 200 };
+    return { status: 0, reason: 'refused' };
+  };
+  const result = await diagnose({
+    mode: 'channel',
+    channelUrl: 'ws://192.168.0.231:8822/api/buddy/channel',
+    gatewayBaseUrl: 'http://192.168.0.231:22122',
+    fetchImpl
+  });
+  assert.equal(result.ok, true);
+  const channel = result.results.find((r) => r.key === 'channelUrl');
+  assert.ok(channel, 'has channelUrl result');
+  assert.equal(channel.reason, 'channel_ok');
+  assert.equal(channel.critical, true);
+  assert.equal(channel.value, 'ws://192.168.0.231:8822/api/buddy/channel');
+  const llm = result.results.find((r) => r.key === 'llmUrl');
+  assert.equal(llm, undefined);
+});
+
+test('diagnose: channel mode blocks when channel is refused', async () => {
+  const fetchImpl = async () => ({ status: 0, reason: 'refused' });
+  const result = await diagnose({
+    mode: 'channel',
+    channelUrl: 'ws://192.168.0.231:8822/api/buddy/channel',
+    fetchImpl
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.blocking.key, 'channelUrl');
+  assert.equal(result.blocking.reason, 'refused');
+});

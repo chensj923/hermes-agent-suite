@@ -166,6 +166,16 @@ const GUIDANCE = {
     label: '管理端点可选',
     userMessage: '8700 当前不是 Hermes Management 服务（可能是 WorkBuddy 前端），不影响聊天和本机工具，可留空。',
     actionHint: null
+  },
+  channel_ok: {
+    label: '正常',
+    userMessage: 'WS 工具通道正常响应，鉴权通过。',
+    actionHint: null
+  },
+  channel_unauthorized: {
+    label: '鉴权失败',
+    userMessage: 'WS 通道端口通了，但 API Key 不对。回去服务端 `cat /root/.hermes/.api_server_key` 重新拷贝。',
+    actionHint: 'verify_key'
   }
 };
 
@@ -175,20 +185,43 @@ function guidanceFor(reason) {
 
 /**
  * 一次性诊断全部端点。返回的数组顺序固定，便于 UI 一一对应渲染。
- * options.llmUrl / options.gatewayBaseUrl / options.managementUrl 任一可空。
+ * options.llmUrl / options.gatewayBaseUrl / options.managementUrl / options.channelUrl 任一可空。
+ * options.mode === 'channel' 时，不检查 llmUrl，改查 channelUrl（WS 通道 /health）。
  */
 async function diagnose(options = {}) {
-  const endpoints = [
-    { key: 'llmUrl', label: '推理端点 (LLM)', value: options.llmUrl, critical: true },
-    { key: 'gatewayBaseUrl', label: 'Gateway', value: options.gatewayBaseUrl, critical: false },
-    { key: 'managementUrl', label: '部署管理（可选）', value: options.managementUrl, critical: false }
-  ];
+  const isChannel = options.mode === 'channel';
+
+  // 把 ws://host:8822/api/buddy/channel 转成 http://host:8822/health 做 HTTP 探测
+  const channelHealthUrl = (() => {
+    const raw = String(options.channelUrl || '').trim();
+    if (!raw) return '';
+    try {
+      const url = new URL(/^wss?:\/\//i.test(raw) ? raw : `ws://${raw}`);
+      const proto = url.protocol === 'wss:' ? 'https:' : 'http:';
+      const port = url.port || (url.protocol === 'wss:' ? 443 : 80);
+      return `${proto}//${url.hostname}:${port}/health`;
+    } catch (_) {
+      return '';
+    }
+  })();
+
+  const endpoints = isChannel
+    ? [
+        { key: 'channelUrl', label: 'WS 工具通道', value: channelHealthUrl, displayValue: options.channelUrl, critical: true },
+        { key: 'gatewayBaseUrl', label: 'Gateway', value: options.gatewayBaseUrl, critical: false },
+        { key: 'managementUrl', label: '部署管理（可选）', value: options.managementUrl, critical: false }
+      ]
+    : [
+        { key: 'llmUrl', label: '推理端点 (LLM)', value: options.llmUrl, critical: true },
+        { key: 'gatewayBaseUrl', label: 'Gateway', value: options.gatewayBaseUrl, critical: false },
+        { key: 'managementUrl', label: '部署管理（可选）', value: options.managementUrl, critical: false }
+      ];
 
   const results = [];
   for (const ep of endpoints) {
     if (!ep.value || !String(ep.value).trim()) {
       const g = guidanceFor('no_endpoint');
-      results.push({ key: ep.key, label: ep.label, value: ep.value || '', reason: 'no_endpoint', critical: ep.critical, ...g });
+      results.push({ key: ep.key, label: ep.label, value: ep.displayValue || ep.value || '', reason: 'no_endpoint', critical: ep.critical, ...g });
       continue;
     }
     try {
@@ -199,16 +232,21 @@ async function diagnose(options = {}) {
       if (ep.key === 'managementUrl' && finalReason === 'not_found') {
         finalReason = 'management_optional';
       }
+      // 通道模式把 ok/unauthorized 映射成 channel_*，文案更贴切
+      if (ep.key === 'channelUrl') {
+        if (finalReason === 'ok') finalReason = 'channel_ok';
+        else if (finalReason === 'unauthorized') finalReason = 'channel_unauthorized';
+      }
       const g = guidanceFor(finalReason);
-      results.push({ key: ep.key, label: ep.label, value: ep.value, status, reason: finalReason, critical: ep.critical, ...g });
+      results.push({ key: ep.key, label: ep.label, value: ep.displayValue || ep.value, status, reason: finalReason, critical: ep.critical, ...g });
     } catch (error) {
       const reason = error && error.code ? error.code : 'unreachable';
       const g = guidanceFor(reason);
-      results.push({ key: ep.key, label: ep.label, value: ep.value, reason, critical: ep.critical, ...g });
+      results.push({ key: ep.key, label: ep.label, value: ep.displayValue || ep.value, reason, critical: ep.critical, ...g });
     }
   }
 
-  const blocking = results.find((r) => r.critical && r.reason !== 'ok');
+  const blocking = results.find((r) => r.critical && r.reason !== 'ok' && r.reason !== 'channel_ok');
   return { ok: !blocking, blocking: blocking || null, results };
 }
 

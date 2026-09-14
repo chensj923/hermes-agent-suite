@@ -124,7 +124,16 @@ function registerIpc() {
   handle('buddy:connection', () => manager.status());
   handle('buddy:status', () => manager.status());
   handle('buddy:connect', async (_event, connection) => {
-    const result = await manager.connect(connection);
+    // 全局超时保护：通道模式下 WS 连接最多约 18 秒（10s HTTP + 8s welcome），
+    // Gateway 已改为后台异步不阻塞。给 20 秒上限兜底。
+    const timeoutMs = 20000;
+    const result = await Promise.race([
+      manager.connect(connection),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('连接超时（20 秒），请检查 Hermes 主机地址和通道端口（默认 8822）是否正确')),
+        timeoutMs
+      ))
+    ]);
     return { ...result, workspace: manager.describeWorkspace() };
   });
   handle('buddy:resume', async () => {
@@ -181,7 +190,13 @@ function registerIpc() {
 
   // ---- 诊断 + 服务端准备脚本（连接前给用户一个清晰的"哪步没配"清单） ----
   handle('buddy:diagnose', async (_event, options = {}) => {
-    return diagnose({ llmUrl: options.llmUrl, gatewayBaseUrl: options.gatewayBaseUrl, managementUrl: options.managementUrl });
+    return diagnose({
+      mode: options.mode,
+      channelUrl: options.channelUrl,
+      llmUrl: options.llmUrl,
+      gatewayBaseUrl: options.gatewayBaseUrl,
+      managementUrl: options.managementUrl
+    });
   });
   handle('buddy:bootstrap-script', (_event, options = {}) => {
     return { script: generateBootstrapScript(options), generatedAt: new Date().toISOString() };
@@ -302,38 +317,257 @@ function registerIpc() {
   });
   handle('buddy:deploy-to-server', (event, opts = {}) => {
     return new Promise(async (resolve) => {
+      const sender = event.sender;
+      const send = (text) => safeSend(sender, 'buddy:deploy:progress', { text });
+
       // 确保部署包已初始化到 userData（首次运行自动提取）
       const initResult = await initDeployIfNeeded();
       if (!initResult.ok) {
-        safeSend(event.sender, 'buddy:deploy:progress', { text: 'ERROR: ' + initResult.error + '\n' });
+        send('ERROR: ' + initResult.error + '\n');
         return resolve({ ok: false, error: initResult.error });
       }
-      const ps1 = resolveDeployPs1();
       const bundle = resolveDeployBundle();
-      if (!ps1 || !bundle) {
-        safeSend(event.sender, 'buddy:deploy:progress', { text: 'ERROR: 未找到 deploy.ps1 或压缩包（请确认安装包完整）\n' });
-        return resolve({ ok: false, error: 'missing deploy files' });
+      if (!bundle) {
+        send('ERROR: 未找到部署压缩包（请确认安装包完整）\n');
+        return resolve({ ok: false, error: 'missing bundle' });
       }
-      const args = [
-        '-ExecutionPolicy', 'Bypass', '-File', ps1,
-        '-Host', String(opts.host || ''),
-        '-User', String(opts.user || 'root'),
-        '-KeyPath', String(opts.keyPath || ''),
-        '-SshPort', String(opts.sshPort || 22),
-        '-Bundle', bundle,
-      ];
-      const child = spawn('powershell.exe', args, { windowsHide: true });
-      const push = (d) => safeSend(event.sender, 'buddy:deploy:progress', { text: d.toString() });
-      child.stdout.on('data', push);
-      child.stderr.on('data', push);
-      child.on('error', (e) => {
-        safeSend(event.sender, 'buddy:deploy:progress', { text: 'ERROR: ' + e.message + '\n' });
+
+      const host = String(opts.host || '').trim();
+      const user = String(opts.user || 'root').trim();
+      const keyPath = String(opts.keyPath || '').trim();
+      const password = String(opts.password || '').trim();
+      const sshPort = Number(opts.sshPort) || 22;
+
+      if (!host) { send('ERROR: 请先填 Hermes 主机地址。\n'); return resolve({ ok: false, error: 'no host' }); }
+      if (!keyPath && !password) { send('ERROR: 请填 SSH 私钥路径或 SSH 密码（二选一）。\n'); return resolve({ ok: false, error: 'no auth' }); }
+
+      const remoteTar = '/tmp/hermes-buddy-server-deploy.tar.gz';
+      const remoteDir = '/tmp/hermes-buddy-deploy';
+      const remoteCmd = `mkdir -p ${remoteDir} && tar -xzf ${remoteTar} -C ${remoteDir} && cd ${remoteDir} && (command -v sudo >/dev/null 2>&1 && sudo bash deploy.sh || bash deploy.sh)`;
+
+      // ---- 判断认证方式 ----
+      const useKey = keyPath && fs.existsSync(keyPath);
+      const usePass = password && !useKey;
+
+      if (!useKey && !usePass) {
+        send('ERROR: 密钥路径无效且未填密码，请至少提供一种认证方式。\n');
+        return resolve({ ok: false, error: 'invalid auth' });
+      }
+
+      send(`[deploy] 连接 ${user}@${host}:${sshPort}（${useKey ? '密钥认证' : '口令认证'}）\n`);
+
+      // ---- 用 ssh2 纯 JS 客户端连接 ----
+      let ssh2;
+      try {
+        ssh2 = require('ssh2');
+      } catch (e) {
+        send('ERROR: ssh2 模块未找到，请联系开发者。\n');
+        return resolve({ ok: false, error: 'ssh2 module missing' });
+      }
+
+      const conn = new ssh2.Client();
+      const connConfig = {
+        host,
+        port: sshPort,
+        username: user,
+        readyTimeout: 30000,
+        algorithms: { serverHostKey: ['ssh-ed25519', 'ssh-rsa', 'ecdsa-sha2-nistp256', 'ssh-dss'] },
+      };
+      if (useKey) {
+        try {
+          connConfig.privateKey = fs.readFileSync(keyPath, 'utf8');
+          send(`[deploy] 已读取密钥: ${keyPath}\n`);
+        } catch (e) {
+          send(`ERROR: 读取密钥失败: ${e.message}\n`);
+          return resolve({ ok: false, error: e.message });
+        }
+      } else {
+        connConfig.password = password;
+      }
+
+      conn.on('ready', () => {
+        send('[deploy] SSH 连接成功，开始上传压缩包...\n');
+
+        // ---- SFTP 上传 tar.gz ----
+        conn.sftp((err, sftp) => {
+          if (err) {
+            send(`ERROR: SFTP 会话失败: ${err.message}\n`);
+            conn.end();
+            return resolve({ ok: false, error: err.message });
+          }
+
+          const fileSize = fs.statSync(bundle).size;
+          send(`[deploy] 上传 ${path.basename(bundle)} (${(fileSize / 1024).toFixed(1)} KB) -> ${remoteTar}\n`);
+
+          const readStream = fs.createReadStream(bundle);
+          const writeStream = sftp.createWriteStream(remoteTar, { mode: 0o644 });
+
+          let uploaded = 0;
+          readStream.on('data', (chunk) => {
+            uploaded += chunk.length;
+            const pct = Math.round((uploaded / fileSize) * 100);
+            if (pct % 25 === 0) send(`[deploy] 上传进度: ${pct}%\n`);
+          });
+
+          writeStream.on('error', (e) => {
+            send(`ERROR: SFTP 写入失败: ${e.message}\n`);
+            conn.end();
+            resolve({ ok: false, error: e.message });
+          });
+
+          writeStream.on('close', () => {
+            send('[deploy] 上传完成，执行远程部署...\n');
+
+            // ---- SSH 执行远程命令 ----
+            conn.exec(remoteCmd, (err, stream) => {
+              if (err) {
+                send(`ERROR: 远程执行失败: ${err.message}\n`);
+                conn.end();
+                return resolve({ ok: false, error: err.message });
+              }
+
+              stream.on('data', (d) => send(d.toString()));
+              stream.on('stderr', (d) => send(d.toString()));
+              stream.on('close', (code) => {
+                send(`\n[deploy] 远程命令退出码: ${code}\n`);
+                conn.end();
+                resolve({ ok: code === 0, code: code ?? 0 });
+              });
+            });
+          });
+
+          readStream.pipe(writeStream);
+        });
+      });
+
+      conn.on('error', (e) => {
+        send(`ERROR: SSH 连接失败: ${e.message}\n`);
         resolve({ ok: false, error: e.message });
       });
-      child.on('close', (code) => {
-        safeSend(event.sender, 'buddy:deploy:progress', { text: `\n[deploy] 进程退出码: ${code}\n` });
-        resolve({ ok: code === 0, code: code || 0 });
+
+      conn.on('close', () => {
+        send('[deploy] SSH 连接已关闭。\n');
       });
+
+      // ---- 连接超时兜底 ----
+      setTimeout(() => {
+        if (conn._sock && !conn._sock.destroyed) {
+          // 还连着就不管
+        }
+      }, 35000);
+
+      send('[deploy] 正在连接...\n');
+      conn.connect(connConfig);
+    });
+  });
+
+  // ---- SSH 检查：连上 Hermes 主机，检查是否已部署、取回 API Key、验证通道健康 ----
+  handle('buddy:ssh-check', (event, opts = {}) => {
+    return new Promise(async (resolve) => {
+      const sender = event.sender;
+      const send = (text) => safeSend(sender, 'buddy:deploy:progress', { text });
+
+      const host = String(opts.host || '').trim();
+      const user = String(opts.user || 'root').trim();
+      const keyPath = String(opts.keyPath || '').trim();
+      const password = String(opts.password || '').trim();
+      const sshPort = Number(opts.sshPort) || 22;
+
+      if (!host) { send('ERROR: 请先填 Hermes 主机地址。\n'); return resolve({ ok: false, error: 'no host' }); }
+      if (!keyPath && !password) { send('ERROR: 请填 SSH 私钥路径或密码。\n'); return resolve({ ok: false, error: 'no auth' }); }
+
+      const useKey = keyPath && fs.existsSync(keyPath);
+      const usePass = password && !useKey;
+
+      send(`[check] 连接 ${user}@${host}:${sshPort}（${useKey ? '密钥认证' : '口令认证'}）\n`);
+
+      let ssh2;
+      try { ssh2 = require('ssh2'); } catch (e) {
+        send('ERROR: ssh2 模块未找到。\n');
+        return resolve({ ok: false, error: 'ssh2 missing' });
+      }
+
+      const conn = new ssh2.Client();
+      const connConfig = {
+        host, port: sshPort, username: user, readyTimeout: 20000,
+        algorithms: { serverHostKey: ['ssh-ed25519', 'ssh-rsa', 'ecdsa-sha2-nistp256', 'ssh-dss'] },
+      };
+      if (useKey) {
+        try { connConfig.privateKey = fs.readFileSync(keyPath, 'utf8'); } catch (e) {
+          send(`ERROR: 读取密钥失败: ${e.message}\n`); return resolve({ ok: false, error: e.message });
+        }
+      } else { connConfig.password = password; }
+
+      conn.on('ready', () => {
+        send('[check] SSH 连接成功，正在检查 Hermes 部署状态…\n');
+        // 检查脚本：看 .hermes 目录、hermes 命令、8822 通道健康、取 API_SERVER_KEY
+        const checkCmd = `echo "===HERMES_CHECK===" && (
+          HERMES_HOME="\${HERMES_HOME:-/root/.hermes}"
+          echo "hermes_home_exists=$([ -d "$HERMES_HOME" ] && echo yes || echo no)"
+          echo "hermes_cli=$(command -v hermes 2>/dev/null || echo none)"
+          echo "gateway_port=$(ss -tlnp 2>/dev/null | grep ':22122' | head -1 || echo none)"
+          echo "channel_port=$(ss -tlnp 2>/dev/null | grep ':8822' | head -1 || echo none)"
+          echo "proxy_port=$(ss -tlnp 2>/dev/null | grep ':8811' | head -1 || echo none)"
+          echo "channel_health=$(curl -s -m 3 http://127.0.0.1:8822/health 2>/dev/null || echo none)"
+          echo "proxy_health=$(curl -s -m 3 http://127.0.0.1:8811/health 2>/dev/null || echo none)"
+          API_KEY=""
+          [ -f "$HERMES_HOME/.api_server_key" ] && API_KEY=$(cat "$HERMES_HOME/.api_server_key" 2>/dev/null | tr -d '\\r\\n')
+          if [ -z "$API_KEY" ] && [ -f "$HERMES_HOME/data/.env" ]; then
+            API_KEY=$(grep -E "^API_SERVER_KEY=" "$HERMES_HOME/data/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\\r\\n' || true)
+          fi
+          if [ -z "$API_KEY" ] && [ -f "$HERMES_HOME/.env" ]; then
+            API_KEY=$(grep -E "^API_SERVER_KEY=" "$HERMES_HOME/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\\r\\n' || true)
+          fi
+          echo "api_key=$API_KEY"
+          echo "===END_CHECK==="
+        )`;
+
+        conn.exec(checkCmd, (err, stream) => {
+          if (err) { send(`ERROR: 远程执行失败: ${err.message}\n`); conn.end(); return resolve({ ok: false, error: err.message }); }
+          let output = '';
+          stream.on('data', (d) => { output += d.toString(); });
+          stream.on('stderr', (d) => { send(d.toString()); });
+          stream.on('close', () => {
+            conn.end();
+            // 解析检查结果
+            const lines = output.split('\n');
+            const result = {};
+            for (const line of lines) {
+              const m = line.match(/^(\w+)=(.*)$/);
+              if (m) result[m[1]] = m[2];
+            }
+            const deployed = result.hermes_home_exists === 'yes' || result.channel_port !== 'none';
+            const channelUp = result.channel_health && result.channel_health !== 'none' && result.channel_health.includes('ok');
+            const proxyUp = result.proxy_health && result.proxy_health !== 'none' && result.proxy_health.includes('ok');
+            const apiKey = result.api_key || '';
+
+            send(`[check] Hermes 目录: ${result.hermes_home_exists || '?'}\n`);
+            send(`[check] Hermes CLI: ${result.hermes_cli || 'none'}\n`);
+            send(`[check] Gateway 22122: ${result.gateway_port !== 'none' ? '监听中' : '未监听'}\n`);
+            send(`[check] WS 通道 8822: ${result.channel_port !== 'none' ? '监听中' : '未监听'}\n`);
+            send(`[check] 推理代理 8811: ${result.proxy_port !== 'none' ? '监听中' : '未监听'}\n`);
+            send(`[check] 通道健康: ${channelUp ? 'OK' : '不可达'}\n`);
+            send(`[check] API Key: ${apiKey ? apiKey.slice(0, 4) + '****' + apiKey.slice(-4) : '未找到'}\n`);
+
+            if (!deployed) {
+              send('[check] Hermes 尚未部署，请先执行部署。\n');
+            } else if (!apiKey) {
+              send('[check] 已部署但未找到 API Key，请手动检查服务端配置。\n');
+            } else {
+              send('[check] 检查完成，可以连接。\n');
+            }
+
+            resolve({ ok: true, deployed, channelUp, proxyUp, apiKey, host });
+          });
+        });
+      });
+
+      conn.on('error', (e) => {
+        send(`ERROR: SSH 连接失败: ${e.message}\n`);
+        resolve({ ok: false, error: e.message });
+      });
+
+      conn.connect(connConfig);
     });
   });
 
@@ -485,7 +719,20 @@ function builtinSkillsDir() {
   return fs.existsSync(dev) ? dev : packaged;
 }
 
-function bootstrap() {
+async function clearSessionCache() {
+  // 每次启动强制清掉 Chromium 的 HTTP / 渲染缓存，防止安装新版本后仍加载旧 asar 里的页面。
+  try {
+    const { session } = require('electron');
+    await session.defaultSession.clearCache();
+    await session.defaultSession.clearStorageData({ storages: ['cachestorage', 'localstorage', 'websql'] });
+    logger.info('session-cache-cleared');
+  } catch (error) {
+    logger.warn('session-cache-clear-failed', { error: error.message });
+  }
+}
+
+async function bootstrap() {
+  await clearSessionCache();
   const userData = app.getPath('userData');
   logger = createLogger({ dir: path.join(userData, 'logs'), level: process.env.BUDDY_LOG_LEVEL || 'info' });
   updater = new Updater({ logger });
@@ -498,6 +745,19 @@ function bootstrap() {
     logger.warn('net-fetch-unavailable', { error: error.message });
   }
   const store = new ConnectionStore({ dir: userData, safeStorage, logger });
+
+  // 网络请求优先走 Chromium 网络栈（net.fetch）：跟随系统代理、读 Windows 证书库，
+  // 对 SakuraCat 等 MITM 代理兼容；Node 的 globalThis.fetch 不读系统代理，
+  // 局域网请求被代理拦截时会卡死（v2.3.21 修复：之前 SessionManager 用 globalThis.fetch
+  // 导致通道模式下 Gateway /api/sessions POST 卡住，触发 30 秒 IPC 超时）。
+  let buddyFetchImpl = globalThis.fetch;
+  try {
+    const { net } = require('electron');
+    if (net && typeof net.fetch === 'function') buddyFetchImpl = net.fetch;
+  } catch (error) {
+    logger.warn('net-fetch-unavailable-for-session', { error: error.message });
+  }
+
   manager = new SessionManager({
     store,
     provisioning,
@@ -506,7 +766,8 @@ function bootstrap() {
     product: 'buddy',
     deployment: 'windows',
     appDir: userData,
-    builtinSkillsDir: builtinSkillsDir()
+    builtinSkillsDir: builtinSkillsDir(),
+    fetchImpl: buddyFetchImpl
   });
   registerIpc();
   createWindow();

@@ -1,113 +1,110 @@
 <#
 .SYNOPSIS
-  Hermes Buddy 服务端部署 · Windows 侧推送脚本
+  Hermes Buddy server-side deploy - Windows push script
 
 .DESCRIPTION
-  把 Buddy 安装包携带的「服务端部署压缩包」(hermes-buddy-server-deploy.tar.gz)
-  通过系统自带 OpenSSH 的 scp 推到 Hermes 主机，再用 ssh 解压并运行其中的
-  deploy.sh 完成部署（部署两个外挂组件：8811 推理代理 + 8822 WS 通道）。
+  Pushes the server-deploy tarball to the Hermes host via scp, then runs deploy.sh remotely.
+  Auth: key-based or password-based (both optional, auto-selects).
 
-  默认用 SSH 密钥认证（-KeyPath）。若只能用口令登录，请装 PuTTY 并加 -UsePlink
-  开关（用 plink/pscp + -Password）。
-
-.PARAMETER Host
-  Hermes 主机地址（IP 或域名），必填。
+.PARAMETER HostName
+  Hermes host address (IP or hostname), required.
 
 .PARAMETER User
-  Hermes 上的登录用户名（默认 root）。
+  SSH login user (default root).
 
 .PARAMETER KeyPath
-  SSH 私钥路径（默认 ~/.ssh/id_rsa）。密钥认证时必填。
+  SSH private key path (optional). Uses key auth when provided.
 
 .PARAMETER Password
-  口令登录密码（仅 -UsePlink 时有效）。
+  SSH password (optional). Uses password auth when no KeyPath.
 
 .PARAMETER SshPort
-  SSH 端口（默认 22）。
+  SSH port (default 22).
 
 .PARAMETER Bundle
-  压缩包路径。默认自动定位：本脚本同级的 ../server-deploy/hermes-buddy-server-deploy.tar.gz
-  （即 Buddy 安装后 resources 目录里的位置）。
-
-.PARAMETER UsePlink
-  改用 PuTTY 的 plink/pscp（用于口令登录）。
-
-.EXAMPLE
-  # 密钥登录（最常见）
-  .\deploy.ps1 -Host 192.168.0.231 -User root -KeyPath ~\.ssh\id_rsa
-
-.EXAMPLE
-  # 口令登录（需 PuTTY）
-  .\deploy.ps1 -Host 192.168.0.231 -User root -Password "xxxxx" -UsePlink
+  Path to the tarball. Auto-detected by default.
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [string]$Host,
+  [string]$HostName,
 
   [string]$User = 'root',
-  [string]$KeyPath = "$env:USERPROFILE\.ssh\id_rsa",
+  [string]$KeyPath = '',
   [string]$Password = '',
   [int]$SshPort = 22,
-  [string]$Bundle = '',
-  [switch]$UsePlink
+  [string]$Bundle = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
-# ---- 定位压缩包 ----
+# ---- locate tarball ----
 if (-not $Bundle) {
   $Bundle = Join-Path $PSScriptRoot '..' 'server-deploy' 'hermes-buddy-server-deploy.tar.gz'
 }
 $Bundle = Resolve-Path $Bundle -ErrorAction SilentlyContinue
 if (-not $Bundle) {
-  Write-Error "找不到部署压缩包。请确认 Buddy 安装包携带了 server-deploy/hermes-buddy-server-deploy.tar.gz，或用 -Bundle 指定。"
+  Write-Error "Cannot find deploy tarball. Ensure server-deploy/hermes-buddy-server-deploy.tar.gz exists, or use -Bundle."
   exit 1
 }
-Write-Host "[deploy.ps1] 压缩包: $Bundle"
+Write-Host "[deploy.ps1] bundle: $Bundle"
 
 $remoteTar = '/tmp/hermes-buddy-server-deploy.tar.gz'
 $remoteDir = '/tmp/hermes-buddy-deploy'
-$remoteCmd = "mkdir -p $remoteDir && tar -xzf $remoteTar -C $remoteDir && cd $remoteDir && (command -v sudo >/dev/null 2>&1 && sudo bash deploy.sh || bash deploy.sh)"
+# Use single-quoted format string so && and || are never parsed by PowerShell
+$remoteCmd = 'mkdir -p {0} && tar -xzf {1} -C {0} && cd {0} && (command -v sudo >/dev/null 2>&1 && sudo bash deploy.sh || bash deploy.sh)' -f $remoteDir, $remoteTar
 
 function Invoke-Native {
   param([string]$FileName, [string[]]$ArgumentList)
   Write-Host "[deploy.ps1] $FileName $($ArgumentList -join ' ')"
   & $FileName @ArgumentList
   if ($LASTEXITCODE -ne 0) {
-    Write-Error "$FileName 返回非零退出码 $LASTEXITCODE"
+    Write-Error "$FileName exited with code $LASTEXITCODE"
     exit $LASTEXITCODE
   }
 }
 
-if ($UsePlink) {
-  # ---- plink / pscp 路径（口令登录） ----
-  $plink = Get-Command plink -ErrorAction SilentlyContinue
-  $pscp = Get-Command pscp -ErrorAction SilentlyContinue
-  if (-not $plink -or -not $pscp) {
-    Write-Error "未找到 plink/pscp。请安装 PuTTY 并加入 PATH，或用 -KeyPath 走 OpenSSH。"
-    exit 1
-  }
-  if (-not $Password) {
-    Write-Error "-UsePlink 需要 -Password（口令登录）。"
-    exit 1
-  }
-  Invoke-Native -FileName $pscp.Path -ArgumentList @('-pw', $Password, '-P', "$SshPort", $Bundle, "${User}@${Host}:${remoteTar}")
-  Invoke-Native -FileName $plink.Path -ArgumentList @('-pw', $Password, '-P', "$SshPort", "${User}@${Host}", $remoteCmd)
-} else {
-  # ---- OpenSSH（密钥登录） ----
+# ---- determine auth method ----
+$useKey = $KeyPath -and (Test-Path $KeyPath)
+$usePass = $Password -and (-not $useKey)
+
+if (-not $useKey -and -not $usePass) {
+  Write-Error "Provide -KeyPath (key auth) or -Password (password auth), at least one."
+  exit 1
+}
+
+if ($useKey) {
+  # ---- OpenSSH key auth ----
   $ssh = Get-Command ssh -ErrorAction SilentlyContinue
   $scp = Get-Command scp -ErrorAction SilentlyContinue
   if (-not $ssh -or -not $scp) {
-    Write-Error "未找到 ssh/scp。Windows 10+ 自带 OpenSSH；请先在「可选功能」里启用，或改用 -UsePlink。"
+    Write-Error "ssh/scp not found. Enable OpenSSH in Windows Optional Features, or use -Password with PuTTY."
     exit 1
   }
-  if (-not (Test-Path $KeyPath)) {
-    Write-Error "找不到 SSH 私钥：$KeyPath（用 -KeyPath 指定）"
-    exit 1
+  Write-Host "[deploy.ps1] auth: SSH key ($KeyPath)"
+  Invoke-Native -FileName $scp.Path -ArgumentList @('-i', $KeyPath, '-P', "$SshPort", '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', $Bundle, "${User}@${HostName}:${remoteTar}")
+  Invoke-Native -FileName $ssh.Path -ArgumentList @('-i', $KeyPath, '-p', "$SshPort", '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', "${User}@${HostName}", $remoteCmd)
+} else {
+  # ---- password auth: try PuTTY plink/pscp first ----
+  $plink = Get-Command plink -ErrorAction SilentlyContinue
+  $pscp = Get-Command pscp -ErrorAction SilentlyContinue
+  if ($plink -and $pscp) {
+    Write-Host "[deploy.ps1] auth: PuTTY password (plink/pscp)"
+    Invoke-Native -FileName $pscp.Path -ArgumentList @('-pw', $Password, '-P', "$SshPort", '-batch', $Bundle, "${User}@${HostName}:${remoteTar}")
+    Invoke-Native -FileName $plink.Path -ArgumentList @('-pw', $Password, '-P', "$SshPort", '-batch', "${User}@${HostName}", $remoteCmd)
+  } else {
+    # Fall back to OpenSSH (interactive password prompt, not unattended)
+    $ssh = Get-Command ssh -ErrorAction SilentlyContinue
+    $scp = Get-Command scp -ErrorAction SilentlyContinue
+    if (-not $ssh -or -not $scp) {
+      Write-Error "Password auth needs PuTTY (plink/pscp) or Windows OpenSSH. Neither found."
+      exit 1
+    }
+    Write-Host "[deploy.ps1] auth: OpenSSH password (interactive)"
+    Write-Host "[deploy.ps1] hint: install PuTTY for unattended password auth."
+    Invoke-Native -FileName $scp.Path -ArgumentList @('-P', "$SshPort", '-o', 'StrictHostKeyChecking=accept-new', $Bundle, "${User}@${HostName}:${remoteTar}")
+    Invoke-Native -FileName $ssh.Path -ArgumentList @('-p', "$SshPort", '-o', 'StrictHostKeyChecking=accept-new', "${User}@${HostName}", $remoteCmd)
   }
-  Invoke-Native -FileName $scp.Path -ArgumentList @('-i', $KeyPath, '-P', "$SshPort", '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', $Bundle, "${User}@${Host}:${remoteTar}")
-  Invoke-Native -FileName $ssh.Path -ArgumentList @('-i', $KeyPath, '-p', "$SshPort", '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', "${User}@${Host}", $remoteCmd)
 }
 
-Write-Host "[deploy.ps1] 完成。压缩包已推送到 $Host 并运行 deploy.sh。"
+Write-Host "[deploy.ps1] done. Tarball pushed to $HostName and deploy.sh executed."

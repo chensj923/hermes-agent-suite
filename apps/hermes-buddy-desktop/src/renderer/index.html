@@ -9,95 +9,152 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <!-- 视图 1：连接配置（WorkBuddy 风格，居中卡片） -->
+  <!-- 视图 1：连接配置（两步向导：选择部署状态 -> SSH 部署/检查 -> 连接） -->
   <section class="connect-overlay" id="view-connect">
     <div class="connect-card">
-      <div class="connect-brand">
-        <span class="logo" aria-hidden="true">H</span>
-        <div>
-          <div class="brand-name">连接 Hermes</div>
-          <div class="brand-sub">输入主机地址和 API Key，让 Hermes 开始控制本机</div>
-        </div>
-      </div>
 
-      <form id="connect-form" autocomplete="off">
-        <fieldset class="mode-fieldset">
-          <legend>连接模式</legend>
-          <label class="mode-option"><input type="radio" name="connMode" value="local" checked>
-            <span><strong>本地模式</strong> · 本机跑 ReAct 循环，直连一个推理端点（默认，密钥可能在本机）</span></label>
-          <label class="mode-option"><input type="radio" name="connMode" value="channel">
-            <span><strong>通道模式</strong> · 决策在 Hermes 服务端外挂通道，本机只筛选+执行工具（推荐，密钥不出服务器）</span></label>
-          <small class="mode-hint" id="mode-hint-local">本地模式：填「Hermes 主机 + API Key」即可，推理端点默认指向同主机上的 Buddy 直通代理（<code>:8811</code>）。</small>
-          <small class="mode-hint" id="mode-hint-channel" hidden>通道模式：Hermes 主机上需先跑外挂通道（「生成服务端准备脚本」一键部署，监听 <code>:8822</code>）。本机只执行被命令护栏放行的工具，服务端做 LLM 决策。</small>
-        </fieldset>
-
-        <label class="connect-field">
-          <span>Hermes 主机</span>
-          <input id="field-host" name="host" placeholder="192.168.0.246" spellcheck="false" required>
-          <small>支持 IP、域名，或带端口的地址。这是 <strong>Gateway</strong> 地址（会话登记用，默认端口 22122），同时用于推导同主机上的推理端点（本地模式）或 WS 通道（通道模式）。<strong>填这一个地址 + API Key 就够了</strong>。</small>
-        </label>
-
-        <label class="connect-field">
-          <span>API Key</span>
-          <input id="field-apiKey" name="apiKey" type="password" autocomplete="new-password" required>
-          <small>服务端 ~/.hermes/.api_server_key 或 data/.env 中的 API_SERVER_KEY。</small>
-        </label>
-
-        <details class="advanced">
-          <summary>高级设置</summary>
-          <div class="advanced-body">
-            <label class="connect-field">
-              <span>Gateway 地址</span>
-              <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22122" spellcheck="false">
-            </label>
-            <label class="connect-field" id="field-llmUrl-wrap">
-              <span>推理端点（LLM）· 选填（默认留空）</span>
-              <input id="field-llmUrl" name="llmUrl" placeholder="http://192.168.0.246:8811/v1/chat/completions" spellcheck="false">
-              <small>仅<strong>本地模式</strong>需要。留空 = 用 Hermes 本机上的<strong>直通代理 :8811</strong>（推荐，由服务端准备脚本部署）。只有在你想让 Buddy 直连别的 OpenAI 兼容端点时才手填（火山方舟 Ark、DeepSeek、通义、本地 vLLM/Ollama 等）——注意此时密钥存在本机。<strong>不要填 Gateway 的 22122</strong>——那是服务端 agent 端点，会忽略本地工具、在服务器上执行命令。</small>
-            </label>
-            <label class="connect-field" id="field-channelUrl-wrap" hidden>
-              <span>通道地址（WS）· 选填（默认留空，自动推导）</span>
-              <input id="field-channelUrl" name="channelUrl" placeholder="ws://192.168.0.246:8822/api/buddy/channel" spellcheck="false">
-              <small>仅<strong>通道模式</strong>需要。留空 = 自动按 Hermes 主机推导为 <code>ws(s)://&lt;host&gt;:8822/api/buddy/channel</code>。只有当你把通道部署到了非默认端口或走了 wss 反向代理时才手填。</small>
-            </label>
-            <label class="connect-field">
-              <span>部署管理地址</span>
-              <input id="field-managementUrl" name="managementUrl" placeholder="http://192.168.0.246:8700" spellcheck="false">
-            </label>
-            <div class="row">
-              <label class="connect-field">Profile
-                <input id="field-profile" name="profile" value="buddy" spellcheck="false">
-              </label>
-              <label class="connect-field">默认模型
-                <input id="field-model" name="model" value="hermes-agent" spellcheck="false">
-              </label>
-            </div>
-            <label class="connect-field">
-              <span>工作目录</span>
-              <div class="workspace-row">
-                <input id="field-workspace" name="workspace" placeholder="D:\\work\\buddy" spellcheck="false">
-                <button class="ghost" id="btn-pick-workspace" type="button">浏览…</button>
-              </div>
-            </label>
-            <fieldset class="perm-fieldset">
-              <legend>工具权限档位</legend>
-              <label class="perm-option"><input type="radio" name="permission" value="read"><span><strong>只读</strong> · 禁止写文件、改文件、删除文件、执行命令</span></label>
-              <label class="perm-option"><input type="radio" name="permission" value="read-write" checked><span><strong>读 + 写</strong> · 可读写文件、可执行大部分命令，删除与系统级操作需要确认（推荐）</span></label>
-              <label class="perm-option"><input type="radio" name="permission" value="full"><span><strong>完全控制</strong> · 不再拦截任何命令（仅在你信任环境时使用）</span></label>
-            </fieldset>
+      <!-- 步骤 0：欢迎 / 选择是否已有 Hermes -->
+      <div id="wizard-step-0" class="wizard-step">
+        <div class="connect-brand">
+          <span class="logo" aria-hidden="true">H</span>
+          <div>
+            <div class="brand-name">连接 Hermes</div>
+            <div class="brand-sub">让 Hermes 开始控制本机</div>
           </div>
-        </details>
-
-        <button class="primary connect-submit" id="btn-connect" type="submit">连接</button>
-      </form>
-
-      <div class="connect-actions">
-        <button class="ghost" id="btn-diagnose" type="button">探测</button>
-        <button class="ghost" id="btn-bootstrap" type="button">生成服务端准备脚本</button>
+        </div>
+        <p class="wizard-intro">你的 Hermes 服务器是否已经部署完成？</p>
+        <div class="wizard-choice-grid">
+          <button class="wizard-choice-card" id="btn-choice-existing" type="button">
+            <div class="wc-icon">&#10003;</div>
+            <div class="wc-title">已部署 Hermes</div>
+            <div class="wc-desc">服务器上已有 Hermes 运行，通过 SSH 连接检查并配置</div>
+          </button>
+          <button class="wizard-choice-card" id="btn-choice-new" type="button">
+            <div class="wc-icon">+</div>
+            <div class="wc-title">全新部署</div>
+            <div class="wc-desc">服务器上还没有 Hermes，通过 SSH 一键部署外挂组件</div>
+          </button>
+        </div>
+        <div class="connect-status-line" id="connect-status" role="status"></div>
       </div>
 
-      <div class="connect-status-line" id="connect-status" role="status"></div>
-      <div class="diagnose-report" id="diagnose-report" hidden></div>
+      <!-- 步骤 1：SSH 凭据 + 部署/检查 -->
+      <div id="wizard-step-1" class="wizard-step" hidden>
+        <div class="connect-brand">
+          <span class="logo" aria-hidden="true">H</span>
+          <div>
+            <div class="brand-name" id="step1-title">连接服务器</div>
+            <div class="brand-sub" id="step1-sub">填入 SSH 信息，自动检查并配置</div>
+          </div>
+        </div>
+
+        <div class="wizard-ssh-form" id="ssh-form">
+          <label class="connect-field">
+            <span>服务器地址</span>
+            <input id="field-host" name="host" placeholder="192.168.0.231" spellcheck="false" required>
+            <small>SSH 登录地址（IP 或域名），同时作为 Hermes 主机地址。</small>
+          </label>
+
+          <div class="ssh-row">
+            <label class="connect-field">
+              <span>SSH 用户</span>
+              <input id="field-ssh-user" value="root" spellcheck="false">
+            </label>
+            <label class="connect-field">
+              <span>SSH 端口</span>
+              <input id="field-ssh-port" value="22" spellcheck="false">
+            </label>
+          </div>
+
+          <label class="connect-field">
+            <span>SSH 密码</span>
+            <input id="field-ssh-password" type="password" placeholder="留空则用密钥认证" spellcheck="false">
+            <small>与 SSH 私钥二选一。密码仅用于本次连接，不会保存。</small>
+          </label>
+
+          <label class="connect-field">
+            <span>SSH 私钥（可选）</span>
+            <div class="workspace-row">
+              <input id="field-ssh-key" placeholder="C:\Users\...\id_rsa" spellcheck="false">
+              <button class="ghost" id="btn-pick-key" type="button">浏览…</button>
+            </div>
+          </label>
+        </div>
+
+        <div class="wizard-actions">
+          <button class="ghost" id="btn-wizard-back" type="button">上一步</button>
+          <button class="primary" id="btn-wizard-action" type="button" disabled>检查并连接</button>
+        </div>
+
+        <pre class="wizard-log" id="wizard-log" hidden></pre>
+      </div>
+
+      <!-- 步骤 2：API Key + 高级设置（检查通过后） -->
+      <div id="wizard-step-2" class="wizard-step" hidden>
+        <div class="connect-brand">
+          <span class="logo" aria-hidden="true">H</span>
+          <div>
+            <div class="brand-name">连接确认</div>
+            <div class="brand-sub">服务器已就绪，确认连接参数</div>
+          </div>
+        </div>
+
+        <form id="connect-form" autocomplete="off">
+          <label class="connect-field">
+            <span>Hermes 主机</span>
+            <input id="field-host-confirm" readonly>
+            <small>从 SSH 地址自动获取</small>
+          </label>
+
+          <label class="connect-field">
+            <span>API Key</span>
+            <input id="field-apiKey" name="apiKey" type="password" autocomplete="new-password" required>
+            <small>从服务器自动获取，可手动修改。<br>服务端 ~/.hermes/.api_server_key 或 data/.env 中的 API_SERVER_KEY。</small>
+          </label>
+
+          <details class="advanced">
+            <summary>高级设置</summary>
+            <div class="advanced-body">
+              <label class="connect-field">
+                <span>Gateway 地址</span>
+                <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22122" spellcheck="false">
+              </label>
+              <label class="connect-field">
+                <span>通道地址（WS）· 选填</span>
+                <input id="field-channelUrl" name="channelUrl" placeholder="ws://192.168.0.246:8822/api/buddy/channel" spellcheck="false">
+                <small>留空 = 自动推导为 <code>ws://&lt;host&gt;:8822/api/buddy/channel</code></small>
+              </label>
+              <div class="row">
+                <label class="connect-field">Profile
+                  <input id="field-profile" name="profile" value="buddy" spellcheck="false">
+                </label>
+                <label class="connect-field">默认模型
+                  <input id="field-model" name="model" value="hermes-agent" spellcheck="false">
+                </label>
+              </div>
+              <label class="connect-field">
+                <span>工作目录</span>
+                <div class="workspace-row">
+                  <input id="field-workspace" name="workspace" placeholder="D:\\work\\buddy" spellcheck="false">
+                  <button class="ghost" id="btn-pick-workspace" type="button">浏览…</button>
+                </div>
+              </label>
+              <fieldset class="perm-fieldset">
+                <legend>工具权限档位</legend>
+                <label class="perm-option"><input type="radio" name="permission" value="read"><span><strong>只读</strong> · 禁止写入和命令执行</span></label>
+                <label class="perm-option"><input type="radio" name="permission" value="read-write" checked><span><strong>读 + 写</strong> · 可读写文件、可执行大部分命令，删除需确认（推荐）</span></label>
+                <label class="perm-option"><input type="radio" name="permission" value="full"><span><strong>完全控制</strong> · 不拦截任何命令</span></label>
+              </fieldset>
+            </div>
+          </details>
+
+          <button class="primary connect-submit" id="btn-connect" type="submit">连接 Hermes</button>
+        </form>
+
+        <div class="connect-status-line" id="connect-status-2" role="status"></div>
+        <div class="diagnose-report" id="diagnose-report" hidden></div>
+      </div>
+
     </div>
   </section>
 
@@ -227,11 +284,14 @@
           <label class="connect-field"><span>Hermes 主机</span><input id="deploy-host" placeholder="192.168.0.231" spellcheck="false"></label>
           <label class="connect-field"><span>登录用户</span><input id="deploy-user" value="root" spellcheck="false"></label>
           <label class="connect-field"><span>SSH 端口</span><input id="deploy-port" value="22" spellcheck="false"></label>
-          <label class="connect-field"><span>SSH 私钥路径</span>
+          <label class="connect-field"><span>SSH 私钥路径（可选）</span>
             <div class="workspace-row">
               <input id="deploy-key" placeholder="C:\Users\...\id_rsa" spellcheck="false">
               <button class="ghost" id="btn-deploy-keypick" type="button">浏览…</button>
             </div>
+          </label>
+          <label class="connect-field"><span>SSH 密码（可选，与私钥二选一）</span>
+            <input id="deploy-password" type="password" placeholder="留空则用私钥认证" spellcheck="false">
           </label>
         </div>
         <div class="modal-actions">

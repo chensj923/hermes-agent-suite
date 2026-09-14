@@ -1,6 +1,6 @@
 {
   "name": "@hermes/buddy-desktop",
-  "version": "2.3.10",
+  "version": "3.0.0",
   "description": "Windows desktop client and guided provisioning for Hermes Buddy",
   "author": "Hermes Agent Suite",
   "main": "src/main.js",
@@ -14,7 +14,8 @@
   "dependencies": {
     "@hermes/connection": "*",
     "@hermes/provisioning": "*",
-    "@hermes/capability-registry": "*"
+    "@hermes/capability-registry": "*",
+    "ssh2": "^1.16.0"
   },
   "devDependencies": {
     "electron": "35.7.5",
@@ -62,7 +63,9 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Hermes Buddy"
+      "shortcutName": "Hermes Buddy",
+      "deleteAppDataOnUninstall": true,
+      "include": "build/installer.nsh"
     },
     "publish": [
       {

@@ -25,12 +25,15 @@ import json
 import os
 import re
 import struct
+import socket
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+CHANNEL_VERSION = "1.1"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -620,7 +623,13 @@ class WSConnection:
             frame, self.buf = decode_frame(self.buf)
             if frame is not None:
                 return frame
-            chunk = self.sock.recv(65536)
+            try:
+                chunk = self.sock.recv(65536)
+            except socket.timeout:
+                # 超时不算断开，继续等下一轮 recv
+                continue
+            except (OSError, ConnectionError):
+                return None
             if not chunk:
                 return None
             self.buf += chunk
@@ -688,6 +697,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path in ("/health", "/healthz", "/"):
             self._send(200, {"ok": True, "service": "hermes-buddy-channel",
+                             "version": CHANNEL_VERSION,
                              "upstream_base": STATE["base"], "upstream_model": STATE["model"],
                              "mock": MOCK_LLM, "sessions": len(SESSIONS)})
             return
@@ -696,15 +706,20 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": {"message": "not found: " + path}})
 
     def upgrade_ws(self):
-        # 鉴权
+        # 鉴权：支持 Authorization: Bearer header 或 ?token= query string
         token = expected_token()
-        qs = {}
-        if "?" in self.path:
+        # 1. 先从 Authorization header 取
+        client_token = ""
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            client_token = auth_header[7:].strip()
+        # 2. 再从 query string 取（header 优先）
+        if not client_token and "?" in self.path:
             from urllib.parse import parse_qs
             qs = parse_qs(self.path.split("?", 1)[1])
-        client_token = (qs.get("token", [""])[0] or "").strip()
+            client_token = (qs.get("token", [""])[0] or "").strip()
         if token and client_token != token:
-            self._send(401, {"error": {"message": "unauthorized: 需要 Hermes 的 API Key（?token=）"}})
+            self._send(401, {"error": {"message": "unauthorized: 需要 Hermes 的 API Key（Authorization: Bearer 或 ?token=）"}})
             return
         key = self.headers.get("Sec-WebSocket-Key", "")
         if not key:
@@ -720,10 +735,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
         except Exception:
             pass
+        # 关键：阻止 BaseHTTPRequestHandler 在 do_GET 返回后继续循环读下一个请求
+        self.close_connection = True
         # 把底层 socket 交给 WSConnection（关掉 BufferedWriter 的缓冲）
         raw = self.connection
         try:
-            raw.settimeout(0.5)
+            raw.settimeout(5.0)
         except Exception:
             pass
         conn = WSConnection(raw, self.client_address)

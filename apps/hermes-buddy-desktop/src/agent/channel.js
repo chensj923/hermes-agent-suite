@@ -76,13 +76,21 @@ class ChannelClient {
     this.pendingTask = null;   // 当前 user_message 的 { resolve, reject }
     this.fragmentOpcode = null;
     this.fragmentBuf = Buffer.alloc(0);
+    this._toolInFlight = false;   // 是否有本地工具正在执行（用于断线安全判断）
   }
 
   connect() {
     if (this.connected || this.openPromise) return this.openPromise || Promise.resolve();
     const u = new URL(/^wss?:\/\//i.test(this.url) ? this.url : `ws://${this.url}`);
     const key = crypto.randomBytes(16).toString('base64');
-    const path = (u.pathname || '/') + u.search;
+    // 同时用 Authorization header 和 ?token= query string 传递 API Key，
+    // 兼容服务端两种鉴权方式。
+    let path = (u.pathname || '/');
+    if (this.token) {
+      const sep = path.includes('?') ? '&' : '?';
+      path += `${sep}token=${encodeURIComponent(this.token)}`;
+    }
+    if (u.search) path += (path.includes('?') ? '&' : '?') + u.search.slice(1);
     const headers = {
       Connection: 'Upgrade',
       Upgrade: 'websocket',
@@ -96,22 +104,42 @@ class ChannelClient {
         port: u.port || (u.protocol === 'wss:' ? 443 : 80),
         path,
         headers,
+        timeout: 10000,  // 10 秒内没收到 upgrade 就快速失败，不卡死
       });
       let settled = false;
-      const fail = (err) => { if (!settled) { settled = true; reject(err); } };
+      const fail = (err) => { if (!settled) { settled = true; req.destroy(); reject(err); } };
+      // HTTP 请求级超时：旧版服务端可能不回 upgrade 也不回 response
+      req.on('timeout', () => {
+        if (!settled) { settled = true; req.destroy(); reject(new Error('通道连接超时（10 秒内服务端未响应 WS 升级请求，可能服务端是旧版或端口不对）')); }
+      });
       req.on('upgrade', (res, socket) => {
-        const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64');
-        if (res.headers['sec-websocket-accept'] !== accept) {
-          return fail(new Error('WS 握手校验失败（Sec-WebSocket-Accept 不匹配）'));
+        // 关键：这里是事件回调，抛出的异常不会进 Promise 的 try/catch，
+        // 会让 openPromise 永久悬挂（表现为"连接超时"而不是真实错误）。
+        // 所以整个初始化过程必须包 try/catch，任何异常都要走 fail()。
+        try {
+          const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64');
+          if (res.headers['sec-websocket-accept'] !== accept) {
+            return fail(new Error('WS 握手校验失败（Sec-WebSocket-Accept 不匹配）'));
+          }
+          this.socket = socket;
+          this.connected = true;
+          socket.on('data', (chunk) => this._onData(chunk));
+          socket.on('close', () => this._onClose());
+          socket.on('error', (e) => { this.logger.warn('channel-socket-error', { error: e.message }); this._onClose(); });
+          // TCP keep-alive: 防止空闲时 socket 被中间设备关闭
+          try { socket.setKeepAlive(true, 5000); } catch (_) {}
+          // WS 层心跳：每 25 秒发一个 ping，防止 NAT/代理把长连接当空闲连接掐掉
+          this._startHeartbeat();
+          this.send({ type: 'hello', client: 'buddy', version: '1', capabilities: ['tool_execute'] });
+          // welcome 到达时 resolve（由 _onMessage 触发）
+          this._resolveOpen = () => { if (!settled) { settled = true; resolve(); } };
+          // 超时兜底：8 秒内没收到 welcome 就报错
+          setTimeout(() => { if (!settled) { settled = true; reject(new Error('通道握手超时（8 秒内未收到 welcome）')); } }, 8000);
+        } catch (error) {
+          this.logger.error('channel-upgrade-init-failed', { error: error.message });
+          try { socket.destroy(); } catch (_) {}
+          fail(new Error(`通道握手后初始化失败：${error.message}`));
         }
-        this.socket = socket;
-        this.connected = true;
-        socket.on('data', (chunk) => this._onData(chunk));
-        socket.on('close', () => this._onClose());
-        socket.on('error', (e) => { this.logger.warn('channel-socket-error', { error: e.message }); this._onClose(); });
-        this.send({ type: 'hello', client: 'buddy', version: '1', capabilities: ['tool_execute'] });
-        // welcome 到达时 resolve（由 _onMessage 触发）
-        this._resolveOpen = () => { if (!settled) { settled = true; resolve(); } };
       });
       req.on('response', (res) => {
         fail(new Error(`通道握手被拒绝：HTTP ${res.statusCode}`));
@@ -174,6 +202,7 @@ class ChannelClient {
     const tool = msg.tool;
     const params = msg.params || {};
     this.emit({ type: 'tool_start', id, name: tool, args: params });
+    this._toolInFlight = true;
     const started = Date.now();
     let pendingOutput = '';
     let timer = null;
@@ -209,6 +238,8 @@ class ChannelClient {
       const message = (error && error.message) || String(error);
       this.emit({ type: 'tool_result', id, name: tool, ok: false, text: `执行失败: ${message}` });
       this.send({ type: 'tool_result', id, ok: false, text: `执行失败: ${message}` });
+    } finally {
+      this._toolInFlight = false;
     }
   }
 
@@ -222,11 +253,31 @@ class ChannelClient {
     try { this.socket.write(maskFrame(opcode, payload)); } catch (_) {}
   }
 
-  /** 发一条用户消息，返回任务结束后的结果（task_done）。 */
-  async sendMessage(text, history) {
+  /** 发一条用户消息，返回任务结束后的结果（task_done）。
+   *  opts.timeoutMs：整条消息的最长等待（默认 10 分钟），超时按"连接超时"处理，
+   *  便于上层触发自动重连而不是无限卡死。 */
+  async sendMessage(text, history, opts = {}) {
     await this.connect();
+    const timeoutMs = (opts && typeof opts.timeoutMs === 'number') ? opts.timeoutMs : 10 * 60 * 1000;
     return new Promise((resolve, reject) => {
-      this.pendingTask = { resolve, reject };
+      let settled = false;
+      let timer = null;
+      const finish = (fn) => (arg) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        this.pendingTask = null;
+        fn(arg);
+      };
+      this.pendingTask = { resolve: finish(resolve), reject: finish(reject) };
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          this.pendingTask = null;
+          reject(new Error('通道连接超时（服务端 10 分钟无响应）'));
+        }, timeoutMs);
+      }
       this.send({ type: 'user_message', session: this.sessionId, text: String(text || ''), history: history || [] });
     });
   }
@@ -235,11 +286,43 @@ class ChannelClient {
     this.send({ type: 'cancel' });
   }
 
+  /**
+   * WS 层心跳：每 25 秒发一个 ping 帧，防止 NAT/代理把长连接当空闲连接掐掉。
+   * 间隔必须小于常见的 60 秒 idle timeout。
+   */
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    this._heartbeat = setInterval(() => {
+      if (this.closed || !this.connected) { this._stopHeartbeat(); return; }
+      this._sendFrame(0x9, Buffer.alloc(0));   // ping
+    }, 25000);
+    // 心跳不该阻止进程退出
+    if (typeof this._heartbeat.unref === 'function') this._heartbeat.unref();
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeat) {
+      clearInterval(this._heartbeat);
+      this._heartbeat = null;
+    }
+  }
+
   _onClose() {
     if (this.closed) return;
     this.closed = true;
     this.connected = false;
-    if (this.pendingTask) { const p = this.pendingTask; this.pendingTask = null; p.reject(new Error('通道连接已断开')); }
+    this.openPromise = null;   // 关键：置空后下一次 connect() 才会真正重建握手，而非复用已死的旧 promise
+    this._stopHeartbeat();
+    this.logger.warn('channel-closed', { hadPending: !!this.pendingTask, toolInFlight: this._toolInFlight });
+    if (this.pendingTask) {
+      const p = this.pendingTask;
+      this.pendingTask = null;
+      // 工具执行中途断开时不建议自动重发（会重复执行命令），用特定文案提示手动重试。
+      const msg = this._toolInFlight
+        ? '通道连接已断开（工具执行中中断，请手动重试以避免重复执行）'
+        : '通道连接已断开';
+      p.reject(new Error(msg));
+    }
     if (this._resolveOpen) this._resolveOpen();
   }
 

@@ -86,6 +86,7 @@ const api = {
   exportDeployBundle: () => invoke('buddy:export-deploy-bundle'),
   pickSshKey: () => invoke('buddy:deploy-keypick'),
   deployToServer: (opts) => invoke('buddy:deploy-to-server', opts || {}),
+  sshCheck: (opts) => invoke('buddy:ssh-check', opts || {}),
   onDeployProgress: (handler) => subscribe('buddy:deploy:progress', handler),
 
   // ---- 其它 ----

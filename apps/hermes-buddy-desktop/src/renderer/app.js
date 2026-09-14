@@ -10,29 +10,36 @@ const api = window.buddyApi || window.hermesBuddy;
 const $ = (id) => document.getElementById(id);
 
 const el = {
-  // 连接页
+  // 连接向导
   viewConnect: $('view-connect'),
+  step0: $('wizard-step-0'),
+  step1: $('wizard-step-1'),
+  step2: $('wizard-step-2'),
   connectForm: $('connect-form'),
   fieldHost: $('field-host'),
-  fieldBaseUrl: $('field-baseUrl'),
-  fieldManagementUrl: $('field-managementUrl'),
-  fieldLlmUrl: $('field-llmUrl'),
+  fieldHostConfirm: $('field-host-confirm'),
   fieldApiKey: $('field-apiKey'),
+  fieldSshUser: $('field-ssh-user'),
+  fieldSshPort: $('field-ssh-port'),
+  fieldSshPassword: $('field-ssh-password'),
+  fieldSshKey: $('field-ssh-key'),
+  fieldBaseUrl: $('field-baseUrl'),
   fieldProfile: $('field-profile'),
   fieldModel: $('field-model'),
   fieldWorkspace: $('field-workspace'),
   fieldChannelUrl: $('field-channelUrl'),
-  fieldLlmUrlWrap: $('field-llmUrl-wrap'),
-  fieldChannelUrlWrap: $('field-channelUrl-wrap'),
-  modeHintLocal: $('mode-hint-local'),
-  modeHintChannel: $('mode-hint-channel'),
+  btnChoiceExisting: $('btn-choice-existing'),
+  btnChoiceNew: $('btn-choice-new'),
+  btnWizardBack: $('btn-wizard-back'),
+  btnWizardAction: $('btn-wizard-action'),
+  btnPickKey: $('btn-pick-key'),
   btnPickWorkspace: $('btn-pick-workspace'),
   btnConnect: $('btn-connect'),
+  wizardLog: $('wizard-log'),
   connectStatus: $('connect-status'),
-
-  // 诊断 + 服务端脚本
-  btnDiagnose: $('btn-diagnose'),
-  btnBootstrap: $('btn-bootstrap'),
+  connectStatus2: $('connect-status-2'),
+  step1Title: $('step1-title'),
+  step1Sub: $('step1-sub'),
   diagnoseReport: $('diagnose-report'),
 
   // 主应用
@@ -101,6 +108,7 @@ const el = {
   deployUser: $('deploy-user'),
   deployPort: $('deploy-port'),
   deployKey: $('deploy-key'),
+  deployPassword: $('deploy-password'),
   btnDeployKeypick: $('btn-deploy-keypick'),
   btnDeployServer: $('btn-deploy-server'),
   deployOutput: $('deploy-output'),
@@ -114,6 +122,10 @@ const state = {
   pendingBubble: null,
   pendingTools: new Map(),     // tool_call_id → 卡片 DOM
   currentView: 'connect',
+  wizardMode: null,
+  wizardStep: 0,
+  sshHost: '',
+  sshResult: null,
   settingsTab: 'persona',
   bannerActionUrl: null,
   bannerActionClick: null,
@@ -166,91 +178,216 @@ function showView(name) {
   else if (name === 'chat') el.input.focus();
 }
 
-// ============================================================ 连接流程
+// ============================================================ 连接向导
 
 function setConnectStatus(text, tone = 'info') {
-  el.connectStatus.textContent = text;
-  el.connectStatus.dataset.tone = tone;
+  if (el.connectStatus) { el.connectStatus.textContent = text; el.connectStatus.dataset.tone = tone; }
+  if (el.connectStatus2) { el.connectStatus2.textContent = text; el.connectStatus2.dataset.tone = tone; }
 }
 
-/** 从「主机」输入自动推导三个端点，支持 IP、域名、host:port 或完整 URL。 */
-function deriveEndpoints(hostValue) {
-  const raw = String(hostValue || '').trim();
-  if (!raw) return null;
+function setWizardLog(text) {
+  if (!el.wizardLog) return;
+  el.wizardLog.textContent = (el.wizardLog.textContent || '') + text;
+  el.wizardLog.hidden = false;
+  el.wizardLog.scrollTop = el.wizardLog.scrollHeight;
+}
 
-  // 推理端点默认指向同主机上的 Buddy 直通代理（8811，由「服务端准备脚本」部署）。
-  // 它不是 Gateway 的 22122 —— 那是服务端 agent 端点，会忽略 tools 并在服务器上执行命令（已实测）。
-  // 这样用户只填「Hermes 主机 + API Key」就能连，上游供应商由服务端持有，密钥不出服务器。
-  const llmFor = (h) => `http://${h}:8811/v1/chat/completions`;
+function clearWizardLog() {
+  if (!el.wizardLog) return;
+  el.wizardLog.textContent = '';
+  el.wizardLog.hidden = true;
+}
 
+function showWizardStep(step) {
+  state.wizardStep = step;
+  el.step0.hidden = step !== 0;
+  el.step1.hidden = step !== 1;
+  el.step2.hidden = step !== 2;
+  clearWizardLog();
+}
+
+function deriveBaseUrl(host) {
+  const raw = String(host || '').trim();
+  if (!raw) return '';
   if (/^https?:\/\//i.test(raw)) {
     const url = new URL(raw);
-    const host = url.hostname;
-    return {
-      host,
-      llmUrl: llmFor(host),
-      baseUrl: `http://${host}:${url.port || '22122'}`,
-      managementUrl: ''
-    };
+    return 'http://' + url.hostname + ':' + (url.port || '22122');
   }
-
   const m = raw.match(/^([^:]+)(?::(\d+))?$/);
-  if (!m) return null;
-  const host = m[1];
-  return {
-    host,
-    llmUrl: llmFor(host),
-    baseUrl: `http://${host}:${m[2] || '22122'}`,
-    managementUrl: ''
-  };
+  if (!m) return '';
+  return 'http://' + m[1] + ':' + (m[2] || '22122');
 }
 
-function hostFromConnection(status) {
-  // 主机框代表 Gateway，所以优先从 baseUrl 取；llmUrl 可能是外部供应商（如 Ark）。
-  const source = (status && (status.baseUrl || status.llmUrl || status.channelUrl)) || '';
-  if (!source) return '';
-  try {
-    const url = new URL(source);
-    const port = url.port || '22122';
-    return `${url.hostname}:${port}`;
-  } catch (_) {
-    return source;
-  }
-}
-
-/** 通道模式：从 Hermes 主机推导默认 WS 通道地址（同主机 :8822）。 */
 function deriveChannelUrl(hostValue) {
   const raw = String(hostValue || '').trim();
   if (!raw) return '';
   let host;
-  if (/^https?:\/\//i.test(raw)) {
-    host = new URL(raw).hostname;
-  } else {
-    const m = raw.match(/^([^:]+)(?::(\d+))?$/);
-    host = m ? m[1] : raw;
+  if (/^https?:\/\//i.test(raw)) host = new URL(raw).hostname;
+  else { const m = raw.match(/^([^:]+)(?::(\d+))?$/); host = m ? m[1] : raw; }
+  return 'ws://' + host + ':8822/api/buddy/channel';
+}
+
+function hostFromConnection(status) {
+  const source = (status && (status.baseUrl || status.llmUrl || status.channelUrl)) || '';
+  if (!source) return '';
+  try { const url = new URL(source); return url.hostname + ':' + (url.port || '22122'); } catch (_) { return source; }
+}
+
+// 步骤 0：选择按钮
+el.btnChoiceExisting.addEventListener('click', () => {
+  state.wizardMode = 'existing';
+  el.step1Title.textContent = '检查已部署的 Hermes';
+  el.step1Sub.textContent = '填入 SSH 信息，自动检查部署状态并获取 API Key';
+  el.btnWizardAction.textContent = '检查并连接';
+  showWizardStep(1);
+  el.fieldHost.focus();
+});
+
+el.btnChoiceNew.addEventListener('click', () => {
+  state.wizardMode = 'new';
+  el.step1Title.textContent = '部署 Hermes 外挂组件';
+  el.step1Sub.textContent = '填入 SSH 信息，一键部署推理代理与 WS 通道';
+  el.btnWizardAction.textContent = '部署并连接';
+  showWizardStep(1);
+  el.fieldHost.focus();
+});
+
+// SSH 输入实时校验
+function validateSshForm() {
+  const host = el.fieldHost.value.trim();
+  const key = el.fieldSshKey.value.trim();
+  const pass = el.fieldSshPassword.value.trim();
+  el.btnWizardAction.disabled = !host || (!key && !pass);
+}
+el.fieldHost.addEventListener('input', validateSshForm);
+el.fieldSshKey.addEventListener('input', validateSshForm);
+el.fieldSshPassword.addEventListener('input', validateSshForm);
+
+el.btnPickKey.addEventListener('click', async () => {
+  try {
+    const result = await api.pickSshKey();
+    if (result && result.path) { el.fieldSshKey.value = result.path; validateSshForm(); }
+  } catch (e) { setWizardLog('选择私钥失败: ' + e.message + '\n'); }
+});
+
+el.btnWizardBack.addEventListener('click', () => showWizardStep(0));
+
+let _deploySubscribed = false;
+function ensureDeploySubscribed() {
+  if (_deploySubscribed) return;
+  api.onDeployProgress(({ text }) => setWizardLog(text));
+  _deploySubscribed = true;
+}
+
+// 步骤 1 -> 2：执行 SSH 检查或部署
+el.btnWizardAction.addEventListener('click', async () => {
+  const host = el.fieldHost.value.trim();
+  const user = el.fieldSshUser.value.trim() || 'root';
+  const sshPort = Number(el.fieldSshPort.value.trim()) || 22;
+  const keyPath = el.fieldSshKey.value.trim();
+  const password = el.fieldSshPassword.value.trim();
+  if (!host) { setWizardLog('请填写服务器地址\n'); return; }
+  if (!keyPath && !password) { setWizardLog('请填 SSH 密码或私钥路径\n'); return; }
+
+  ensureDeploySubscribed();
+  el.btnWizardAction.disabled = true;
+  el.btnWizardBack.disabled = true;
+  clearWizardLog();
+
+  try {
+    if (state.wizardMode === 'existing') {
+      setWizardLog('正在通过 SSH 检查 Hermes 部署状态…\n');
+      const result = await api.sshCheck({ host, user, keyPath, password, sshPort });
+      if (!result.ok) { setWizardLog('SSH 连接失败: ' + (result.error || '未知错误') + '\n'); return; }
+      if (!result.deployed) { setWizardLog('\n服务器上尚未部署 Hermes，请返回选择全新部署。\n'); return; }
+      if (!result.apiKey) { setWizardLog('\n已部署但未找到 API Key，请手动检查服务端配置。\n'); return; }
+      state.sshHost = host;
+      state.sshResult = result;
+      el.fieldHostConfirm.value = host;
+      el.fieldApiKey.value = result.apiKey;
+      el.fieldBaseUrl.value = deriveBaseUrl(host);
+      el.fieldChannelUrl.value = deriveChannelUrl(host);
+      setWizardLog('\n检查完成！API Key: ' + result.apiKey.slice(0,4) + '****\n通道: ' + (result.channelUp ? 'OK' : '未监听') + '\n代理: ' + (result.proxyUp ? 'OK' : '未监听') + '\n');
+      showWizardStep(2);
+    } else {
+      setWizardLog('正在初始化部署包…\n');
+      const initResult = await api.deployInit({});
+      if (!initResult.ok) { setWizardLog('初始化失败: ' + initResult.error + '\n'); return; }
+      setWizardLog('正在通过 SSH 推送并部署…\n');
+      const deployResult = await api.deployToServer({ host, user, keyPath, password, sshPort });
+      if (!deployResult.ok) { setWizardLog('\n部署失败（退出码 ' + deployResult.code + '）。请检查上方日志。\n'); return; }
+      setWizardLog('\n部署完成，正在检查服务状态并获取 API Key…\n');
+      const checkResult = await api.sshCheck({ host, user, keyPath, password, sshPort });
+      if (!checkResult.ok || !checkResult.apiKey) {
+        setWizardLog('\n部署已完成但未能自动获取 API Key，请手动执行 cat ~/.hermes/.api_server_key\n');
+        state.sshHost = host;
+        el.fieldHostConfirm.value = host;
+        el.fieldBaseUrl.value = deriveBaseUrl(host);
+        el.fieldChannelUrl.value = deriveChannelUrl(host);
+        showWizardStep(2);
+        return;
+      }
+      state.sshHost = host;
+      state.sshResult = checkResult;
+      el.fieldHostConfirm.value = host;
+      el.fieldApiKey.value = checkResult.apiKey;
+      el.fieldBaseUrl.value = deriveBaseUrl(host);
+      el.fieldChannelUrl.value = deriveChannelUrl(host);
+      setWizardLog('\n部署成功！API Key: ' + checkResult.apiKey.slice(0,4) + '****\n通道: ' + (checkResult.channelUp ? 'OK' : '未监听') + '\n代理: ' + (checkResult.proxyUp ? 'OK' : '未监听') + '\n');
+      showWizardStep(2);
+    }
+  } catch (error) {
+    setWizardLog('\n操作失败: ' + error.message + '\n');
+  } finally {
+    el.btnWizardAction.disabled = false;
+    el.btnWizardBack.disabled = false;
+    validateSshForm();
   }
-  return `ws://${host}:8822/api/buddy/channel`;
-}
+});
 
-/** 切换连接模式时显隐相关字段：本地模式用 LLM 端点，通道模式用 WS 通道地址。 */
-function applyConnMode(mode) {
-  const isChannel = mode === 'channel';
-  if (el.fieldLlmUrlWrap) el.fieldLlmUrlWrap.hidden = isChannel;
-  if (el.fieldChannelUrlWrap) el.fieldChannelUrlWrap.hidden = !isChannel;
-  if (el.modeHintLocal) el.modeHintLocal.hidden = isChannel;
-  if (el.modeHintChannel) el.modeHintChannel.hidden = !isChannel;
-  // 切到通道模式时，没手填过就自动按主机推导。
-  if (isChannel && el.fieldChannelUrl && !el.fieldChannelUrl.value.trim()) {
-    const derived = deriveChannelUrl(el.fieldHost.value);
-    if (derived) el.fieldChannelUrl.placeholder = derived;
+el.btnPickWorkspace.addEventListener('click', async () => {
+  try {
+    const result = await api.pickWorkspace();
+    if (result && result.root) el.fieldWorkspace.value = result.root;
+  } catch (e) { setConnectStatus('无法选择目录: ' + e.message, 'error'); }
+});
+
+el.connectForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const host = el.fieldHostConfirm.value.trim() || state.sshHost;
+  const apiKey = el.fieldApiKey.value.trim();
+  if (!host || !apiKey) { setConnectStatus('缺少主机地址或 API Key', 'error'); return; }
+  const channelUrl = el.fieldChannelUrl.value.trim() || deriveChannelUrl(host);
+  const baseUrl = el.fieldBaseUrl.value.trim() || deriveBaseUrl(host);
+  const payload = {
+    mode: 'channel',
+    llmUrl: '',
+    channelUrl,
+    baseUrl,
+    managementUrl: '',
+    apiKey,
+    profile: el.fieldProfile.value.trim() || 'buddy',
+    model: el.fieldModel.value.trim() || 'hermes-agent',
+    workspace: el.fieldWorkspace.value.trim(),
+    permission: el.connectForm.querySelector('input[name="permission"]:checked').value
+  };
+  el.btnConnect.disabled = true;
+  setConnectStatus('正在连接 Hermes…');
+  try {
+    const result = await api.connect(payload);
+    setConnectStatus('连接成功，正在进入主界面…', 'ok');
+    el.fieldApiKey.value = '';
+    const status = { ...(result.connection || {}), ready: true, connected: Boolean(result.session), workspace: payload.workspace };
+    await enterChat(status);
+    if (result.endpointNotice) renderNotice({ message: result.endpointNotice });
+    if (result.gatewayWarning) renderNotice({ message: 'Gateway 未就绪（' + result.gatewayWarning + '），聊天和本机工具不受影响。' });
+  } catch (error) {
+    setConnectStatus(error.message || '连接失败', 'error');
+    setStatusDot('error');
+  } finally {
+    el.btnConnect.disabled = false;
   }
-}
-
-function currentConnMode() {
-  const radio = el.connectForm.querySelector('input[name="connMode"]:checked');
-  return (radio && radio.value) || 'local';
-}
-
+});
 // ============================================================ 聊天渲染
 
 function scrollToEnd() { el.chatLog.scrollTop = el.chatLog.scrollHeight; }
@@ -670,326 +807,6 @@ async function enterChat(status) {
   // 启动 8 秒后静默探测一次更新；有新版本会自动后台下载，不打断当前使用。
   setTimeout(() => { autoCheckUpdate(); }, 8000);
 }
-
-// ============================================================ 连接表单提交
-
-el.connectForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const host = el.fieldHost.value.trim();
-  const derived = deriveEndpoints(host);
-  if (!derived) {
-    setConnectStatus('请输入有效的 Hermes 主机地址（IP、域名或 http://...）', 'error');
-    el.fieldHost.focus();
-    return;
-  }
-
-  // 推理端点默认留空 = 用 Hermes 本机上的直通代理（8811，由「服务端准备脚本」部署）。
-  // 只有想直连别的 OpenAI 兼容端点时才需要手填（高级用法，密钥会存在本机）。
-  const mode = currentConnMode();
-  const llmUrl = mode === 'local' ? (el.fieldLlmUrl.value.trim() || derived.llmUrl) : '';
-  const channelUrl = mode === 'channel'
-    ? (el.fieldChannelUrl.value.trim() || deriveChannelUrl(host))
-    : '';
-
-  const payload = {
-    mode,
-    llmUrl,
-    channelUrl,
-    baseUrl: el.fieldBaseUrl.value.trim() || derived.baseUrl,
-    managementUrl: el.fieldManagementUrl.value.trim() || derived.managementUrl,
-    apiKey: el.fieldApiKey.value,
-    profile: el.fieldProfile.value.trim() || 'buddy',
-    model: el.fieldModel.value.trim() || 'hermes-agent',
-    workspace: el.fieldWorkspace.value.trim(),
-    permission: el.connectForm.querySelector('input[name="permission"]:checked').value
-  };
-
-  el.btnConnect.disabled = true;
-  setConnectStatus('正在连接 Hermes…');
-  try {
-    const result = await api.connect(payload);
-    setConnectStatus('连接成功，正在进入主界面…', 'ok');
-    el.fieldApiKey.value = '';
-    const status = {
-      ...(result.connection || {}),
-      ready: true,
-      connected: Boolean(result.session),
-      workspace: payload.workspace
-    };
-    await enterChat(status);
-    // 推理端点被自动纠正（agent 端点 → 纯推理端点）时，明确告诉用户切到了哪里。
-    if (result.endpointNotice) {
-      renderNotice({ message: result.endpointNotice });
-    }
-    // Gateway 未连通只降级，不再弹报错横幅；在主界面留个一次性系统提示即可。
-    if (result.gatewayWarning) {
-      renderNotice({ message: `Gateway 未就绪（${result.gatewayWarning}），聊天和本机工具不受影响。` });
-    }
-  } catch (error) {
-    setConnectStatus(error.message || '连接失败', 'error');
-    setStatusDot('error');
-  } finally {
-    el.btnConnect.disabled = false;
-  }
-});
-
-// 模式切换：本地/通道互斥，显隐对应字段并自动推导通道地址。
-el.connectForm.querySelectorAll('input[name="connMode"]').forEach((radio) => {
-  radio.addEventListener('change', () => applyConnMode(radio.value));
-});
-// 通道模式下，用户输入主机时实时更新默认通道地址（未手填时）。
-el.fieldHost.addEventListener('input', () => {
-  if (currentConnMode() === 'channel' && el.fieldChannelUrl && !el.fieldChannelUrl.value.trim()) {
-    const derived = deriveChannelUrl(el.fieldHost.value);
-    if (derived) el.fieldChannelUrl.placeholder = derived;
-  }
-});
-
-el.btnPickWorkspace.addEventListener('click', async () => {
-  try {
-    const result = await api.pickWorkspace();
-    if (result && result.root) {
-      el.fieldWorkspace.value = result.root;
-      setConnectStatus(`已选择工作目录：${result.root}`);
-    }
-  } catch (error) {
-    setConnectStatus(`无法选择目录：${error.message}`, 'error');
-  }
-});
-
-// ============================================================ 诊断 + 服务端脚本
-
-function diagnosePayload() {
-  // 提取用户在表单里填的三个端点。诊断时 Key 不下发，所以不传。
-  const derived = deriveEndpoints(el.fieldHost.value);
-  const mode = currentConnMode();
-  // 通道模式下本机不连 LLM，跳过推理端点探测（只验证 Gateway / 通道可达性）。
-  const llmUrl = mode === 'channel' ? '' : (el.fieldLlmUrl.value.trim() || (derived && derived.llmUrl));
-  return {
-    mode,
-    llmUrl,
-    gatewayBaseUrl: el.fieldBaseUrl.value.trim() || (derived && derived.baseUrl),
-    managementUrl: el.fieldManagementUrl.value.trim() || (derived && derived.managementUrl)
-  };
-}
-
-function renderDiagnose(report) {
-  if (!report || !Array.isArray(report.results)) {
-    el.diagnoseReport.hidden = true;
-    return;
-  }
-  el.diagnoseReport.hidden = false;
-  el.diagnoseReport.innerHTML = '';
-
-  const title = document.createElement('div');
-  title.className = 'dr-title';
-  title.textContent = report.ok
-    ? '探测通过：Hermes 推理端点可达，可以连接。'
-    : '探测失败：推理端点（LLM）不可达，Buddy 无法工作。';
-  el.diagnoseReport.appendChild(title);
-
-  const list = document.createElement('ul');
-  for (const r of report.results) {
-    const li = document.createElement('li');
-    li.dataset.state = r.reason;
-    const key = document.createElement('div');
-    key.className = 'dr-key';
-    key.textContent = r.label;
-    const detail = document.createElement('div');
-    const reason = document.createElement('div');
-    reason.className = 'dr-reason';
-    reason.textContent = `${r.userMessage}${r.value ? ' · ' + r.value : ''}`;
-    detail.appendChild(reason);
-    li.appendChild(key);
-    li.appendChild(detail);
-    list.appendChild(li);
-  }
-  el.diagnoseReport.appendChild(list);
-
-  if (report.blocking && report.blocking.actionHint === 'bootstrap_server') {
-    const hint = document.createElement('div');
-    hint.className = 'dr-summary';
-    hint.textContent = '提示：点「生成服务端准备脚本」，复制到 Hermes 主机执行后再试。';
-    el.diagnoseReport.appendChild(hint);
-  } else if (report.blocking && report.blocking.actionHint === 'verify_key') {
-    const hint = document.createElement('div');
-    hint.className = 'dr-summary';
-    hint.textContent = '提示：去服务端跑 `cat /root/.hermes/.api_server_key` 取真实 Key 再回来填。';
-    el.diagnoseReport.appendChild(hint);
-  }
-}
-
-el.btnDiagnose.addEventListener('click', async () => {
-  el.diagnoseReport.hidden = true;
-  setConnectStatus('正在探测 Hermes 三个端点…');
-  try {
-    const report = await api.diagnose(diagnosePayload());
-    renderDiagnose(report);
-    setConnectStatus(report.ok ? '诊断通过，可以进入连接步骤。' : '诊断发现阻塞项，先修服务端再连接。', report.ok ? 'ok' : 'warn');
-  } catch (error) {
-    setConnectStatus(`诊断失败：${error.message}`, 'error');
-  }
-});
-
-let lastBootstrapScript = '';
-let lastBootstrapHost = '';
-
-el.btnBootstrap.addEventListener('click', async () => {
-  const derived = deriveEndpoints(el.fieldHost.value);
-  if (!derived) {
-    setConnectStatus('先填 Hermes 主机，我才知道服务端脚本该监听哪个地址。', 'warn');
-    el.fieldHost.focus();
-    return;
-  }
-  const llmPort = portOf(derived.llmUrl) || 22122;
-  const gatewayPort = portOf(el.fieldBaseUrl.value.trim()) || 22122;
-  const managementPort = portOf(el.fieldManagementUrl.value.trim()) || 8700;
-  el.bootstrapStatus.textContent = '生成中…';
-  el.bootstrapDialog.hidden = false;
-  try {
-    const result = await api.bootstrapScript({ host: derived.host, llmPort, gatewayPort, managementPort });
-    lastBootstrapScript = result.script;
-    lastBootstrapHost = derived.host;
-    el.bootstrapScript.textContent = result.script;
-    el.bootstrapStatus.textContent = '脚本就绪。建议 SSH 到 Hermes 主机粘贴执行。';
-  } catch (error) {
-    el.bootstrapScript.textContent = '';
-    el.bootstrapStatus.textContent = `生成失败：${error.message}`;
-  }
-});
-
-function portOf(url) {
-  const m = String(url || '').match(/:(\d{1,5})(?:\/|$)/);
-  return m ? Number(m[1]) : 0;
-}
-
-el.bootstrapCopy.addEventListener('click', async () => {
-  if (!lastBootstrapScript) return;
-  try {
-    await navigator.clipboard.writeText(lastBootstrapScript);
-    el.bootstrapStatus.textContent = '已复制到剪贴板。';
-  } catch (error) {
-    el.bootstrapStatus.textContent = `复制失败：${error.message}`;
-  }
-});
-
-el.bootstrapExport.addEventListener('click', async () => {
-  if (!lastBootstrapScript) return;
-  try {
-    const result = await api.exportBootstrap({ script: lastBootstrapScript, host: lastBootstrapHost });
-    el.bootstrapStatus.textContent = `已导出到：${result.path}`;
-  } catch (error) {
-    el.bootstrapStatus.textContent = `导出失败：${error.message}`;
-  }
-});
-
-// ---- 首次打开弹窗时自动初始化部署包（从安装包提取到 userData/server-deploy/） ----
-let deployInitialized = false;
-async function ensureDeployInit() {
-  if (deployInitialized) return;
-  try {
-    const result = await api.deployInit({});
-    if (result.ok) {
-      deployInitialized = true;
-      el.bootstrapStatus.textContent = result.cached
-        ? '部署包已就绪（已从安装包提取到本地）。'
-        : '部署包已初始化（从安装包提取到本地）。';
-    } else {
-      el.bootstrapStatus.textContent = `初始化失败：${result.error}`;
-    }
-  } catch (error) {
-    el.bootstrapStatus.textContent = `初始化异常：${error.message}`;
-  }
-}
-
-// 打开弹窗时自动跑一次初始化
-el.btnBootstrap.addEventListener('click', () => { ensureDeployInit(); }, true); // capture 阶段先跑
-
-el.btnDeployInit.addEventListener('click', async () => {
-  deployInitialized = false;
-  el.bootstrapStatus.textContent = '正在从安装包提取部署文件…';
-  try {
-    const result = await api.deployInit({ force: true });
-    if (result.ok) {
-      deployInitialized = true;
-      el.bootstrapStatus.textContent = `重新初始化完成。文件在：${result.dir}`;
-    } else {
-      el.bootstrapStatus.textContent = `初始化失败：${result.error}`;
-    }
-  } catch (error) {
-    el.bootstrapStatus.textContent = `初始化异常：${error.message}`;
-  }
-});
-
-el.bootstrapClose.addEventListener('click', () => {
-  el.bootstrapDialog.hidden = true;
-});
-
-// ---- 服务端部署压缩包 ----
-el.btnExportBundle.addEventListener('click', async () => {
-  try {
-    const result = await api.exportDeployBundle();
-    if (result.error) {
-      el.bootstrapStatus.textContent = `导出失败：${result.error}`;
-    } else {
-      el.bootstrapStatus.textContent = `已导出部署包到：${result.path}`;
-    }
-  } catch (error) {
-    el.bootstrapStatus.textContent = `导出失败：${error.message}`;
-  }
-});
-
-el.btnDeployToggle.addEventListener('click', () => {
-  const hidden = el.deployPanel.hidden;
-  el.deployPanel.hidden = !hidden;
-  el.btnDeployToggle.setAttribute('aria-expanded', String(hidden));
-  el.btnDeployToggle.textContent = hidden ? '部署到服务器 ▴' : '部署到服务器 ▾';
-});
-
-el.btnDeployKeypick.addEventListener('click', async () => {
-  try {
-    const result = await api.pickSshKey();
-    if (result && result.path) el.deployKey.value = result.path;
-  } catch (error) {
-    el.bootstrapStatus.textContent = `选择私钥失败：${error.message}`;
-  }
-});
-
-let deploySubscribed = false;
-el.btnDeployServer.addEventListener('click', async () => {
-  const host = el.deployHost.value.trim();
-  if (!host) { el.bootstrapStatus.textContent = '请先填 Hermes 主机。'; el.deployHost.focus(); return; }
-  const keyPath = el.deployKey.value.trim();
-  if (!keyPath) { el.bootstrapStatus.textContent = '请先选 SSH 私钥（deploy.ps1 用密钥登录）。'; return; }
-
-  el.deployOutput.textContent = '';
-  el.btnDeployServer.disabled = true;
-  el.bootstrapStatus.textContent = '正在推送并部署…';
-  if (!deploySubscribed) {
-    api.onDeployProgress(({ text }) => {
-      el.deployOutput.textContent += text;
-      el.deployOutput.scrollTop = el.deployOutput.scrollHeight;
-    });
-    deploySubscribed = true;
-  }
-  try {
-    const result = await api.deployToServer({
-      host,
-      user: el.deployUser.value.trim() || 'root',
-      keyPath,
-      sshPort: Number(el.deployPort.value.trim()) || 22,
-    });
-    if (result.ok) {
-      el.bootstrapStatus.textContent = '部署完成：8811 推理代理 + 8822 WS 通道 已部署到 ' + host + '。';
-    } else {
-      el.bootstrapStatus.textContent = `部署失败（退出码 ${result.code}）。看上方输出排查，或改用「导出部署包」手动拷到 Hermes 跑 deploy.sh。`;
-    }
-  } catch (error) {
-    el.bootstrapStatus.textContent = `部署异常：${error.message}`;
-  } finally {
-    el.btnDeployServer.disabled = false;
-  }
-});
 
 // ============================================================ 聊天交互
 
@@ -1564,27 +1381,11 @@ el.modelSelect.addEventListener('change', () => {
   applyStatus(status);
   if (!status.configured) {
     showView('connect');
-    setConnectStatus('填写 Hermes 主机地址与 API Key 完成首次配置。');
+    showWizardStep(0);
     return;
   }
 
-  // 已配置：回填字段
-  if (status.baseUrl || status.llmUrl || status.channelUrl) el.fieldHost.value = hostFromConnection(status);
-  if (status.mode === 'channel') {
-    const modeRadio = el.connectForm.querySelector('input[name="connMode"][value="channel"]');
-    if (modeRadio) modeRadio.checked = true;
-  }
-  if (status.llmUrl) el.fieldLlmUrl.value = status.llmUrl;
-  if (status.channelUrl) el.fieldChannelUrl.value = status.channelUrl;
-  if (status.baseUrl) el.fieldBaseUrl.value = status.baseUrl;
-  if (status.managementUrl) el.fieldManagementUrl.value = status.managementUrl;
-  if (status.profile) el.fieldProfile.value = status.profile;
-  if (status.model) el.fieldModel.value = status.model;
-  if (status.workspace) el.fieldWorkspace.value = status.workspace;
-  const permRadio = el.connectForm.querySelector(`input[name="permission"][value="${status.permission || 'read-write'}"]`);
-  if (permRadio) permRadio.checked = true;
-  applyConnMode(currentConnMode());
-
+  // 已配置：尝试恢复连接
   setStatusDot('busy');
   const resumed = await api.resume().catch((error) => ({ ok: false, message: error.message }));
   if (resumed.ok) {
@@ -1593,13 +1394,21 @@ el.modelSelect.addEventListener('change', () => {
     if (resumed.endpointNotice) {
       renderNotice({ message: resumed.endpointNotice });
     }
-    // resume 后如果 Gateway 也降级，在聊天区留一条诊断提示（不含敏感信息）
     if (resumed.gatewayWarning) {
-      renderNotice({ message: `Gateway 未就绪（${resumed.gatewayWarning}），聊天和本机工具不受影响。` });
+      renderNotice({ message: 'Gateway 未就绪（' + resumed.gatewayWarning + '），聊天和本机工具不受影响。' });
     }
   } else {
+    // 恢复失败：直接跳到步骤 2 让用户确认参数
     showView('connect');
-    setConnectStatus(`已有 Hermes 配置，但会话没能恢复：${resumed.message || '未知原因'}`, 'error');
+    showWizardStep(2);
+    if (status.baseUrl) el.fieldBaseUrl.value = status.baseUrl;
+    if (status.channelUrl) el.fieldChannelUrl.value = status.channelUrl;
+    if (status.profile) el.fieldProfile.value = status.profile;
+    if (status.model) el.fieldModel.value = status.model;
+    if (status.workspace) el.fieldWorkspace.value = status.workspace;
+    const permRadio = el.connectForm.querySelector('input[name="permission"][value="' + (status.permission || 'read-write') + '"]');
+    if (permRadio) permRadio.checked = true;
+    setConnectStatus('已有 Hermes 配置，但会话没能恢复：' + (resumed.message || '未知原因') + '。请确认参数后重新连接。', 'warn');
     setStatusDot('error');
   }
 })();
