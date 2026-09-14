@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""用 GitHub Contents API 推送 git push 的替代方案。
-逐文件 PUT，不依赖 git 网络。"""
-import base64, json, os, ssl, sys, time, urllib.request, urllib.error
+"""用 GitHub Contents API 推送 git push 的替代方案。逐文件 PUT，不依赖 git 网络。
+
+用法：
+  python push_github.py                 # 自动从 git 取待推送文件（未提交 + 最近一次提交）
+  python push_github.py path/a path/b   # 显式指定文件
+
+优先级提醒：**先试 `git -c http.sslVerify=false push gh main`**，
+本脚本只在 git 网络彻底不通时兜底（它不能删文件、不保留提交历史）。
+"""
+import base64, json, os, ssl, sys, time, urllib.request, urllib.error, subprocess
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -10,6 +17,7 @@ TOKEN = (os.environ.get("GITHUB_TOKEN") or "").strip()
 REPO = "chensj923/hermes-agent-suite"
 API = f"https://api.github.com/repos/{REPO}"
 BRANCH = "main"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def call(url, method="GET", data=None, headers=None):
     req = urllib.request.Request(url, method=method)
@@ -56,36 +64,56 @@ def push_file(local_path, repo_path):
     status, data = call(f"{API}/contents/{repo_path}", method="PUT", data=payload)
     return status, data
 
+SKIP_PREFIXES = ("node_modules/", "dist/", ".git/", ".workbuddy/")
+SKIP_SUFFIXES = (".exe", ".dll", ".pdb", ".zip", ".tar.gz", ".blockmap", ".node")
+
+
+def git(*args):
+    try:
+        out = subprocess.run(["git"] + list(args), cwd=REPO_ROOT,
+                             capture_output=True, text=True, timeout=30)
+        return out.stdout.strip()
+    except Exception:
+        return ""
+
+
+def collect_files():
+    """收集待推送文件：工作区未提交的 + 最近一次提交改动的。"""
+    names = set()
+    # 未跟踪 / 已修改（porcelain 输出去掉状态码，跳过删除 D）
+    for line in git("status", "--porcelain").splitlines():
+        if len(line) > 3 and not line.startswith("D"):
+            names.add(line[3:].strip().strip('"'))
+    # 最近一次提交改动的文件
+    for line in git("diff", "--name-only", "HEAD~1", "HEAD").splitlines():
+        if line.strip():
+            names.add(line.strip())
+
+    result = []
+    for name in sorted(names):
+        rel = name.replace("\\", "/")
+        if rel.startswith(SKIP_PREFIXES) or rel.endswith(SKIP_SUFFIXES):
+            continue
+        if not os.path.exists(os.path.join(REPO_ROOT, rel)):
+            continue
+        result.append(rel)
+    return result
+
+
 def main():
     if not TOKEN:
         print("GITHUB_TOKEN 未设置"); sys.exit(1)
 
-    # 仓库根
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    
-    # 要推送的文件列表（相对仓库根）—— v2.3.9-dev 改动（推理端点与 Gateway 解耦 + 上游端点侦察脚本）
-    files = [
-        "apps/hermes-buddy-desktop/package.json",
-        "apps/hermes-buddy-desktop/src/agent/brain.js",
-        "apps/hermes-buddy-desktop/src/session-manager.js",
-        "apps/hermes-buddy-desktop/src/connection-store.js",
-        "apps/hermes-buddy-desktop/src/server-bootstrap.js",
-        "apps/hermes-buddy-desktop/src/renderer/app.js",
-        "apps/hermes-buddy-desktop/src/renderer/index.html",
-        "apps/hermes-buddy-desktop/test/session-manager.test.js",
-        "apps/hermes-buddy-desktop/test/server-bootstrap.test.js",
-        "docs/WINDOWS_CLIENT.md",
-        "scripts/_gen_recon.js",
-        "scripts/_probe_endpoint.js",
-        "scripts/_probe_openapi.js",
-        "scripts/_probe_model_passthrough.js",
-        "scripts/_scan_ports.js",
-    ]
+    # 显式指定优先，否则自动收集
+    files = [f.replace("\\", "/") for f in sys.argv[1:]] or collect_files()
+    if not files:
+        print("没有需要推送的文件"); sys.exit(0)
+    print(f"待推送 {len(files)} 个文件")
 
     ok = 0
     fail = 0
     for f in files:
-        local = os.path.join(repo_root, f.replace("/", os.sep))
+        local = os.path.join(REPO_ROOT, f.replace("/", os.sep))
         if not os.path.exists(local):
             print(f"SKIP (not found): {f}")
             continue
