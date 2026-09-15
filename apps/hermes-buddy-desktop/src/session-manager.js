@@ -62,6 +62,7 @@ class SessionManager {
     this.skills = null;
     this.loop = null;
     this.channel = null;   // WS 工具通道客户端（通道模式）
+    this._channelOutdated = null;   // 服务端通道版本过旧的提示语（重新部署后清空）
 
     // 智能体：每个智能体独立的工作区/权限/模型，会话历史也按智能体隔离。
     try {
@@ -365,9 +366,17 @@ class SessionManager {
     try {
       await channel.connect();
     } catch (error) {
+      // 版本过旧：这不是「连不上」，而是连上了但服务端能力不够。
+      // 原样抛出，别包成「连不上 WS 通道」，否则用户会去查网络而不是重新部署。
+      if (error && error.code === 'channel_outdated') {
+        this._channelOutdated = error.message;
+        throw error;
+      }
+      this._channelOutdated = null;
       throw new Error(`连不上 WS 通道（${normalized.channelUrl}）：${error.message}`);
     }
     this.channel = channel;
+    this._channelOutdated = null;   // 版本谈妥了，清掉上一次的「需重新部署」提示
     this.brain = null;
     this.loop = null;
 
@@ -528,9 +537,16 @@ class SessionManager {
     try {
       await channel.connect();
     } catch (error) {
+      // 版本过旧是「需要重新部署」，不是网络问题，别混进 channel_error 的连不上文案。
+      if (error && error.code === 'channel_outdated') {
+        this._channelOutdated = error.message;
+        return { ok: false, reason: 'channel_outdated', message: error.message };
+      }
+      this._channelOutdated = null;
       return { ok: false, reason: 'channel_error', message: `连不上 WS 通道（${stored.channelUrl}）：${error.message}` };
     }
     this.channel = channel;
+    this._channelOutdated = null;
     this.brain = null;
     this.loop = null;
 
@@ -564,6 +580,8 @@ class SessionManager {
     this.controllers.set(id, controller);
     const emit = (event) => { if (typeof onEvent === 'function') onEvent({ requestId: id, ...event }); };
     const history = this.messages.slice(-MAX_HISTORY_MESSAGES);
+    // 通道模式也要把模型透传过去：智能体配置的模型优先，其次界面下拉选的。
+    const wantModel = this.effectiveModel(this.connection) || model || '';
 
     // 通道模式：把消息发给 WS 通道，服务端跑 Agent 循环，事件原样转发给 UI。
     // 断线自愈：若通道已死，用已存配置自动重建并重发一次，用户无需手动点「重连」。
@@ -574,11 +592,14 @@ class SessionManager {
     if (this.channel) {
       this.channel.emit = emit;
       try {
-        return await this._sendOverChannel(text, history, id);
+        return await this._sendOverChannel(text, history, id, wantModel);
       } catch (error) {
         const message = error.message || '';
         const toolInterrupted = /工具执行中中断/.test(message);
-        const connDead = /通道连接已断开|通道握手|ECONN|socket|通道错误|通道连接超时|通道握手超时/.test(message);
+        // 版本过旧不是断线，重连一万次也没用：别走进自动重连分支。
+        const outdated = (error && error.code === 'channel_outdated') || /通道版本过旧/.test(message);
+        const connDead = !outdated && /通道连接已断开|通道握手|ECONN|socket|通道错误|通道连接超时|通道握手超时/.test(message);
+        if (outdated) this._channelOutdated = message;
         if (connDead && !toolInterrupted && (this.connection || this.store)) {
           this.logger.warn('channel-dropped-auto-reconnect', { message });
           try { if (this.channel) this.channel.close(); } catch (_) {}
@@ -592,7 +613,7 @@ class SessionManager {
           }
           this.channel.emit = emit;
           try {
-            return await this._sendOverChannel(text, history, id);
+            return await this._sendOverChannel(text, history, id, wantModel);
           } catch (e2) {
             this.channel = null;
             const m2 = e2.message || '通道连接已断开';
@@ -609,7 +630,7 @@ class SessionManager {
       try {
         await this._ensureChannel();
         this.channel.emit = emit;
-        const out = await this._sendOverChannel(text, history, id);
+        const out = await this._sendOverChannel(text, history, id, wantModel);
         return out;
       } catch (error) {
         const m = error.message || '通道连接已断开';
@@ -653,6 +674,13 @@ class SessionManager {
 
   /** 用已保存配置重建一条 WS 通道（断线自愈用）。已连着就直接复用。 */
   async _ensureChannel() {
+    // 已判定服务端通道过旧：别再反复握手，直接给出「重新部署」的指引。
+    // 重新部署成功后走 connectChannel/resumeChannel 会把它清空。
+    if (this._channelOutdated) {
+      const err = new Error(this._channelOutdated);
+      err.code = 'channel_outdated';
+      throw err;
+    }
     if (this.channel && !this.channel.closed && this.channel.connected) return this.channel;
     if (this.channel) { try { this.channel.close(); } catch (_) {} this.channel = null; }
     const stored = this.connection || (this.store ? this.store.load() : null);
@@ -670,8 +698,12 @@ class SessionManager {
   }
 
   /** 通过 WS 通道发一条消息并等待 task_done，顺带维护本地历史。 */
-  async _sendOverChannel(text, history, id) {
-    const result = await this.channel.sendMessage(text, history, { timeoutMs: 10 * 60 * 1000 });
+  async _sendOverChannel(text, history, id, model) {
+    const result = await this.channel.sendMessage(text, history, {
+      timeoutMs: 10 * 60 * 1000,
+      // 把选中的模型透传给服务端，让它用这个模型跑 Agent 循环
+      model: model || '',
+    });
     this.messages.push({ role: 'user', content: String(text || '') });
     if (result && result.text) this.messages.push({ role: 'assistant', content: result.text });
     this.trimHistory();
@@ -941,6 +973,15 @@ class SessionManager {
   // ---------------------------------------------------------------- 其它
 
   async models() {
+    // 通道模式没有本地 Brain（this.brain 为 null），模型清单必须问服务端要：
+    // 服务端会去上游拉 /models，拿不到就用 config.yaml 里声明的模型名兜底。
+    if (this.channel) {
+      try {
+        return await this.channel.listModels();
+      } catch (error) {
+        this.logger.warn('channel-list-models-failed', { error: error.message });
+      }
+    }
     try {
       await this.ensureReady();
       return await this.brain.listModels();
