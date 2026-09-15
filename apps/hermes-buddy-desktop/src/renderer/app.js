@@ -847,7 +847,11 @@ async function sendMessage() {
 
 async function loadModels(preferred) {
   let models = ['hermes-agent'];
-  try { models = await api.models(); } catch (_) {}
+  try {
+    const list = await api.models();
+    // 空清单不覆盖兜底值，否则下拉会变成空白
+    if (Array.isArray(list) && list.length) models = list;
+  } catch (_) {}
   el.modelSelect.textContent = '';
   for (const id of models) {
     const option = document.createElement('option');
@@ -1148,7 +1152,8 @@ async function renderAgentTab() {
   const agents = await api.agents().catch(() => ({ agents: [], activeId: null }));
   const agent = agents.agents.find((a) => a.id === agents.activeId) || agents.agents[0];
   if (!agent) { el.contextBody.textContent = '暂无智能体'; return; }
-  const models = await api.models().catch(() => ['hermes-agent']);
+  const modelList = await api.models().catch(() => null);
+  const models = (Array.isArray(modelList) && modelList.length) ? modelList : ['hermes-agent'];
   el.contextBody.innerHTML = `
     <h2>智能体配置</h2>
     <p class="hint">每个智能体都有独立的工作目录、权限档位和默认模型；角色、技能、记忆跟随各自的工作区。点击左侧列表可切换。</p>

@@ -285,6 +285,120 @@ def chat_url():
     return base + "/v1/chat/completions"
 
 
+def models_url():
+    """上游 /models 端点（OpenAI 兼容）。
+
+    base 可能是 https://x 、 https://x/v1 或 https://x/v1/chat/completions，
+    统一归一到 .../models。
+    """
+    base = STATE["base"]
+    if not base:
+        return ""
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    if re.search(r"/v\d+$", base):
+        return base + "/models"
+    return base + "/v1/models"
+
+
+def _flatten_names(items):
+    """把 /models 返回的条目（字符串或 dict）平铺成模型名列表。"""
+    out = []
+    for x in items or []:
+        if isinstance(x, str):
+            if x.strip():
+                out.append(x.strip())
+        elif isinstance(x, dict):
+            for k in ("id", "name", "model", "model_id"):
+                v = x.get(k)
+                if isinstance(v, str) and v.strip():
+                    out.append(v.strip())
+                    break
+    return out
+
+
+def _collect_cfg_models():
+    """从 Hermes config.yaml 收集「声明过的」模型名，作为 /models 拿不到时的补充。
+
+    注意：这只是配置里写的名字，不保证上游真的存在，所以只在 /models 失败时兜底。
+    """
+    cfg = load_yaml(CONFIG_YAML) if os.path.exists(CONFIG_YAML) else {}
+    if not isinstance(cfg, dict):
+        return []
+    raw = []
+    model = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+    for k in ("models", "available_models", "model_list", "fallbacks"):
+        v = model.get(k)
+        if isinstance(v, (list, dict)):
+            raw.append(v)
+    for pk in ("custom_providers", "providers"):
+        plist = cfg.get(pk) if isinstance(cfg.get(pk), list) else None
+        if not plist:
+            continue
+        for p in plist:
+            if not isinstance(p, dict):
+                continue
+            for k in ("models", "model_list", "available_models"):
+                v = p.get(k)
+                if isinstance(v, (list, dict)):
+                    raw.append(v)
+            # provider 也可能只声明单个默认模型
+            for k in ("default_model", "model", "name"):
+                v = p.get(k)
+                if isinstance(v, str) and v.strip():
+                    raw.append([v])
+    out = []
+    for item in raw:
+        if isinstance(item, dict):
+            # {"model-a": {...}, "model-b": {...}} 这种映射形式
+            out.extend([k for k in item.keys() if isinstance(k, str) and k.strip()])
+        else:
+            out.extend(_flatten_names(item))
+    return out
+
+
+def list_upstream_models():
+    """尽力拿到可用模型列表：上游 /models 优先，config.yaml 声明作补充。
+
+    返回的列表保证：当前默认模型排第一位；拿不到任何东西时至少给回默认模型，
+    这样 UI 的下拉永远有东西可选（不会退回写死的 hermes-agent）。
+    """
+    ids = []
+    url = models_url()
+    if url:
+        try:
+            req = urllib.request.Request(url, headers={
+                "Authorization": "Bearer " + STATE["key"],
+                "Accept": "application/json",
+            }, method="GET")
+            resp = urllib.request.urlopen(req, timeout=15)
+            try:
+                body = json.loads(resp.read().decode("utf-8", "replace"))
+            finally:
+                try:
+                    resp.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            data = body.get("data") if isinstance(body, dict) else body
+            ids = _flatten_names(data if isinstance(data, list) else [])
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write("[channel] list models failed: %s\n" % exc)
+    # /models 拿不到（或拿到了但为空）时用 config.yaml 兜底
+    if not ids:
+        ids = _collect_cfg_models()
+    default = (STATE["model"] or "").strip()
+    merged = []
+    seen = set()
+    if default:
+        merged.append(default)
+        seen.add(default)
+    for m in ids:
+        if m and m not in seen:
+            seen.add(m)
+            merged.append(m)
+    return merged
+
+
 def expected_token():
     env = read_env_file(DOTENV)
     proxy_env = read_env_file(PROXY_ENV)
@@ -374,15 +488,18 @@ SYSTEM_PROMPT = (
 
 # ----------------------------------------------------------------- LLM 调用
 
-def call_llm(messages, tools, signal_broken):
-    """返回 { content, tool_calls:[{id,name,arguments}] }。mock 模式走脚本。"""
+def call_llm(messages, tools, signal_broken, model=None):
+    """返回 { content, tool_calls:[{id,name,arguments}] }。mock 模式走脚本。
+
+    model：本轮要用的模型（来自客户端 user_message.model）；留空则用全局默认。
+    """
     if MOCK_LLM:
         return mock_llm(messages, tools)
     url = chat_url()
     if not url:
         raise RuntimeError("上游未配置：在 %s 或 config.yaml 的 model.base_url 写入上游" % PROXY_ENV)
     payload = {
-        "model": STATE["model"] or "hermes-agent",
+        "model": model or STATE["model"] or "hermes-agent",
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
@@ -499,6 +616,7 @@ class Session:
         self.lock = threading.Lock()
         self.cancel_event = threading.Event()
         self.running = False
+        self.model = None            # 客户端指定的模型（user_message.model）
 
     def send(self, obj):
         try:
@@ -506,8 +624,11 @@ class Session:
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write("[channel] send failed: %s\n" % exc)
 
-    def run_task(self, user_text, history):
+    def run_task(self, user_text, history, model=None):
         self.running = True
+        # 模型按会话记住：后续轮次（工具回灌后再问）继续用用户选的。
+        if model:
+            self.model = str(model)
         try:
             if history:
                 # 简单去重：只保留最近若干条，避免系统提示被冲掉
@@ -522,7 +643,7 @@ class Session:
                     return
                 turns += 1
                 self.send({"type": "status", "session": self.sid, "text": "思考中…", "turn": turns})
-                r = call_llm(self.messages, TOOL_SCHEMAS, self.cancel_event.is_set)
+                r = call_llm(self.messages, TOOL_SCHEMAS, self.cancel_event.is_set, self.model)
                 if r.get("content"):
                     self.send({"type": "assistant_chunk", "session": self.sid, "text": r["content"]})
                 calls = r.get("tool_calls") or []
@@ -629,8 +750,11 @@ class WSConnection:
         self.session = Session(self, sid)
         with LOCK:
             SESSIONS[sid] = self.session
+        # channel_version 供客户端做能力协商：版本不够时客户端会直接断开并提示重新部署，
+        # 而不是带着残缺能力（比如拿不到模型清单）继续跑。
         self.send_json({"type": "welcome", "session": sid,
-                        "model": STATE["model"], "server": "hermes-buddy-channel", "version": "1"})
+                        "model": STATE["model"], "server": "hermes-buddy-channel",
+                        "version": "1", "channel_version": CHANNEL_VERSION})
         try:
             while not self.closed:
                 frame = self.read_frame()
@@ -685,9 +809,20 @@ class WSConnection:
             if s and not s.running:
                 threading.Thread(target=s.run_task,
                                  args=(msg.get("text", ""), msg.get("history") or []),
+                                 kwargs={"model": msg.get("model") or ""},
                                  daemon=True).start()
             elif s and s.running:
                 self.send_json({"type": "error", "code": "busy", "message": "上一次任务还在进行"})
+        elif t == "list_models":
+            # 客户端要模型清单：去上游 /models 拉（失败则用 config.yaml 声明兜底）。
+            # 服务端同步拉取即可，列表小、上游一般很快。
+            try:
+                models = list_upstream_models()
+            except Exception as exc:  # noqa: BLE001
+                models = [STATE["model"] or "hermes-agent"]
+                sys.stderr.write("[channel] list_models error: %s\n" % exc)
+            self.send_json({"type": "models", "models": models,
+                            "default": STATE["model"] or ""})
         elif t == "tool_result":
             if s:
                 s.on_tool_result(msg.get("id"), msg.get("text", ""), bool(msg.get("blocked")))

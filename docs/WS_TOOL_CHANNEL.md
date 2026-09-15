@@ -46,7 +46,8 @@ ws://<hermes-host>:<port>/api/buddy/channel?token=<API_SERVER_KEY>&client=buddy&
 | type | 字段 | 说明 |
 |---|---|---|
 | `hello` | `client`, `version`, `capabilities:["tool_execute"]`, `session?` | 握手后首条，声明能力 |
-| `user_message` | `session`, `text`, `history?` | 发起/继续一次任务 |
+| `user_message` | `session`, `text`, `history?`, `model?` | 发起/继续一次任务；`model` 指定本轮用的模型（缺省用服务端默认） |
+| `list_models` | `session?` | 请求可用模型清单（服务端去上游 `/models` 拉取） |
 | `tool_result` | `id`, `ok`, `text`, `blocked?`, `exit_code?`, `data?` | 工具执行结果 |
 | `tool_rejected` | `id`, `reason`, `rule?` | 被命令护栏拦截（服务器需把它作为"失败的工具结果"回灌模型） |
 | `tool_progress` | `id`, `chunk` | 长命令的流式输出（可选） |
@@ -57,13 +58,43 @@ ws://<hermes-host>:<port>/api/buddy/channel?token=<API_SERVER_KEY>&client=buddy&
 
 | type | 字段 | 说明 |
 |---|---|---|
-| `welcome` | `session`, `model`, `server`, `version` | 握手确认 |
+| `welcome` | `session`, `model`, `server`, `version`, `channel_version` | 握手确认；`channel_version` 用于能力协商 |
 | `assistant_chunk` | `session`, `text` | 流式助手文本（可多次） |
 | `assistant_done` | `session`, `text?` | 助手文本收尾（可选，chunk 已足够时省略） |
 | `tool_request` | `id`, `tool`, `params`, `session` | 请求在 Buddy 本地执行某工具 |
 | `task_done` | `session`, `text`, `turns`, `stopped?` | 任务结束 |
 | `error` | `code`, `message` | 协议/推理错误 |
+| `models` | `models:string[]`, `default` | 应答 `list_models`：可用模型清单，默认模型排最前 |
 | `ping` | `ts` | 心跳（客户端回 `pong`） |
+
+#### 能力协商与强制重新部署（v1.1 起）
+
+服务端通道是独立部署的外挂组件，升级 Buddy 客户端**不会**自动更新它。
+如果客户端连上一个旧通道，就会带着残缺能力静默运行（例如拿不到模型清单、
+`list_models` 收到 `unknown_type`）——这类问题极难排查。因此握手即协商：
+
+1. 服务端 welcome 携带 `channel_version`（例如 `1.1`）；
+2. 客户端内置 `REQUIRED_CHANNEL_VERSION`，比较 major.minor；
+3. **不满足 → 立即断开通道并 reject 握手**，错误码 `channel_outdated`，
+   提示语明确要求「在 Buddy 里重新执行一次部署，或到服务器上重跑 deploy.sh」；
+4. 该状态会被记住（`SessionManager._channelOutdated`），后续发消息直接快速失败，
+   不会反复重试握手；重新部署成功后自动清空。
+
+> 约束：给通道加新的消息类型 / 改变协议语义时，**必须同时抬 `CHANNEL_VERSION`
+> 和客户端的 `REQUIRED_CHANNEL_VERSION`**，否则旧服务端会与新客户端悄悄错配。
+
+#### 模型清单与选择（v1.1）
+
+通道模式下 Buddy 没有可直连的 HTTP 推理端点，因此模型清单必须由服务端代拉：
+
+1. Buddy 连接后发 `list_models`；
+2. 服务端 GET 上游 `{upstream_base}/models`（`buddy-proxy.env` 的 `BUDDY_UPSTREAM_BASE`，
+   自动归一到 `.../models`），把 `data[].id` 平铺成清单；
+3. 上游不可达时，用 `config.yaml` 里 `custom_providers/providers` 声明的模型名兜底；
+4. 返回的清单里，服务端当前默认模型永远排第一位，且清单不会为空。
+
+用户选中的模型通过 `user_message.model` 透传，服务端按会话记住它，
+后续轮次（工具结果回灌后再问）继续用同一个模型。
 
 ---
 
