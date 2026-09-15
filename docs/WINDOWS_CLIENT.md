@@ -167,6 +167,25 @@ hermes-suite-windows-x86_64.exe
 - 创建开始菜单与桌面快捷方式（`Hermes Buddy`）。
 - 不安装任何系统服务，不写注册表自启。
 - 不自动安装 Git / Node 等依赖——Buddy 检测到缺什么，在「设置 → 本机工具」一键安装（用 winget 优先、PowerShell Gallery 兜底；失败会给出可执行的 PowerShell 命令让用户手动跑）。
+- **安装/升级时清空本机旧缓存与配置**（v3.4.1+），保证新版本从干净状态启动。
+
+#### 7.1.1 安装时清理说明 / Install-time cleanup
+
+安装（含覆盖升级）时会先结束正在运行的 `Hermes Buddy.exe`，然后删除：
+
+| 路径 | 内容 |
+| --- | --- |
+| `%APPDATA%\@hermes\buddy-desktop` | **只清缓存**：Chromium/Electron 缓存（Cache / Code Cache / GPUCache / Local Storage / Session Storage / blob_storage / Network 等）、`logs\`、`server-deploy\`（下次启动按当前版本重新解压）。**保留** `buddy.connection`（连接配置）、`agents.json`（智能体与模型选择）、`memory\` |
+| `%APPDATA%\hermesbuddy-desktop`、`%APPDATA%\Hermes Buddy` | 早期版本遗留目录，同样只清缓存 |
+| `%LOCALAPPDATA%\@hermesbuddy-desktop-updater` 等 | electron-updater 下载缓存，单份 80MB 上下 |
+
+卸载时则**整个删除** userData（连接配置一并清掉），并安装时一并清理以上目录。
+
+两点需要注意：
+
+1. **userData 目录名是 `@hermes\buddy-desktop`，不是 `Hermes Buddy`** —— 因为 `package.json` 的 `name` 是 `@hermes/buddy-desktop`，Electron 会把 scope 保留成一级目录；`productName`（`Hermes Buddy`）只影响快捷方式和窗口标题。改安装脚本时别再弄错。
+2. 升级**不会**丢连接配置与智能体配置，无需重填连接信息；但若服务端仍是旧通道，Buddy 仍会提示重新部署（通道版本协商）。
+3. `%APPDATA%\Hermes` 与 `%LOCALAPPDATA%\hermes` 属于另一个 Hermes 应用，安装脚本**不会**碰。
 
 ### 7.2 开发运行
 
