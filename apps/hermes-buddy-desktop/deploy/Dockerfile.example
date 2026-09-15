@@ -1,0 +1,27 @@
+# =============================================================================
+# Hermes Buddy · 通道镜像 Dockerfile 示例
+#
+# 如果你希望把「WS 工具通道」直接烤进一个独立镜像（而不是用 python:slim + 挂载文件），
+# 可以用这个 Dockerfile。把 buddy-channel.py 和 start-channel.sh 放在同一目录后：
+#   docker build -t hermes-buddy-channel:latest -f Dockerfile.example .
+#   docker run -d --name buddy-channel -e HERMES_HOME=/root/.hermes \
+#       -v hermes-home:/root/.hermes -p 8822:8822 hermes-buddy-channel:latest
+# =============================================================================
+FROM python:3.11-slim
+
+# 通道为零依赖（只用 Python 标准库），无需 pip install
+WORKDIR /opt/buddy
+
+COPY buddy-channel.py /opt/buddy/buddy-channel.py
+COPY start-channel.sh /opt/buddy/start-channel.sh
+RUN chmod +x /opt/buddy/start-channel.sh /opt/buddy/buddy-channel.py
+
+# HERMES_HOME 通过卷挂载进来（含 API_SERVER_KEY / config.yaml）
+ENV HERMES_HOME=/root/.hermes \
+    BUDDY_CHANNEL_HOST=0.0.0.0 \
+    BUDDY_CHANNEL_PORT=8822
+
+EXPOSE 8822
+
+# 前台运行，作为容器主进程（容器随通道启停）
+ENTRYPOINT ["bash", "start-channel.sh"]

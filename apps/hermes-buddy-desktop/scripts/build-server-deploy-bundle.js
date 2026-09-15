@@ -52,6 +52,7 @@ const ENTRIES = [
   ]), 'buddy-channel.py'],
   [path.join(APP_ROOT, 'deploy/deploy.sh'), 'deploy.sh'],
   [path.join(APP_ROOT, 'deploy/deploy.ps1'), 'deploy.ps1'],
+  [path.join(APP_ROOT, 'deploy/start-channel.sh'), 'start-channel.sh'],
   [path.join(APP_ROOT, 'deploy/README.md'), 'README.md'],
 ];
 

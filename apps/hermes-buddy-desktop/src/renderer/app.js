@@ -30,7 +30,19 @@ const el = {
   fieldChannelUrl: $('field-channelUrl'),
   btnChoiceExisting: $('btn-choice-existing'),
   btnChoiceNew: $('btn-choice-new'),
+  btnChoiceManual: $('btn-choice-manual'),
+  manualDeployPanel: $('manual-deploy-panel'),
+  btnManualDeploySh: $('btn-manual-deploy-sh'),
+  btnManualChannelSh: $('btn-manual-channel-sh'),
+  btnManualBundle: $('btn-manual-bundle'),
+  manualDeployStatus: $('manual-deploy-status'),
   btnWizardBack: $('btn-wizard-back'),
+  btnWizardBack0: $('btn-wizard-back-0'),
+  btnWizardBack2: $('btn-wizard-back-2'),
+  upstreamForm: $('upstream-form'),
+  fieldUpstreamBase: $('field-upstream-base'),
+  fieldUpstreamKey: $('field-upstream-key'),
+  fieldUpstreamModel: $('field-upstream-model'),
   btnWizardAction: $('btn-wizard-action'),
   btnPickKey: $('btn-pick-key'),
   btnPickWorkspace: $('btn-pick-workspace'),
@@ -101,6 +113,8 @@ const el = {
 
   // 服务端部署压缩包
   btnExportBundle: $('btn-export-bundle'),
+  btnDownloadChannelScript: $('btn-download-channel-script'),
+  btnDownloadDeploySh: $('btn-download-deploy-sh'),
   btnDeployInit: $('btn-deploy-init'),
   btnDeployToggle: $('btn-deploy-toggle'),
   deployPanel: $('deploy-panel'),
@@ -113,6 +127,25 @@ const el = {
   btnDeployServer: $('btn-deploy-server'),
   deployOutput: $('deploy-output'),
 
+  // 多网关（已保存连接）
+  connectProfiles: $('connect-profiles'),
+  connectProfilesList: $('connect-profiles-list'),
+  btnAddConn: $('btn-add-conn'),
+  btnManageConn: $('btn-manage-conn'),
+
+  // 新建智能体弹窗
+  agentCreateDialog: $('agent-create-dialog'),
+  acName: $('ac-name'),
+  acWorkspace: $('ac-workspace'),
+  acModel: $('ac-model'),
+  acPick: $('ac-pick'),
+  acCancel: $('ac-cancel'),
+  acSave: $('ac-save'),
+  acStatus: $('ac-status'),
+
+  // 通道路径前缀
+  fieldChannelPath: $('field-channel-path'),
+
   // 底部
   foot: $('foot')
 };
@@ -124,6 +157,7 @@ const state = {
   currentView: 'connect',
   wizardMode: null,
   wizardStep: 0,
+  wizardFromProfiles: false,
   sshHost: '',
   sshResult: null,
   settingsTab: 'persona',
@@ -218,13 +252,23 @@ function deriveBaseUrl(host) {
   return 'http://' + m[1] + ':' + (m[2] || '22122');
 }
 
-function deriveChannelUrl(hostValue) {
+function deriveChannelUrl(hostValue, channelPath) {
   const raw = String(hostValue || '').trim();
   if (!raw) return '';
   let host;
   if (/^https?:\/\//i.test(raw)) host = new URL(raw).hostname;
   else { const m = raw.match(/^([^:]+)(?::(\d+))?$/); host = m ? m[1] : raw; }
-  return 'ws://' + host + ':8822/api/buddy/channel';
+  const path = String(channelPath || '/api/buddy/channel').trim() || '/api/buddy/channel';
+  return 'ws://' + host + ':8822' + path;
+}
+
+function deriveDashboardUrl(hostValue) {
+  const raw = String(hostValue || '').trim();
+  if (!raw) return '';
+  let host;
+  if (/^https?:\/\//i.test(raw)) host = new URL(raw).hostname;
+  else { const m = raw.match(/^([^:]+)(?::(\d+))?$/); host = m ? m[1] : raw; }
+  return 'http://' + host + ':9119';
 }
 
 function hostFromConnection(status) {
@@ -238,7 +282,9 @@ el.btnChoiceExisting.addEventListener('click', () => {
   state.wizardMode = 'existing';
   el.step1Title.textContent = '检查已部署的 Hermes';
   el.step1Sub.textContent = '填入 SSH 信息，自动检查部署状态并获取 API Key';
+  if (el.upstreamForm) el.upstreamForm.hidden = true;
   el.btnWizardAction.textContent = '检查并连接';
+  if (el.manualDeployPanel) el.manualDeployPanel.hidden = true;
   showWizardStep(1);
   el.fieldHost.focus();
 });
@@ -246,10 +292,30 @@ el.btnChoiceExisting.addEventListener('click', () => {
 el.btnChoiceNew.addEventListener('click', () => {
   state.wizardMode = 'new';
   el.step1Title.textContent = '部署 Hermes 外挂组件';
-  el.step1Sub.textContent = '填入 SSH 信息，一键部署推理代理与 WS 通道';
+  el.step1Sub.textContent = '填入 SSH 信息和上游模型供应商，一键部署';
   el.btnWizardAction.textContent = '部署并连接';
+  if (el.manualDeployPanel) el.manualDeployPanel.hidden = true;
+  if (el.upstreamForm) el.upstreamForm.hidden = false;
   showWizardStep(1);
   el.fieldHost.focus();
+});
+
+el.btnChoiceManual.addEventListener('click', () => {
+  state.wizardMode = 'manual';
+  state.sshHost = '';
+  el.fieldHostConfirm.value = '';
+  el.fieldApiKey.value = '';
+  el.fieldBaseUrl.value = '';
+  el.fieldChannelUrl.value = '';
+  if (el.fieldDashboardUrl) el.fieldDashboardUrl.value = '';
+  el.fieldHostConfirm.placeholder = '填入 Hermes 主机 IP 或域名';
+  el.fieldHostConfirm.readOnly = false;
+  if (el.fieldMode) el.fieldMode.value = 'dashboard';
+  el.step1Title.textContent = '手动配置连接';
+  el.step1Sub.textContent = '直接填入 Hermes 地址和 API Key（适合 Docker / 已自部署）';
+  if (el.manualDeployPanel) el.manualDeployPanel.hidden = false;
+  showWizardStep(2);
+  el.fieldHostConfirm.focus();
 });
 
 // SSH 输入实时校验
@@ -263,6 +329,15 @@ el.fieldHost.addEventListener('input', validateSshForm);
 el.fieldSshKey.addEventListener('input', validateSshForm);
 el.fieldSshPassword.addEventListener('input', validateSshForm);
 
+// 模式切换：显示对应的选填地址字段
+if (el.fieldMode) {
+  el.fieldMode.addEventListener('change', () => {
+    const isChannel = el.fieldMode.value === 'channel';
+    if (el.fieldChannelWrap) el.fieldChannelWrap.hidden = !isChannel;
+    if (el.fieldDashboardWrap) el.fieldDashboardWrap.hidden = isChannel;
+  });
+}
+
 el.btnPickKey.addEventListener('click', async () => {
   try {
     const result = await api.pickSshKey();
@@ -271,6 +346,15 @@ el.btnPickKey.addEventListener('click', async () => {
 });
 
 el.btnWizardBack.addEventListener('click', () => showWizardStep(0));
+
+// 步骤 2 的"返回选择部署方式"按钮（手动配置模式）
+if (el.btnWizardBack2) {
+  el.btnWizardBack2.addEventListener('click', () => {
+    if (el.manualDeployPanel) el.manualDeployPanel.hidden = true;
+    if (el.btnWizardBack0) el.btnWizardBack0.hidden = !state.wizardFromProfiles;
+    showWizardStep(0);
+  });
+}
 
 let _deploySubscribed = false;
 function ensureDeploySubscribed() {
@@ -286,8 +370,18 @@ el.btnWizardAction.addEventListener('click', async () => {
   const sshPort = Number(el.fieldSshPort.value.trim()) || 22;
   const keyPath = el.fieldSshKey.value.trim();
   const password = el.fieldSshPassword.value.trim();
+  // 全新部署模式的上游参数
+  const upstreamBase = el.fieldUpstreamBase ? el.fieldUpstreamBase.value.trim() : '';
+  const upstreamKey = el.fieldUpstreamKey ? el.fieldUpstreamKey.value.trim() : '';
+  const upstreamModel = el.fieldUpstreamModel ? el.fieldUpstreamModel.value.trim() : '';
   if (!host) { setWizardLog('请填写服务器地址\n'); return; }
   if (!keyPath && !password) { setWizardLog('请填 SSH 密码或私钥路径\n'); return; }
+  // 全新部署时验证上游参数
+  if (state.wizardMode === 'new') {
+    if (!upstreamBase) { setWizardLog('请填写上游 API 地址\n'); return; }
+    if (!upstreamKey) { setWizardLog('请填写上游 API Key\n'); return; }
+    if (!upstreamModel) { setWizardLog('请填写模型名称\n'); return; }
+  }
 
   ensureDeploySubscribed();
   el.btnWizardAction.disabled = true;
@@ -306,7 +400,10 @@ el.btnWizardAction.addEventListener('click', async () => {
       el.fieldHostConfirm.value = host;
       el.fieldApiKey.value = result.apiKey;
       el.fieldBaseUrl.value = deriveBaseUrl(host);
-      el.fieldChannelUrl.value = deriveChannelUrl(host);
+      el.fieldChannelUrl.value = deriveChannelUrl(host, el.fieldChannelPath.value || '/api/buddy/channel');
+      if (el.fieldDashboardUrl) el.fieldDashboardUrl.value = deriveDashboardUrl(host);
+      // SSH 部署的是 WS 通道（:8822），默认选 channel 模式
+      if (el.fieldMode) el.fieldMode.value = 'channel';
       setWizardLog('\n检查完成！API Key: ' + result.apiKey.slice(0,4) + '****\n通道: ' + (result.channelUp ? 'OK' : '未监听') + '\n代理: ' + (result.proxyUp ? 'OK' : '未监听') + '\n');
       showWizardStep(2);
     } else {
@@ -314,7 +411,7 @@ el.btnWizardAction.addEventListener('click', async () => {
       const initResult = await api.deployInit({});
       if (!initResult.ok) { setWizardLog('初始化失败: ' + initResult.error + '\n'); return; }
       setWizardLog('正在通过 SSH 推送并部署…\n');
-      const deployResult = await api.deployToServer({ host, user, keyPath, password, sshPort });
+      const deployResult = await api.deployToServer({ host, user, keyPath, password, sshPort, upstreamBase, upstreamKey, upstreamModel });
       if (!deployResult.ok) { setWizardLog('\n部署失败（退出码 ' + deployResult.code + '）。请检查上方日志。\n'); return; }
       setWizardLog('\n部署完成，正在检查服务状态并获取 API Key…\n');
       const checkResult = await api.sshCheck({ host, user, keyPath, password, sshPort });
@@ -323,7 +420,9 @@ el.btnWizardAction.addEventListener('click', async () => {
         state.sshHost = host;
         el.fieldHostConfirm.value = host;
         el.fieldBaseUrl.value = deriveBaseUrl(host);
-        el.fieldChannelUrl.value = deriveChannelUrl(host);
+        el.fieldChannelUrl.value = deriveChannelUrl(host, el.fieldChannelPath.value || '/api/buddy/channel');
+        if (el.fieldDashboardUrl) el.fieldDashboardUrl.value = deriveDashboardUrl(host);
+        if (el.fieldMode) el.fieldMode.value = 'channel';
         showWizardStep(2);
         return;
       }
@@ -332,7 +431,10 @@ el.btnWizardAction.addEventListener('click', async () => {
       el.fieldHostConfirm.value = host;
       el.fieldApiKey.value = checkResult.apiKey;
       el.fieldBaseUrl.value = deriveBaseUrl(host);
-      el.fieldChannelUrl.value = deriveChannelUrl(host);
+      el.fieldChannelUrl.value = deriveChannelUrl(host, el.fieldChannelPath.value || '/api/buddy/channel');
+      if (el.fieldDashboardUrl) el.fieldDashboardUrl.value = deriveDashboardUrl(host);
+      // SSH 部署的是 WS 通道（:8822），默认选 channel 模式
+      if (el.fieldMode) el.fieldMode.value = 'channel';
       setWizardLog('\n部署成功！API Key: ' + checkResult.apiKey.slice(0,4) + '****\n通道: ' + (checkResult.channelUp ? 'OK' : '未监听') + '\n代理: ' + (checkResult.proxyUp ? 'OK' : '未监听') + '\n');
       showWizardStep(2);
     }
@@ -342,6 +444,88 @@ el.btnWizardAction.addEventListener('click', async () => {
     el.btnWizardAction.disabled = false;
     el.btnWizardBack.disabled = false;
     validateSshForm();
+  }
+});
+
+// 手动配置面板：脚本下载按钮
+if (el.btnManualDeploySh) {
+  el.btnManualDeploySh.addEventListener('click', async () => {
+    try {
+      el.btnManualDeploySh.disabled = true;
+      const result = await api.downloadDeploySh();
+      if (!result || result.error) {
+        el.manualDeployStatus.textContent = '下载失败：' + ((result && result.error) || '未知错误');
+        el.manualDeployStatus.className = 'status-line error';
+        return;
+      }
+      el.manualDeployStatus.textContent = '已下载 deploy.sh 到：' + result.path + '。传到 Hermes 上执行 sudo bash deploy.sh';
+      el.manualDeployStatus.className = 'status-line';
+    } catch (e) {
+      el.manualDeployStatus.textContent = '下载失败：' + e.message;
+      el.manualDeployStatus.className = 'status-line error';
+    } finally {
+      el.btnManualDeploySh.disabled = false;
+    }
+  });
+}
+if (el.btnManualChannelSh) {
+  el.btnManualChannelSh.addEventListener('click', async () => {
+    try {
+      el.btnManualChannelSh.disabled = true;
+      const result = await api.downloadChannelScript();
+      if (!result || result.error) {
+        el.manualDeployStatus.textContent = '下载失败：' + ((result && result.error) || '未知错误');
+        el.manualDeployStatus.className = 'status-line error';
+        return;
+      }
+      el.manualDeployStatus.textContent = '已下载 start-channel.sh 到：' + result.path + '。传到 Hermes 上执行 bash start-channel.sh';
+      el.manualDeployStatus.className = 'status-line';
+    } catch (e) {
+      el.manualDeployStatus.textContent = '下载失败：' + e.message;
+      el.manualDeployStatus.className = 'status-line error';
+    } finally {
+      el.btnManualChannelSh.disabled = false;
+    }
+  });
+}
+if (el.btnManualBundle) {
+  el.btnManualBundle.addEventListener('click', async () => {
+    try {
+      el.btnManualBundle.disabled = true;
+      const result = await api.exportDeployBundle();
+      if (!result || result.error) {
+        el.manualDeployStatus.textContent = '导出失败：' + ((result && result.error) || '未知错误');
+        el.manualDeployStatus.className = 'status-line error';
+        return;
+      }
+      el.manualDeployStatus.textContent = '已导出部署包到：' + result.path + '。解开跑 sudo bash deploy.sh';
+      el.manualDeployStatus.className = 'status-line';
+    } catch (e) {
+      el.manualDeployStatus.textContent = '导出失败：' + e.message;
+      el.manualDeployStatus.className = 'status-line error';
+    } finally {
+      el.btnManualBundle.disabled = false;
+    }
+  });
+}
+
+// 下载独立启动脚本（Docker / 无 systemd 环境用，不依赖 SSH 一键部署）
+el.btnDownloadChannelScript.addEventListener('click', async () => {
+  try {
+    el.btnDownloadChannelScript.disabled = true;
+    const result = await api.downloadChannelScript();
+    if (!result || result.error) {
+      el.bootstrapStatus.textContent = '下载失败：' + ((result && result.error) || '未知错误');
+      el.bootstrapStatus.className = 'status-line error';
+      return;
+    }
+    el.bootstrapStatus.textContent = '已保存通道启动脚本到：' + result.path;
+    el.bootstrapStatus.className = 'status-line';
+  } catch (e) {
+    el.bootstrapStatus.textContent = '下载失败：' + e.message;
+    el.bootstrapStatus.className = 'status-line error';
+  } finally {
+    el.btnDownloadChannelScript.disabled = false;
   }
 });
 
@@ -357,18 +541,22 @@ el.connectForm.addEventListener('submit', async (event) => {
   const host = el.fieldHostConfirm.value.trim() || state.sshHost;
   const apiKey = el.fieldApiKey.value.trim();
   if (!host || !apiKey) { setConnectStatus('缺少主机地址或 API Key', 'error'); return; }
+  const mode = el.fieldMode ? el.fieldMode.value : 'channel';
   const channelUrl = el.fieldChannelUrl.value.trim() || deriveChannelUrl(host);
+  const dashboardUrl = el.fieldDashboardUrl ? (el.fieldDashboardUrl.value.trim() || deriveDashboardUrl(host)) : '';
   const baseUrl = el.fieldBaseUrl.value.trim() || deriveBaseUrl(host);
   const payload = {
-    mode: 'channel',
+    mode,
     llmUrl: '',
     channelUrl,
+    dashboardUrl: dashboardUrl || undefined,
     baseUrl,
     managementUrl: '',
     apiKey,
     profile: el.fieldProfile.value.trim() || 'buddy',
     model: el.fieldModel.value.trim() || 'hermes-agent',
     workspace: el.fieldWorkspace.value.trim(),
+    channelPath: el.fieldChannelPath.value.trim() || '/api/buddy/channel',
     permission: el.connectForm.querySelector('input[name="permission"]:checked').value
   };
   el.btnConnect.disabled = true;
@@ -377,7 +565,7 @@ el.connectForm.addEventListener('submit', async (event) => {
     const result = await api.connect(payload);
     setConnectStatus('连接成功，正在进入主界面…', 'ok');
     el.fieldApiKey.value = '';
-    const status = { ...(result.connection || {}), ready: true, connected: Boolean(result.session), workspace: payload.workspace };
+    const status = await api.status().catch(() => ({ ...(result.connection || {}), ready: true, connected: Boolean(result.session), workspace: payload.workspace }));
     await enterChat(status);
     if (result.endpointNotice) renderNotice({ message: result.endpointNotice });
     if (result.gatewayWarning) renderNotice({ message: 'Gateway 未就绪（' + result.gatewayWarning + '），聊天和本机工具不受影响。' });
@@ -693,8 +881,10 @@ function applyStatus(status) {
     label = `${target}（未就绪）`;
   }
   el.gatewayLabel.textContent = label;
-  el.workdirTag.hidden = !status.workspace;
-  el.workdirTag.textContent = status.workspace ? `工作目录：${status.workspace}` : '';
+  const wsDisplay = status.workspace || '';
+  el.workdirTag.hidden = !wsDisplay;
+  const wsNote = status.workspaceSource === 'agent' ? '（来自智能体配置）' : (wsDisplay ? '（连接默认）' : '');
+  el.workdirTag.textContent = wsDisplay ? `工作目录：${wsDisplay}${wsNote}` : '';
   el.permBadge.dataset.level = status.permission || 'read-write';
   el.permBadge.textContent = permLabel(status.permission || 'read-write');
   setStatusDot(status.busy ? 'busy' : (online ? 'online' : (status.configured ? 'error' : 'offline')));
@@ -834,28 +1024,68 @@ el.btnReconnect.addEventListener('click', async () => {
 });
 
 el.btnDisconnect.addEventListener('click', async () => {
-  const confirmed = confirm('断开连接并清除所有缓存文件（连接配置、Gateway 会话、日志）？\n\n注意：清除后需要重新填写 Hermes 主机地址和 API Key。');
+  const confirmed = confirm('断开与当前 Hermes 主机的连接？\n\n仅断开会话，已保存的连接配置会保留，可在"管理连接"里重新切换或连接。');
   if (!confirmed) return;
-  
-  try { await api.disconnectAndClearCache(); } catch (_) {}
+  try { await api.disconnect(); } catch (_) {}
   state.activeRequestId = null;
   el.chatLog.textContent = '';
   clearToolLog();
   hideBanner();
-  setConnectStatus('缓存已清除，可重新配置。');
-  applyStatus({ configured: false });
-  showView('connect');
+  // 回到连接页并显示已保存的连接列表（多网关管理）
+  await showConnectWithProfiles();
 });
 
-el.btnNewChat.addEventListener('click', async () => {
+el.btnNewChat.addEventListener('click', () => openAgentCreateDialog());
+
+// 新建智能体：专用弹窗，与"配置现有智能体"严格区分，避免混淆。
+function openAgentCreateDialog() {
+  el.acName.value = '';
+  el.acWorkspace.value = '';
+  el.acStatus.textContent = '';
+  el.acStatus.dataset.tone = '';
+  api.status().then((st) => { if (st && st.workspace && !el.acWorkspace.value) el.acWorkspace.placeholder = st.workspace; }).catch(() => {});
+  api.models().then((models) => {
+    el.acModel.textContent = '';
+    for (const id of (models && models.length ? models : ['hermes-agent'])) {
+      const option = document.createElement('option');
+      option.value = id; option.textContent = id;
+      el.acModel.appendChild(option);
+    }
+  }).catch(() => {});
+  el.agentCreateDialog.hidden = false;
+  el.acName.focus();
+}
+
+el.acCancel.addEventListener('click', () => { el.agentCreateDialog.hidden = true; });
+
+el.acPick.addEventListener('click', async () => {
   try {
-    // 新建一个智能体并切换过去；工作目录先留空（跟随默认），用户可点齿轮去配置。
-    await api.createAgent({ name: `智能体 ${new Date().toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })}` });
+    const result = await api.pickWorkspacePath();
+    if (result && !result.canceled && result.path) el.acWorkspace.value = result.path;
+  } catch (e) { el.acStatus.textContent = '选择目录失败: ' + e.message; }
+});
+
+el.acSave.addEventListener('click', async () => {
+  const name = el.acName.value.trim();
+  if (!name) { el.acStatus.textContent = '请填写智能体名称'; el.acStatus.dataset.tone = 'error'; return; }
+  el.acSave.disabled = true;
+  try {
+    await api.createAgent({
+      name,
+      workspace: el.acWorkspace.value.trim(),
+      model: el.acModel.value,
+      permission: (el.agentCreateDialog.querySelector('input[name="ac-perm"]:checked') || {}).value || 'read-write'
+    });
+    el.agentCreateDialog.hidden = true;
     await refreshChatForAgent();
+    // 创建后即打开该智能体的配置面板，明确"新建"与"配置"是两个步骤
     state.settingsTab = 'agent';
-    showView('settings'); // 打开配置面板，让用户直接设置工作区/模型
+    showView('settings');
   } catch (error) {
-    showBanner('创建智能体失败：' + error.message, 'error');
+    el.acStatus.textContent = '创建失败：' + error.message;
+    el.acStatus.dataset.tone = 'error';
+  } finally {
+    el.acSave.disabled = false;
   }
 });
 
@@ -1368,6 +1598,129 @@ el.modelSelect.addEventListener('change', () => {
 
 // ============================================================ 启动
 
+
+
+// ============================================================ 多网关（已保存连接）
+
+async function showConnectWithProfiles() {
+  showView('connect');
+  state.wizardFromProfiles = false;
+  if (el.btnWizardBack0) el.btnWizardBack0.hidden = true;
+  const hasProfiles = await renderProfiles();
+  if (hasProfiles) {
+    el.connectProfiles.hidden = false;
+    el.step0.hidden = true;
+    el.step1.hidden = true;
+    el.step2.hidden = true;
+  } else {
+    el.connectProfiles.hidden = true;
+    showWizardStep(0);
+  }
+}
+
+async function renderProfiles() {
+  let data = { activeId: null, profiles: [] };
+  try { data = await api.profiles(); } catch (_) {}
+  const list = el.connectProfilesList;
+  list.textContent = '';
+  if (!data.profiles || !data.profiles.length) {
+    list.innerHTML = '<div class="profile-empty">还没有保存的连接，点下方"＋ 新建连接"。</div>';
+    el.connectProfiles.hidden = false;
+    return false;
+  }
+  for (const p of data.profiles) {
+    const card = document.createElement('div');
+    card.className = 'profile-card';
+    card.dataset.active = String(p.id === data.activeId);
+    const host = p.baseUrl ? p.baseUrl.replace(/^https?:\/\//, '') : (p.channelUrl || p.host || '');
+    const sub = [];
+    if (p.profile) sub.push('profile: ' + p.profile);
+    if (p.model) sub.push('model: ' + p.model);
+    card.innerHTML = `
+      <div class="profile-main">
+        <div class="profile-host"></div>
+        <div class="profile-sub"></div>
+      </div>
+      <div class="profile-actions">
+        <button class="ghost profile-use" type="button">连接</button>
+        <button class="link danger profile-del" type="button">删除</button>
+      </div>
+    `;
+    card.querySelector('.profile-host').textContent = host || '未命名连接';
+    card.querySelector('.profile-sub').textContent = sub.join(' · ') || '无额外配置';
+    if (p.id === data.activeId) {
+      const badge = document.createElement('span');
+      badge.className = 'profile-current';
+      badge.textContent = '当前';
+      card.querySelector('.profile-main').appendChild(badge);
+    }
+    card.querySelector('.profile-use').addEventListener('click', () => activateProfileFlow(p.id));
+    card.querySelector('.profile-del').addEventListener('click', () => removeProfileFlow(p.id, host));
+    list.appendChild(card);
+  }
+  return true;
+}
+
+async function activateProfileFlow(id) {
+  setConnectStatus('正在切换到所选连接…');
+  try {
+    // buddy:profile:activate 内部已经做了 setActiveProfile + resume（含 WS 通道连接）。
+    // 不要再单独调一次 api.resume()：那样会开第二条通道，server 单会话下第二次握手会失败，
+    // 于是代码掉进手动表单分支，用户看到的就是"点连接连不上"。
+    const result = await api.activateProfile(id);
+    if (!result || result.ok === false) throw new Error((result && result.message) || '切换失败');
+    setStatusDot('busy');
+    const st = result.status || (await api.status().catch(() => ({ configured: true })));
+    await enterChat(st);
+    if (result.gatewayWarning) renderNotice({ message: 'Gateway 未就绪（' + result.gatewayWarning + '），聊天和本机工具不受影响。' });
+  } catch (error) {
+    // 自动连接失败：把已保存的参数回填到向导第 2 步，方便手动微调后重连
+    el.connectProfiles.hidden = true;
+    showWizardStep(2);
+    const s2 = await api.status().catch(() => ({}));
+    if (s2.baseUrl) el.fieldHostConfirm.value = hostFromConnection(s2);
+    if (s2.baseUrl) el.fieldBaseUrl.value = s2.baseUrl;
+    if (s2.channelUrl) el.fieldChannelUrl.value = s2.channelUrl;
+    if (s2.channelPath) el.fieldChannelPath.value = s2.channelPath;
+    if (s2.profile) el.fieldProfile.value = s2.profile;
+    if (s2.model) el.fieldModel.value = s2.model;
+    if (s2.workspace) el.fieldWorkspace.value = s2.workspace;
+    setConnectStatus('切换到该连接失败：' + (error.message || '未知原因') + '。可在此手动调整后重新连接。', 'warn');
+  }
+}
+
+async function removeProfileFlow(id, host) {
+  if (!confirm(`删除已保存的连接「${host || id}」？\n该操作只移除本地保存的配置，不会卸载 Hermes 服务端。`)) return;
+  try {
+    const result = await api.removeProfile(id);
+    const activeNow = result && result.activeId;
+    await renderProfiles();
+    if (!activeNow) {
+      el.connectProfiles.hidden = false;
+      el.step0.hidden = true;
+    }
+    setConnectStatus('已删除连接。');
+  } catch (error) {
+    setConnectStatus('删除失败：' + error.message, 'error');
+  }
+}
+
+el.btnAddConn.addEventListener('click', () => {
+  el.connectProfiles.hidden = true;
+  state.wizardFromProfiles = true;
+  if (el.btnWizardBack0) el.btnWizardBack0.hidden = false;
+  showWizardStep(0);
+});
+
+// 步骤 0 的"返回已保存连接"：从管理连接里点新建进来的，给一条回去的路
+el.btnWizardBack0.addEventListener('click', () => {
+  showConnectWithProfiles();
+});
+
+el.btnManageConn.addEventListener('click', () => {
+  showConnectWithProfiles();
+});
+
 (async function boot() {
   try {
     const info = await api.appInfo();
@@ -1380,8 +1733,7 @@ el.modelSelect.addEventListener('change', () => {
   let status = await api.status().catch(() => ({ configured: false }));
   applyStatus(status);
   if (!status.configured) {
-    showView('connect');
-    showWizardStep(0);
+    await showConnectWithProfiles();
     return;
   }
 
@@ -1403,6 +1755,7 @@ el.modelSelect.addEventListener('change', () => {
     showWizardStep(2);
     if (status.baseUrl) el.fieldBaseUrl.value = status.baseUrl;
     if (status.channelUrl) el.fieldChannelUrl.value = status.channelUrl;
+    if (status.channelPath) el.fieldChannelPath.value = status.channelPath;
     if (status.profile) el.fieldProfile.value = status.profile;
     if (status.model) el.fieldModel.value = status.model;
     if (status.workspace) el.fieldWorkspace.value = status.workspace;

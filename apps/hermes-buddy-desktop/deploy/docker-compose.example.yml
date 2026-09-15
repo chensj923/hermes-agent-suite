@@ -1,0 +1,53 @@
+# =============================================================================
+# Hermes Buddy · Docker 通道部署示例
+#
+# 场景：客户把 Hermes 跑在 Docker 里，没有 systemd，无法用 deploy.sh 的 systemd 分支。
+# 这里用一个轻量 sidecar 容器专门跑「WS 工具通道」(8822)，与 Hermes 主容器
+# 共享同一个 HERMES_HOME 卷（读取 API_SERVER_KEY / config.yaml）。
+#
+# 用法：
+#   1. 从 Buddy 安装包内的 server-deploy.tar.gz 解压，把 buddy-channel.py 和
+#      start-channel.sh 放到本目录；
+#   2. 把 hermes-home 卷换成你真实的 Hermes 配置卷（下面的示例用具名卷占位）；
+#   3. docker compose up -d
+#
+# 之后在 Buddy 客户端「通道模式」里填：ws://<宿主机IP>:8822/api/buddy/channel
+# =============================================================================
+version: "3.8"
+
+services:
+  # 你的 Hermes 主服务（镜像/命令按你的实际部署替换）
+  hermes:
+    image: your-hermes-image:latest
+    container_name: hermes
+    volumes:
+      - hermes-home:/root/.hermes
+    restart: unless-stopped
+    # 确保 Hermes 自身已经在监听 22122（Gateway）并能提供 API_SERVER_KEY
+
+  # Buddy WS 工具通道 sidecar：只负责 8822，让 Buddy 客户端本地执行工具
+  buddy-channel:
+    image: python:3.11-slim
+    container_name: buddy-channel
+    depends_on:
+      - hermes
+    environment:
+      HERMES_HOME: /root/.hermes
+      BUDDY_CHANNEL_HOST: 0.0.0.0
+      BUDDY_CHANNEL_PORT: "8822"
+      # 如需自动下载 buddy-channel.py（本地无文件时），取消下面两行注释：
+      # BUDDY_CHANNEL_DOWNLOAD: "1"
+      # BUDDY_CHANNEL_VERSION: "v3.1.1"
+    volumes:
+      - hermes-home:/root/.hermes          # 共享 Hermes 配置（读 API_SERVER_KEY / config.yaml）
+      - ./buddy-channel.py:/opt/buddy/buddy-channel.py:ro
+      - ./start-channel.sh:/opt/buddy/start-channel.sh:ro
+    working_dir: /opt/buddy
+    command: ["bash", "start-channel.sh"]   # 前台运行，作为该容器主进程
+    ports:
+      - "8822:8822"
+    restart: unless-stopped
+
+volumes:
+  hermes-home:
+    # 如果是已有卷，这里留空即可；否则 compose 会自动创建

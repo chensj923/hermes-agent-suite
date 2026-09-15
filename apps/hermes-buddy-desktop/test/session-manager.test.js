@@ -27,6 +27,61 @@ function fakeStore(dir) {
   };
 }
 
+
+/** 支持多网关（多 profile）的内存版 ConnectionStore，模拟真实 multi-profile 语义。 */
+function fakeProfileStore(d) {
+  const file = require('path').join(d, 'conn.json');
+  const container = { activeId: null, profiles: {} };
+  const idOf = (c) => `${c.profile || 'buddy'}@${c.baseUrl || c.host || 'host'}`.replace(/[^a-zA-Z0-9._@-]/g, '_');
+  return {
+    filePath: file,
+    dir: d,
+    isEncryptionAvailable: () => true,
+    exists: () => Object.keys(container.profiles).length > 0,
+    load() { return container.activeId ? container.profiles[container.activeId] || null : null; },
+    save(c) {
+      const id = idOf(c);
+      container.profiles[id] = { ...(container.profiles[id] || {}), ...c };
+      container.activeId = id;
+      return container.profiles[id];
+    },
+    clear() { container.activeId = null; container.profiles = {}; },
+    listProfiles() {
+      const activeId = (container.activeId && container.profiles[container.activeId])
+        ? container.activeId : Object.keys(container.profiles)[0] || null;
+      return {
+        activeId,
+        profiles: Object.entries(container.profiles).map(([id, c]) => ({ id, ...c, active: id === activeId }))
+      };
+    },
+    setActive(id) { if (!container.profiles[id]) throw new Error('该连接不存在'); container.activeId = id; },
+    removeProfile(id) {
+      delete container.profiles[id];
+      if (container.activeId === id) container.activeId = Object.keys(container.profiles)[0] || null;
+      return true;
+    },
+    _idFor: idOf,
+    getProfile(id) { return container.profiles[id] || null; }
+  };
+}
+
+function makeProfileManager() {
+  const dir = tempDir('buddy-sm-prof-');
+  const appDir = require('path').join(dir, 'app');
+  fs.mkdirSync(appDir, { recursive: true });
+  const builtin = require('path').join(dir, 'builtin-skills');
+  fs.mkdirSync(builtin, { recursive: true });
+  fs.writeFileSync(require('path').join(builtin, 'demo.md'), '---\nname: demo\ndescription: 演示技能\n---\n\n正文');
+  const manager = new SessionManager({
+    store: fakeProfileStore(dir),
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    appDir,
+    builtinSkillsDir: builtin,
+    fetchImpl: hermesFetch()
+  });
+  return { manager, appDir, dir, workspace: require('path').join(dir, 'ws') };
+}
+
 /** 按 URL 分发的 fetch 替身，模拟 Hermes 的模型路由。 */
 function hermesFetch({ models = ['hermes-agent'], replies = [] } = {}) {
   const state = { requests: [], replyIndex: 0 };
@@ -322,13 +377,51 @@ test('buildPrompt 包含工作区、工具链与技能信息', async () => {
   assert.match(prompt, /【运行环境】/);
 });
 
-test('disconnect: 清掉凭据与内存状态', async () => {
+test('disconnect: 清空内存会话但保留已保存连接（多网关可重连）', async () => {
   const { manager, workspace } = makeManager();
   await manager.connect(CONNECTION(workspace));
+  assert.equal(manager.status().configured, true);
   manager.disconnect();
-  assert.equal(manager.status().configured, false);
+  assert.equal(manager.connection, null);
   assert.equal(manager.brain, null);
   assert.equal(manager.messages.length, 0);
+  assert.equal(manager.workspace, null);
+  assert.equal(manager.store.exists(), true);
+  assert.equal(manager.status().configured, true);
+  assert.equal(manager.status().connected, false);
+});
+
+test('多网关：保存/切换/删除已连接配置', async () => {
+  const { manager, dir } = makeProfileManager();
+  await manager.connect({ ...CONNECTION(require('path').join(dir, 'w1')), baseUrl: 'http://10.0.0.1:22122', apiKey: 'k1' });
+  await manager.connect({ ...CONNECTION(require('path').join(dir, 'w2')), baseUrl: 'http://10.0.0.2:22122', apiKey: 'k2' });
+  const list = manager.listProfiles();
+  assert.equal(list.profiles.length, 2);
+  manager.setActiveProfile(list.profiles[0].id);
+  assert.equal(manager.store.load().apiKey, list.profiles[0].apiKey);
+  const activeId = manager.listProfiles().activeId;
+  manager.removeProfile(activeId);
+  const after = manager.listProfiles();
+  assert.equal(after.profiles.length, 1);
+  assert.notEqual(after.activeId, activeId);
+});
+
+test('status: 工作目录优先取激活智能体配置（修复不一致 bug）', async () => {
+  const { manager, workspace, dir } = makeManager();
+  const agentWs = require('path').join(dir, 'agent-ws');
+  fs.mkdirSync(agentWs, { recursive: true });
+  await manager.connect(CONNECTION(workspace));
+  const created = manager.createAgent({ name: '专属智能体', workspace: agentWs, model: 'hermes-agent', permission: 'read' });
+  const newId = created.agent.id;
+  const view = manager.status();
+  assert.equal(view.workspace, agentWs);
+  assert.equal(view.workspaceSource, 'agent');
+  const list = manager.listAgents();
+  const fallback = list.agents.find((a) => a.id !== newId);
+  manager.activateAgent(fallback.id);
+  const view2 = manager.status();
+  assert.equal(view2.workspace, workspace);
+  assert.equal(view2.workspaceSource, 'connection');
 });
 
 test('models: 推理服务异常时退回当前模型', async () => {

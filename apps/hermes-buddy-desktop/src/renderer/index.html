@@ -13,8 +13,22 @@
   <section class="connect-overlay" id="view-connect">
     <div class="connect-card">
 
+      <!-- 已保存的连接（多网关管理）：有则列出，可切换/删除 -->
+      <div id="connect-profiles" class="connect-profiles" hidden>
+        <div class="connect-brand">
+          <span class="logo" aria-hidden="true">H</span>
+          <div>
+            <div class="brand-name">已保存的连接</div>
+            <div class="brand-sub">选择一个 Hermes 主机连接，或新建</div>
+          </div>
+        </div>
+        <div id="connect-profiles-list" class="profile-list"></div>
+        <button class="primary connect-submit" id="btn-add-conn" type="button">＋ 新建连接</button>
+      </div>
+
       <!-- 步骤 0：欢迎 / 选择是否已有 Hermes -->
       <div id="wizard-step-0" class="wizard-step">
+        <button class="ghost back-link" id="btn-wizard-back-0" type="button" hidden>&larr; 返回已保存连接</button>
         <div class="connect-brand">
           <span class="logo" aria-hidden="true">H</span>
           <div>
@@ -33,6 +47,11 @@
             <div class="wc-icon">+</div>
             <div class="wc-title">全新部署</div>
             <div class="wc-desc">服务器上还没有 Hermes，通过 SSH 一键部署外挂组件</div>
+          </button>
+          <button class="wizard-choice-card" id="btn-choice-manual" type="button">
+            <div class="wc-icon">&#9881;</div>
+            <div class="wc-title">手动配置</div>
+            <div class="wc-desc">不用 SSH，直接填 Hermes 地址和 API Key 连接（适合 Docker / 自己部署）</div>
           </button>
         </div>
         <div class="connect-status-line" id="connect-status" role="status"></div>
@@ -81,6 +100,27 @@
           </label>
         </div>
 
+        <!-- 全新部署模式：上游模型供应商参数（wizardMode=new 时显示） -->
+        <div class="wizard-upstream-form" id="upstream-form" hidden>
+          <h4 style="margin: 12px 0 4px;">上游模型供应商</h4>
+          <p class="hint" style="margin: 0 0 8px; font-size: 12px; color: var(--text-secondary);">全新部署时需要填写上游 LLM 供应商信息（OpenAI 兼容格式），用于推理代理和 WS 通道转发请求。</p>
+          <label class="connect-field">
+            <span>上游 API 地址</span>
+            <input id="field-upstream-base" name="upstreamBase" placeholder="https://ark.cn-beijing.volces.com/api/v3" spellcheck="false">
+            <small>OpenAI 兼容的 base_url，如火山引擎 ARK / 通义千问 / DeepSeek / 自建 vLLM 等</small>
+          </label>
+          <label class="connect-field">
+            <span>上游 API Key</span>
+            <input id="field-upstream-key" name="upstreamKey" type="password" placeholder="供应商的 API Key" spellcheck="false">
+            <small>用于请求上游模型的密钥（仅传到服务端，不存本地）</small>
+          </label>
+          <label class="connect-field">
+            <span>模型名称</span>
+            <input id="field-upstream-model" name="upstreamModel" placeholder="doubao-seed-1-6-250815" spellcheck="false">
+            <small>上游供应商里的模型 ID（需支持 function calling）</small>
+          </label>
+        </div>
+
         <div class="wizard-actions">
           <button class="ghost" id="btn-wizard-back" type="button">上一步</button>
           <button class="primary" id="btn-wizard-action" type="button" disabled>检查并连接</button>
@@ -120,9 +160,22 @@
                 <input id="field-baseUrl" name="baseUrl" placeholder="http://192.168.0.246:22122" spellcheck="false">
               </label>
               <label class="connect-field">
+                <span>连接模式</span>
+                <select id="field-mode" name="mode">
+                  <option value="dashboard" selected>Dashboard (HTTP :9119，推荐)</option>
+                  <option value="channel">WS 通道 (:8822)</option>
+                </select>
+                <small>Dashboard = 和官方 Desktop 一样走 HTTP；WS 通道 = 走 WebSocket 外挂组件</small>
+              </label>
+              <label class="connect-field" id="field-channel-wrap">
                 <span>通道地址（WS）· 选填</span>
                 <input id="field-channelUrl" name="channelUrl" placeholder="ws://192.168.0.246:8822/api/buddy/channel" spellcheck="false">
                 <small>留空 = 自动推导为 <code>ws://&lt;host&gt;:8822/api/buddy/channel</code></small>
+              </label>
+              <label class="connect-field" id="field-dashboard-wrap" hidden>
+                <span>Dashboard 地址 · 选填</span>
+                <input id="field-dashboardUrl" name="dashboardUrl" placeholder="http://192.168.0.246:9119" spellcheck="false">
+                <small>留空 = 自动推导为 <code>http://&lt;host&gt;:9119</code></small>
               </label>
               <div class="row">
                 <label class="connect-field">Profile
@@ -139,6 +192,11 @@
                   <button class="ghost" id="btn-pick-workspace" type="button">浏览…</button>
                 </div>
               </label>
+              <label class="connect-field">
+                <span>通道路径前缀 · 选填</span>
+                <input id="field-channel-path" name="channelPath" value="/api/buddy/channel" spellcheck="false">
+                <small>服务器通道若经反代带路径前缀，可改这里（如 <code>/prefix/buddy</code>）；留空用默认 <code>/api/buddy/channel</code>。</small>
+              </label>
               <fieldset class="perm-fieldset">
                 <legend>工具权限档位</legend>
                 <label class="perm-option"><input type="radio" name="permission" value="read"><span><strong>只读</strong> · 禁止写入和命令执行</span></label>
@@ -148,8 +206,23 @@
             </div>
           </details>
 
-          <button class="primary connect-submit" id="btn-connect" type="submit">连接 Hermes</button>
+          <div class="wizard-actions" style="margin-top: 12px;">
+            <button class="ghost back-link" id="btn-wizard-back-2" type="button">&larr; 返回选择部署方式</button>
+            <button class="primary connect-submit" id="btn-connect" type="submit">连接 Hermes</button>
+          </div>
         </form>
+
+        <!-- 手动配置模式：脚本下载区（仅在 wizardMode=manual 时显示） -->
+        <div class="manual-deploy-panel" id="manual-deploy-panel" hidden>
+          <h4>服务端部署脚本下载</h4>
+          <p class="hint">如果 Hermes 服务端还没部署 Buddy 外挂组件，点下面的按钮下载脚本，传到 Hermes 主机执行。<br>适合 Docker / 无 systemd / 无法用 SSH 一键推送的环境。</p>
+          <div class="modal-actions">
+            <button class="ghost" id="btn-manual-deploy-sh" type="button">下载 deploy.sh（完整部署）</button>
+            <button class="ghost" id="btn-manual-channel-sh" type="button">下载 start-channel.sh（仅通道）</button>
+            <button class="ghost" id="btn-manual-bundle" type="button">导出部署包 (.tar.gz)</button>
+          </div>
+          <div class="status-line" id="manual-deploy-status" role="status"></div>
+        </div>
 
         <div class="connect-status-line" id="connect-status-2" role="status"></div>
         <div class="diagnose-report" id="diagnose-report" hidden></div>
@@ -177,6 +250,7 @@
 
       <div class="sidebar-footer">
         <button class="ghost" id="btn-update" type="button">检查更新</button>
+        <button class="ghost" id="btn-manage-conn" type="button">管理连接</button>
         <button class="ghost" id="btn-settings" type="button">设置</button>
         <button class="ghost danger" id="btn-disconnect" type="button" hidden>断开连接</button>
         <button class="ghost danger" id="btn-uninstall" type="button" hidden>卸载并清除缓存</button>
@@ -244,6 +318,33 @@
     </aside>
   </div>
 
+  <!-- 新建智能体弹窗（与"配置现有智能体"明确区分） -->
+  <div class="modal" id="agent-create-dialog" hidden>
+    <div class="modal-card">
+      <h3>新建智能体（独立工作区）</h3>
+      <p class="hint">这会创建一个全新的智能体，拥有自己的工作目录、权限与默认模型。创建后可在「设置 → 智能体」里继续调整。它和"配置现有智能体"是两个不同的入口，请勿混淆。</p>
+      <label class="connect-field"><span>名称</span><input id="ac-name" placeholder="例如：运维助手"></label>
+      <label class="connect-field"><span>工作目录（留空 = 跟随连接默认）</span>
+        <div class="workspace-row">
+          <input id="ac-workspace" spellcheck="false" placeholder="D:\\work\\buddy">
+          <button class="ghost" id="ac-pick" type="button">浏览…</button>
+        </div>
+      </label>
+      <label class="connect-field"><span>默认模型</span><select id="ac-model"></select></label>
+      <fieldset class="perm-fieldset">
+        <legend>工具权限档位</legend>
+        <label class="perm-option"><input type="radio" name="ac-perm" value="read"><span><strong>只读</strong> · 禁止写入和命令执行</span></label>
+        <label class="perm-option"><input type="radio" name="ac-perm" value="read-write" checked><span><strong>读 + 写</strong> · 推荐</span></label>
+        <label class="perm-option"><input type="radio" name="ac-perm" value="full"><span><strong>完全控制</strong> · 不拦截任何命令</span></label>
+      </fieldset>
+      <div class="modal-actions">
+        <button class="ghost" id="ac-cancel" type="button">取消</button>
+        <button class="primary" id="ac-save" type="button">创建智能体</button>
+      </div>
+      <div class="status-line" id="ac-status" role="status"></div>
+    </div>
+  </div>
+
   <!-- 危险操作确认弹窗 -->
   <div class="modal" id="confirm-dialog" hidden>
     <div class="modal-card">
@@ -266,6 +367,7 @@
       <div class="modal-actions">
         <button class="ghost" id="btn-bootstrap-copy" type="button">复制到剪贴板</button>
         <button class="ghost" id="btn-bootstrap-export" type="button">导出为 .sh</button>
+        <button class="ghost" id="btn-download-deploy-sh" type="button">下载 deploy.sh 脚本</button>
         <button class="primary" id="btn-bootstrap-close" type="button">关闭</button>
       </div>
       <div class="status-line" id="bootstrap-status" role="status"></div>
@@ -276,9 +378,11 @@
         可手动拷到 Hermes 解开跑 <code>deploy.sh</code>，也可在 Windows 一键推送部署。</p>
       <div class="modal-actions">
         <button class="ghost" id="btn-export-bundle" type="button">导出部署包 (.tar.gz)</button>
+        <button class="ghost" id="btn-download-channel-script" type="button">下载通道脚本 (Docker/手动)</button>
         <button class="ghost" id="btn-deploy-init" type="button">重新初始化</button>
         <button class="ghost" id="btn-deploy-toggle" type="button" aria-expanded="false">部署到服务器 ▾</button>
       </div>
+      <p class="hint" id="channel-script-hint">Hermes 跑在 Docker / 无 systemd 的 Linux 时，用这份独立脚本前台拉起 WS 通道（8822），无需 SSH 一键部署。详见部署包内 README「方式三」。</p>
       <div id="deploy-panel" hidden>
         <div class="deploy-grid">
           <label class="connect-field"><span>Hermes 主机</span><input id="deploy-host" placeholder="192.168.0.231" spellcheck="false"></label>
