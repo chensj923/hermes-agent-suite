@@ -789,7 +789,7 @@ api.onChatEvent((event) => {
       break;
     case 'error':
       finishAssistantBubble('');
-      addMessage('error', event.text || event.message || '本地 Agent 出错');
+      addMessage('error', cleanIpcError(event.text || event.message) || '本地 Agent 出错');
       break;
     case 'done':
       // 由 send() 的 Promise resolve 处理；这里只清掉 thinking 标记。
@@ -840,6 +840,13 @@ function setBusy(busy) {
   if (!busy) el.input.focus();
 }
 
+// Electron 给主进程抛出的错误加了一层壳：
+// "Error invoking remote method 'buddy:chat': Error: <真正的信息>"
+// 直接显示会盖住真正的原因，这里剥掉。
+function cleanIpcError(raw) {
+  return String(raw || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '').trim();
+}
+
 async function sendMessage() {
   const text = el.input.value.trim();
   if (!text || state.activeRequestId) return;
@@ -854,8 +861,11 @@ async function sendMessage() {
     finishAssistantBubble(result && result.text);
   } catch (error) {
     finishAssistantBubble('');
-    addMessage('error', (error && error.message) || '本地 Agent 调用失败');
+    const message = cleanIpcError(error && error.message) || '本地 Agent 调用失败';
+    addMessage('error', message);
     setStatusDot('error');
+    // 模型被上游打回：服务端已把它从可用列表移除，这里刷新下拉让用户别再选到它。
+    if (/不被上游支持|UnsupportedModel|model_unsupported/i.test(message)) loadModels();
   } finally {
     state.activeRequestId = null;
     setBusy(false);

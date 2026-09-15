@@ -27,7 +27,7 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
  * 不如在握手时就把版本谈清楚：不满足就断开并明确提示重新部署。
  * 加新协议能力（新的消息类型）时记得同步抬这个版本号。
  */
-const REQUIRED_CHANNEL_VERSION = '1.1';
+const REQUIRED_CHANNEL_VERSION = '1.2';
 
 /** 解析 "1.1" / "1" / "v2.0.3" 这类版本号，取 major.minor 比较。 */
 function parseVersion(value) {
@@ -254,13 +254,21 @@ class ChannelClient {
       return;
     }
     if (msg.type === 'error') {
-      this.emit({ type: 'error', message: msg.message });
+      // 服务端会给结构化 code（如 model_unsupported）和给用户的建议 hint
+      const text = [msg.message, msg.hint].filter(Boolean).join('\n');
+      this.emit({ type: 'error', message: text, code: msg.code, hint: msg.hint });
       if (this.pendingModels) {
         const pm = this.pendingModels;
         this.pendingModels = null;
         pm.reject(new Error(msg.message || '获取模型列表失败'));
       }
-      if (this.pendingTask) { const p = this.pendingTask; this.pendingTask = null; p.reject(new Error(msg.message)); }
+      if (this.pendingTask) {
+        const p = this.pendingTask;
+        this.pendingTask = null;
+        const err = new Error(text);
+        if (msg.code) err.code = msg.code;
+        p.reject(err);
+      }
       return;
     }
   }

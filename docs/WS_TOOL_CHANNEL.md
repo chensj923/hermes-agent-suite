@@ -63,8 +63,8 @@ ws://<hermes-host>:<port>/api/buddy/channel?token=<API_SERVER_KEY>&client=buddy&
 | `assistant_done` | `session`, `text?` | 助手文本收尾（可选，chunk 已足够时省略） |
 | `tool_request` | `id`, `tool`, `params`, `session` | 请求在 Buddy 本地执行某工具 |
 | `task_done` | `session`, `text`, `turns`, `stopped?` | 任务结束 |
-| `error` | `code`, `message` | 协议/推理错误 |
-| `models` | `models:string[]`, `default` | 应答 `list_models`：可用模型清单，默认模型排最前 |
+| `error` | `code`, `message`, `hint?` | 协议/推理错误；`hint` 是可操作建议（v1.2） |
+| `models` | `models:string[]`, `default`, `unsupported?:string[]` | 应答 `list_models`：可用模型清单（默认模型排最前），`unsupported` 是本进程内被上游打回过的模型（v1.2） |
 | `ping` | `ts` | 心跳（客户端回 `pong`） |
 
 #### 能力协商与强制重新部署（v1.1 起）
@@ -95,6 +95,29 @@ ws://<hermes-host>:<port>/api/buddy/channel?token=<API_SERVER_KEY>&client=buddy&
 
 用户选中的模型通过 `user_message.model` 透传，服务端按会话记住它，
 后续轮次（工具结果回灌后再问）继续用同一个模型。
+
+#### 上游拒绝某个模型时的自动回退（v1.2）
+
+上游 `/models` 往往把账号下所有模型都列出来，但真正可用的是一部分——典型是
+火山方舟 Ark 的 **coding plan** 端点：选到不支持的模型会直接返回
+
+```
+HTTP 404 {"error":{"code":"UnsupportedModel","message":"The requested model does not support the coding plan feature..."}}
+```
+
+这类错误以前会原样冒泡到聊天窗口（一大坨 JSON + `Error invoking remote method 'buddy:chat'` 外壳），
+用户看不懂也没法处理。v1.2 起：
+
+1. 服务端识别 `UnsupportedModel` / `ModelNotFound` 等码（或 "model ... does not support" 语义），
+   记进 `UNSUPPORTED_MODELS`；
+2. **本轮自动改用默认模型重试一次**，并发一条 `status`：「模型 X 不被上游支持，已自动改用默认模型 Y」——
+   聊天不会中断；
+3. 后续 `list_models` 不再返回该模型，客户端也会刷新下拉，用户不会再次选到它；
+4. 若默认模型本身也不被支持（没有可回退目标），才发 `error`（`code: model_unsupported`）
+   并附 `hint`，说明「该模型不被当前上游支持，请在智能体配置里换一个模型」；
+5. 客户端另维护一份会话级 `_unsupportedModels`，被记过名的模型不再重复发送，省掉每轮一次注定失败的调用。
+
+> 注：上游其它 HTTP 错误仍会带上状态码与 `error.message` 一起返回，只是不再整段 JSON 糊脸。
 
 ---
 
