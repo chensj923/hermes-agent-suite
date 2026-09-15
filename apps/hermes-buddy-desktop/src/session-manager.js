@@ -9,6 +9,7 @@ const { ToolRegistry } = require('./tools');
 const { Brain, describeBrainError, BUDDY_PROXY_PORT } = require('./agent/brain');
 const { AgentLoop } = require('./agent/loop');
 const { ChannelClient } = require('./agent/channel');
+const { DashboardClient } = require('./agent/dashboard-client');
 const { buildSystemPrompt, DEFAULT_PERSONA } = require('./agent/prompts');
 const { MemoryStore, rememberLine } = require('./memory');
 const { SkillStore } = require('./skills');
@@ -104,8 +105,14 @@ class SessionManager {
   status() {
     if (!this.connection) this.connection = this.store.load();
     const view = publicView(this.connection);
+    // 工作目录优先用"激活智能体专属配置"，其次才用连接时的默认工作目录。
+    // 之前直接拿 connection.workspace，导致切换智能体后聊天框下方显示的工作目录不一致。
+    const effectiveWs = this.effectiveWorkspace(this.connection) || view.workspace;
+    const workspaceSource = (this.activeAgent && this.activeAgent.workspace) ? 'agent' : 'connection';
     return {
       ...view,
+      workspace: effectiveWs,
+      workspaceSource,
       configured: Boolean(this.connection),
       ready: Boolean((this.brain && this.workspace) || (this.channel && this.channel.connected)),
       connected: Boolean(this.session || (this.channel && this.channel.connected)),
@@ -253,6 +260,11 @@ class SessionManager {
       return await this.connectChannel(normalized);
     }
 
+    // Dashboard 模式：HTTP 连 Dashboard 后端（:9119），与官方 Desktop 一致
+    if (normalized.mode === 'dashboard') {
+      return await this.connectDashboard(normalized);
+    }
+
     // 端点能力校验：agent 端点自动切换到纯推理端口，找不到直接报可操作的错。
     const resolved = await this.resolveBrain(normalized);
     const brain = resolved.brain;
@@ -377,7 +389,50 @@ class SessionManager {
       models: [],
       workspace: this.describeWorkspace(),
       gatewayWarning: null,
-      endpointNotice: '通道模式：决策在 Hermes 主机外挂通道，本地只执行工具。'
+      endpointNotice: this.connection && this.connection.mode === 'dashboard'
+        ? 'Dashboard 模式：通过 HTTP 连 Hermes Dashboard 后端。'
+        : '通道模式：决策在 Hermes 主机外挂通道，本地只执行工具。'
+    };
+  }
+
+  /**
+   * Dashboard 模式连接：通过 HTTP 连 Hermes Dashboard 后端（:9119）。
+   * 与官方 Hermes Desktop 的连接方式一致：HTTP REST，不走 WS。
+   * 事件接口与 ChannelClient 完全一致，send() 无需区分。
+   */
+  async connectDashboard(normalized) {
+    const client = new DashboardClient({
+      url: normalized.dashboardUrl,
+      token: normalized.apiKey,
+      tools: this.tools,
+      logger: this.logger,
+      autoConfirm: true
+    });
+    try {
+      await client.connect();
+    } catch (error) {
+      throw new Error(`连不上 Dashboard 后端（${normalized.dashboardUrl}）：${error.message}`);
+    }
+    this.channel = client;  // 复用 this.channel 让 send() 不用改
+    this.brain = null;
+    this.loop = null;
+
+    this.lastGatewayError = null;
+    this._registerGatewayInBackground(normalized);
+
+    const saved = this.store.save(normalized);
+    this.connection = saved;
+    this.messages = [];
+    this.logger.info('connected-dashboard', { dashboardUrl: normalized.dashboardUrl });
+    return {
+      connection: publicView(saved),
+      session: null,
+      deployment: null,
+      health: null,
+      models: [],
+      workspace: this.describeWorkspace(),
+      gatewayWarning: null,
+      endpointNotice: 'Dashboard 模式：通过 HTTP 连 Hermes Dashboard 后端，与官方 Desktop 连接方式一致。'
     };
   }
 
@@ -416,6 +471,7 @@ class SessionManager {
     try {
       this.ensureRuntime(stored);
       if (stored.mode === 'channel') return await this.resumeChannel(stored);
+      if (stored.mode === 'dashboard') return await this.resumeDashboard(stored);
       // 恢复时同样做端点能力校验（agent 端点自动切到纯推理端口并持久化纠正结果）。
       const resolved = await this.resolveBrain(stored);
       const brain = resolved.brain;
@@ -548,8 +604,8 @@ class SessionManager {
       } finally {
         this.controllers.delete(id);
       }
-    } else if (this.connection && this.connection.mode === 'channel') {
-      // 没有活跃通道但有保存的配置：先连上再发。
+    } else if (this.connection && (this.connection.mode === 'channel' || this.connection.mode === 'dashboard')) {
+      // 没有活跃连接但有保存的配置：先连上再发（通道/Dashboard 同一逻辑）。
       try {
         await this._ensureChannel();
         this.channel.emit = emit;
@@ -903,18 +959,53 @@ class SessionManager {
     return this.provisioning.fetchProvisioningStatus(gateway);
   }
 
+  // ---------------------------------------------------------------- 多连接（多网关）
+
+  /** 列出所有已保存的 Hermes 连接（不含密钥），供连接页切换/删除。 */
+  listProfiles() {
+    if (!this.store.listProfiles) return { activeId: null, profiles: [] };
+    const result = this.store.listProfiles();
+    const currentId = this.connection ? this.store._idFor(this.connection) : result.activeId;
+    result.profiles = result.profiles.map((p) => ({ ...p, active: p.id === currentId || p.active }));
+    return result;
+  }
+
+  /** 切换激活连接，并预载到 this.connection，随后 resume 即可直连。 */
+  setActiveProfile(id) {
+    if (!this.store.setActive) throw new Error('存储不可用');
+    this.store.setActive(id);
+    this.connection = this.store.load();
+    return this.connection;
+  }
+
+  /** 删除一个已保存连接；若删的是当前激活项，自动回落到下一个。 */
+  removeProfile(id) {
+    if (!this.store.removeProfile) throw new Error('存储不可用');
+    const removed = this.store.removeProfile(id);
+    if (this.connection && this.store._idFor(this.connection) === id) {
+      this.connection = this.store.load();
+    }
+    return { removed, activeId: this.store.listProfiles().activeId };
+  }
+
   disconnect() {
     this.abort();
     if (this.channel) { this.channel.close(); this.channel = null; }
-    const cleared = this.store.clear(false); // 清除配置
+    // 多连接场景：断开只结束当前会话，保留已保存的连接（profile），
+    // 方便在连接页直接切换 / 重连，不用每次重填主机与 Key。
     this.connection = null;
     this.brain = null;
     this.gateway = null;
     this.session = null;
     this.messages = [];
     this.lastGatewayError = null;
-    this.logger.info('disconnected', { cleared });
-    return { cleared };
+    this.workspace = null;
+    this.tools = null;
+    this.memory = null;
+    this.skills = null;
+    this.loop = null;
+    this.logger.info('disconnected');
+    return { cleared: false };
   }
 
   clearCache() {
