@@ -183,7 +183,7 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 
 ## 8. 首次配置 / First-time setup
 
-> **v3.0 起：连接页不再是「一张长表单 + 连接模式二选一」，而是三步向导。**
+> **v3.0 起：连接页不再是「一张长表单 + 连接模式二选一」，而是三步向导 + 已保存连接列表（v3.1.0 起支持多网关切换与通道路径前缀）。**
 > 同时**本地模式已移除** —— v2.3.10 之后只有**通道模式**一种：决策在 Hermes 服务端外挂通道 `:8822`，
 > 本机只做工具筛选与执行。因此你**不需要再自己找推理端点和 API Key**，向导会替你办好。
 
@@ -219,8 +219,24 @@ npm run build:buddy:win    # 输出 apps/hermes-buddy-desktop/dist/hermes-suite-
 | Profile | 否 | 默认 `buddy` | Gateway 会话用的名字 |
 | 工作目录 | **是** | `D:\work\buddy` | 强制绝对路径，首次使用会建好 |
 | 权限档位 | 否 | `读 + 写`（推荐） | 控制工具集是否启用危险动作 |
+| 通道路径前缀 | 否 | `/api/buddy/channel` | 仅当服务端通道经过反向代理、带了非默认路径前缀时才改（如 `/prefix/buddy`）；留空用默认路径 |
 
 **已配置后再启动**：自动恢复连接；恢复失败就跳到第 3 步让你确认参数。
+
+### 8.3 多网关（已保存连接）与通道前缀（v3.1.0）
+
+- **多网关管理**：连过的 Hermes 主机都会被 DPAPI 加密保存为一条"连接"。连接页会先列出**已保存的连接**，
+  点「连接」秒切并直连，点「删除」移除本地配置（不碰服务端）；点「＋ 新建连接」回到向导，
+  **向导第一步左上角会出现「← 返回已保存连接」，随时退回列表**（v3.1.1 补的细节）。
+  侧边栏「管理连接」随时回到这个列表。这借鉴了 Hermes Desktop 的多网关思路，但 Buddy 的每条连接都是
+  **通道模式**（决策在服务端、手在本地），与 Desktop 的纯远程 Gateway 不同。
+- **通道路径前缀**：若服务端通道走了反代、URL 带了非默认前缀，在高级设置里填「通道路径前缀」即可，
+  不用改整段 WS 地址。
+- **新增智能体 vs 配置智能体（界面已区分）**：侧边栏「＋ 新智能体」打开的是**独立新建弹窗**（名称 / 工作目录 /
+  模型 / 权限），创建后自动打开该智能体的配置面板；齿轮图标才是「配置当前智能体」。两者入口不同、不会混淆。
+  聊天框下方的**工作目录标签**现在严格跟随**当前激活智能体**的配置：若智能体单独设了工作目录就显示它并标注
+  「来自智能体配置」，否则回落到连接默认并标注「连接默认」——修复了 3.0 里标签与设置不一致的问题。
+
 
 ### 8.1 端口约定
 
@@ -314,14 +330,17 @@ Buddy 与 Hermes 的 `/v1/chat/completions` 是**两种正交的 API 语义**，
 |------|------|
 | `buddy-inference-proxy.py` | 推理直通代理（端口 8811），零依赖 Python |
 | `buddy-channel.py` | WS 工具通道（端口 8822），零依赖 Python |
-| `deploy.sh` | Hermes 侧执行脚本：部署两个组件 + 探测上游 + 写 env + 健康检查 |
+| `deploy.sh` | Hermes 侧执行脚本：部署两个组件 + 探测上游 + 写 env + 健康检查（依赖 systemd） |
 | `deploy.ps1` | Windows 侧推送脚本：用 OpenSSH 的 scp/ssh 一键推送到 Hermes 并远程执行 deploy.sh |
+| `start-channel.sh` | **独立启动脚本**（v3.1.1+，Docker / 无 systemd）：不依赖 systemd，前台或 `--daemon` 拉起 `buddy-channel.py` |
+| `docker-compose.example.yml` / `Dockerfile.example` | Docker 通道部署示例（sidecar 容器或独立镜像） |
 | `README.md` | 压缩包说明 |
 
-**两种部署方式：**
+**三种部署方式：**
 
 1. **手动拷贝**：点连接页「生成服务端准备脚本」-> 弹窗里的「导出部署包」按钮，把 `.tar.gz` 拷到 Hermes，解开跑 `sudo bash deploy.sh`。
 2. **一键推送**（Windows 有 OpenSSH 密钥）：在同一个弹窗里点「部署到服务器 ▾」，填 Hermes 主机 + SSH 私钥，点「推送并部署」--deploy.ps1 会 scp 压缩包到 Hermes 并 ssh 解压执行 deploy.sh，全程实时回显输出。
+3. **Docker / 无 systemd**（v3.1.1+）：点弹窗里「下载通道脚本 (Docker/手动)」按钮，把 `start-channel.sh` 下载到本地后传到 Hermes 主机，执行 `bash start-channel.sh`（前台，适合容器主进程）或 `bash start-channel.sh --daemon`（后台）。脚本会自动探测 `HERMES_HOME` / `API_SERVER_KEY` / `buddy-channel.py`，找不到时可用 `BUDDY_CHANNEL_DOWNLOAD=1` 从 GitHub 拉取。完整 Docker 编排见部署包内 `docker-compose.example.yml` 与 `Dockerfile.example`。
 
 > 两种部署方式与「生成准备脚本」**并存**：准备脚本是运行时把 Python 源码以 heredoc 内嵌到 bash 里生成；压缩包是把真实 `.py` 文件 + 执行脚本直接打包。两条路径部署的组件完全相同，用户按场景选。
 
