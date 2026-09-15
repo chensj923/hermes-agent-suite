@@ -214,6 +214,20 @@ button:disabled { opacity: .5; cursor: default; }
 .connect-status-line[data-tone="ok"] { color: var(--ok); }
 .connect-status-line[data-tone="warn"] { color: var(--warn); }
 
+.manual-deploy-panel {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.04);
+}
+.manual-deploy-panel h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+.manual-deploy-panel[hidden] { display: none; }
+
 .advanced {
   margin: 6px 0 14px;
   border: 1px solid var(--border);
@@ -873,3 +887,69 @@ button:disabled { opacity: .5; cursor: default; }
   border-top: 1px solid var(--border);
   z-index: 5;
 }
+
+/* ---------- 多网关：已保存连接列表 ---------- */
+.connect-profiles { margin-bottom: 6px; }
+.connect-profiles .connect-brand { margin-bottom: 14px; }
+.profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 6px 0 16px;
+  max-height: 46vh;
+  overflow: auto;
+}
+.profile-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.profile-card[data-active="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.profile-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.profile-host {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.profile-current {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-weight: 500;
+}
+.profile-sub { font-size: 12px; color: var(--muted); }
+.profile-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.profile-empty { color: var(--muted); font-size: 13px; padding: 6px 0 12px; }
+
+/* 新建连接按钮占满宽度 */
+#btn-add-conn.connect-submit { width: 100%; margin-top: 4px; }
+
+/* 新建智能体弹窗里的字段间距微调 */
+#agent-create-dialog .connect-field { margin-bottom: 12px; }
+#agent-create-dialog .modal-actions { margin-top: 6px; }
+
+/* 向导步骤 0 的"返回已保存连接"：低调的左对齐文字按钮 */
+.back-link {
+  align-self: flex-start;
+  margin: 0 0 4px 0;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--accent, #4a8cff);
+  background: transparent;
+  border: none;
+}
+.back-link:hover { text-decoration: underline; }
