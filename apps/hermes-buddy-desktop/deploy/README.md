@@ -10,6 +10,8 @@
 | `buddy-channel.py` | WS 工具通道（端口 **8822**）。决策在 Hermes 服务端跑 Agent 循环，把工具调用经 WebSocket 卸载给 Buddy 客户端本地执行（飞书式通道架构）。 |
 | `deploy.sh` | **Hermes 侧执行脚本**：把上面两个组件部署到 `$HERMES_HOME`、注册 systemd（无 systemd 则 nohup 兜底）、探测上游、写 env、确保 API Key、重启 Gateway、健康检查并打印连接说明。 |
 | `deploy.ps1` | **Windows 侧推送脚本**（可选）：用系统 OpenSSH 把本压缩包 scp 到 Hermes，再 ssh 解压并执行 `deploy.sh`。 |
+| `start-channel.sh` | **独立启动脚本**（Docker / 手动）：不依赖 systemd，前台（容器主进程）或 `--daemon` 后台启动 `buddy-channel.py`。给「Hermes 跑在 Docker / 轻量 VM、没有 systemd」的客户用。 |
+| `docker-compose.example.yml` / `Dockerfile.example` | Docker 通道部署示例：用 sidecar 容器或独立镜像跑 8822 通道，与 Hermes 共享 `HERMES_HOME` 卷。 |
 | `README.md` | 本说明。 |
 
 ## 方式一：手动部署（在 Hermes 上跑，无需从 Windows 推送）
@@ -40,6 +42,23 @@
 ```
 
 脚本会 scp 压缩包到 Hermes 的 `/tmp`，再 ssh 解压并运行 `deploy.sh`。
+
+## 方式三：Docker / 无 systemd 环境（start-channel.sh）
+
+有些客户把 Hermes 跑在 **Docker 容器**里，没有 systemd，`deploy.sh` 的 systemd 分支用不上。这种场景只需要在能读到 Hermes 配置（含 `API_SERVER_KEY` / `config.yaml`）的环境里启动 `buddy-channel.py`：
+
+```bash
+# 把 buddy-channel.py 和 start-channel.sh 放到同一目录后：
+bash start-channel.sh                 # 前台运行（推荐作为容器 CMD / 主进程）
+bash start-channel.sh --daemon        # 普通 VM 上 nohup 后台运行
+```
+
+环境变量（均可选，脚本自动探测）：
+`HERMES_HOME`（默认 `/root/.hermes`）、`BUDDY_CHANNEL_HOST`（默认 `0.0.0.0`）、`BUDDY_CHANNEL_PORT`（默认 `8822`）、`API_SERVER_KEY`（默认从 `.env` 探测）。
+本地找不到 `buddy-channel.py` 时，可设 `BUDDY_CHANNEL_DOWNLOAD=1` 从 GitHub 对应版本标签自动下载。
+
+更完整的 Docker 编排见同目录 `docker-compose.example.yml`（sidecar 容器）与 `Dockerfile.example`（烤进镜像）。
+启动后在 Buddy 客户端「通道模式」填 `ws://<宿主机IP>:8822/api/buddy/channel`。
 
 ## 部署完成后
 
