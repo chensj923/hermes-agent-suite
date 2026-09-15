@@ -391,10 +391,27 @@ el.btnWizardAction.addEventListener('click', async () => {
   try {
     if (state.wizardMode === 'existing') {
       setWizardLog('正在通过 SSH 检查 Hermes 部署状态…\n');
-      const result = await api.sshCheck({ host, user, keyPath, password, sshPort });
+      let result = await api.sshCheck({ host, user, keyPath, password, sshPort });
       if (!result.ok) { setWizardLog('SSH 连接失败: ' + (result.error || '未知错误') + '\n'); return; }
       if (!result.deployed) { setWizardLog('\n服务器上尚未部署 Hermes，请返回选择全新部署。\n'); return; }
+      // 服务端通道过旧：ssh-check 本身不部署，这里自动补一次升级部署。
+      // 不带上游参数 —— deploy.sh 检测不到 BUDDY_UPSTREAM_* 就不会动 buddy-proxy.env，
+      // 服务端现有的上游配置原样保留。
+      if (result.channelOutdated) {
+        setWizardLog('\n检测到服务端通道版本过旧（' + (result.channelVersion || '未知') + '，客户端需要 1.1+），正在自动升级部署…\n');
+        const initResult = await api.deployInit({});
+        if (!initResult.ok) { setWizardLog('初始化部署包失败: ' + (initResult.error || '未知错误') + '\n'); return; }
+        const deployResult = await api.deployToServer({ host, user, keyPath, password, sshPort });
+        if (!deployResult.ok) { setWizardLog('\n自动升级部署失败（退出码 ' + deployResult.code + '）。请检查上方日志，或返回改用「全新部署」。\n'); return; }
+        setWizardLog('\n升级部署完成，重新检查服务端…\n');
+        result = await api.sshCheck({ host, user, keyPath, password, sshPort });
+        if (!result.ok) { setWizardLog('复查失败: ' + (result.error || '未知错误') + '\n'); return; }
+        if (result.channelOutdated) { setWizardLog('\n部署后通道版本仍过旧（' + (result.channelVersion || '未知') + '），请到服务器上手动重跑 deploy.sh。\n'); return; }
+      }
       if (!result.apiKey) { setWizardLog('\n已部署但未找到 API Key，请手动检查服务端配置。\n'); return; }
+      if (result.proxyEnv === 'no') {
+        setWizardLog('\n注意：服务端没有 buddy-proxy.env（上游未配置），对话会报「上游未配置」。如需填写上游，请返回改用「全新部署」。\n');
+      }
       state.sshHost = host;
       state.sshResult = result;
       el.fieldHostConfirm.value = host;
@@ -772,7 +789,7 @@ api.onChatEvent((event) => {
       break;
     case 'error':
       finishAssistantBubble('');
-      addMessage('error', event.text || event.message || '本地 Agent 出错');
+      addMessage('error', cleanIpcError(event.text || event.message) || '本地 Agent 出错');
       break;
     case 'done':
       // 由 send() 的 Promise resolve 处理；这里只清掉 thinking 标记。
@@ -823,6 +840,13 @@ function setBusy(busy) {
   if (!busy) el.input.focus();
 }
 
+// Electron 给主进程抛出的错误加了一层壳：
+// "Error invoking remote method 'buddy:chat': Error: <真正的信息>"
+// 直接显示会盖住真正的原因，这里剥掉。
+function cleanIpcError(raw) {
+  return String(raw || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '').trim();
+}
+
 async function sendMessage() {
   const text = el.input.value.trim();
   if (!text || state.activeRequestId) return;
@@ -837,8 +861,11 @@ async function sendMessage() {
     finishAssistantBubble(result && result.text);
   } catch (error) {
     finishAssistantBubble('');
-    addMessage('error', (error && error.message) || '本地 Agent 调用失败');
+    const message = cleanIpcError(error && error.message) || '本地 Agent 调用失败';
+    addMessage('error', message);
     setStatusDot('error');
+    // 模型被上游打回：服务端已把它从可用列表移除，这里刷新下拉让用户别再选到它。
+    if (/不被上游支持|UnsupportedModel|model_unsupported/i.test(message)) loadModels();
   } finally {
     state.activeRequestId = null;
     setBusy(false);
