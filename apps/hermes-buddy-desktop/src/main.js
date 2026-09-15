@@ -588,7 +588,7 @@ function registerIpc() {
           echo "channel_health=$(curl -s -m 3 http://127.0.0.1:8822/health 2>/dev/null || echo none)"
           echo "proxy_health=$(curl -s -m 3 http://127.0.0.1:8811/health 2>/dev/null || echo none)"
           CHANNEL_VER=$(grep -oE '^CHANNEL_VERSION *= *"[0-9.]+"' "$HERMES_HOME/buddy-channel.py" 2>/dev/null | grep -oE '[0-9.]+' | head -1)
-          echo "channel_version=${CHANNEL_VER:-none}"
+          echo "channel_version=\${CHANNEL_VER:-none}"
           echo "proxy_env=$([ -f "$HERMES_HOME/buddy-proxy.env" ] && echo yes || echo no)"
           API_KEY=""
           [ -f "$HERMES_HOME/.api_server_key" ] && API_KEY=$(cat "$HERMES_HOME/.api_server_key" 2>/dev/null | tr -d '\\r\\n')
