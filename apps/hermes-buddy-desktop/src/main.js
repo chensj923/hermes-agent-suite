@@ -130,7 +130,7 @@ function registerIpc() {
     const result = await Promise.race([
       manager.connect(connection),
       new Promise((_, reject) => setTimeout(
-        () => reject(new Error('连接超时（20 秒），请检查 Hermes 主机地址和通道端口（默认 8822）是否正确')),
+        () => reject(new Error('连接超时（20 秒），请检查 Hermes 主机地址和端口（Dashboard 默认 9119，WS 通道默认 8822）是否正确')),
         timeoutMs
       ))
     ]);
@@ -183,6 +183,19 @@ function registerIpc() {
     manager.logger.info('cache-cleared');
     return { cleared: true };
   });
+  // ---- 多连接（多网关）：列出 / 激活 / 删除已保存的 Hermes 连接 ----
+  handle('buddy:profiles', () => manager.listProfiles());
+  handle('buddy:profile:activate', async (_event, id) => {
+    // 切换前先关掉当前通道 / 推理端点，避免旧连接的 WS 残留（多网关切换时尤其重要）
+    if (manager.channel) { try { manager.channel.close(); } catch (_) {} manager.channel = null; }
+    manager.brain = null;
+    manager.loop = null;
+    manager.setActiveProfile(String(id));
+    const result = await manager.resume();
+    return { ...result, status: manager.status(), gatewayWarning: manager.lastGatewayError ? describeGatewayError(manager.lastGatewayError) : null };
+  });
+  handle('buddy:profile:remove', (_event, id) => manager.removeProfile(String(id)));
+
   handle('buddy:models', () => manager.models());
   handle('buddy:history', () => manager.history());
   handle('buddy:clear-history', () => manager.clearHistory());
@@ -206,6 +219,30 @@ function registerIpc() {
     const filePath = path.join(app.getPath('downloads'), `${safeName}.sh`);
     await fs.promises.writeFile(filePath, String(script || ''), { encoding: 'utf8', mode: 0o600 });
     return { path: filePath };
+  });
+
+  // 让 Docker / 无 systemd 客户直接下载独立启动脚本（不依赖 SSH 一键部署）。
+  handle('buddy:download-channel-script', async () => {
+    const init = await initDeployIfNeeded();
+    if (!init.ok) return { error: init.error || '部署包未就绪，请先在部署页点「初始化部署包」' };
+    const src = path.join(DEPLOY_DIR, 'start-channel.sh');
+    if (!fs.existsSync(src)) return { error: '未找到 start-channel.sh（部署包可能不完整，请重新初始化）' };
+    const target = path.join(app.getPath('downloads'), 'start-channel.sh');
+    await fs.promises.copyFile(src, target);
+    try { fs.chmodSync(target, 0o755); } catch (_) { /* Windows 上无妨 */ }
+    return { path: target };
+  });
+
+  // 下载 deploy.sh 部署脚本（给客户自己在 Hermes 上跑，适配 Docker / 无 SSH 场景）。
+  handle('buddy:download-deploy-sh', async () => {
+    const init = await initDeployIfNeeded();
+    if (!init.ok) return { error: init.error || '部署包未就绪，请先在部署页点「初始化部署包」' };
+    const src = path.join(DEPLOY_DIR, 'deploy.sh');
+    if (!fs.existsSync(src)) return { error: '未找到 deploy.sh（部署包可能不完整，请重新初始化）' };
+    const target = path.join(app.getPath('downloads'), 'deploy.sh');
+    await fs.promises.copyFile(src, target);
+    try { fs.chmodSync(target, 0o755); } catch (_) { /* Windows 上无妨 */ }
+    return { path: target };
   });
 
   // ---- 服务端部署压缩包（随安装包自带，含 8811 代理 + 8822 通道 + 执行脚本） ----
@@ -247,14 +284,22 @@ function registerIpc() {
 
   handle('buddy:deploy-init', async (_event, { force = false } = {}) => {
     const marker = path.join(DEPLOY_DIR, '.initialized');
+    const appVersion = app.getVersion();
     if (!force) {
-      try { if (fs.existsSync(marker)) return { ok: true, dir: DEPLOY_DIR, cached: true }; } catch (_) { /* 继续 */ }
+      try {
+        if (fs.existsSync(marker)) {
+          const saved = fs.readFileSync(marker, 'utf8').trim();
+          if (saved === appVersion) return { ok: true, dir: DEPLOY_DIR, cached: true };
+        }
+      } catch (_) { /* 继续 */ }
     }
     const bundle = resolveBundleInResources();
     if (!bundle) {
       return { ok: false, dir: DEPLOY_DIR, error: '安装包内未找到 hermes-buddy-server-deploy.tar.gz' };
     }
     try {
+      // force 或版本变了，清旧目录再解包
+      await fs.promises.rm(DEPLOY_DIR, { recursive: true, force: true }).catch(() => {});
       await extractBundle(bundle, DEPLOY_DIR);
     } catch (e) {
       return { ok: false, dir: DEPLOY_DIR, error: e.message };
@@ -263,7 +308,7 @@ function registerIpc() {
     for (const f of ['deploy.sh', 'deploy.ps1']) {
       try { fs.chmodSync(path.join(DEPLOY_DIR, f), 0o755); } catch (_) { /* Windows 上无妨 */ }
     }
-    await fs.promises.writeFile(marker, new Date().toISOString(), 'utf8');
+    await fs.promises.writeFile(marker, appVersion, 'utf8');
     const files = fs.existsSync(DEPLOY_DIR) ? fs.readdirSync(DEPLOY_DIR).filter(f => !f.startsWith('.')) : [];
     return { ok: true, dir: DEPLOY_DIR, files, cached: false };
   });
@@ -280,13 +325,23 @@ function registerIpc() {
     return null;  // 只在初始化后才有
   }
 
-  /** 如果还没初始化过就解包一次（用于 deploy-to-server 自动前置）。 */
+  /** 如果还没初始化过、或版本变了就解包（用于 deploy-to-server 自动前置）。 */
   async function initDeployIfNeeded() {
     const marker = path.join(DEPLOY_DIR, '.initialized');
-    try { if (fs.existsSync(marker)) return { ok: true, dir: DEPLOY_DIR, cached: true }; } catch (_) { /* 继续 */ }
+    const appVersion = app.getVersion();
+    // 写入版本标记；版本不匹配就强制重新解包
+    try {
+      if (fs.existsSync(marker)) {
+        const saved = fs.readFileSync(marker, 'utf8').trim();
+        if (saved === appVersion) return { ok: true, dir: DEPLOY_DIR, cached: true };
+        // 版本变了，继续重新解包
+      }
+    } catch (_) { /* 继续 */ }
     const bundle = resolveBundleInResources();
     if (!bundle) return { ok: false, error: '安装包内未找到 hermes-buddy-server-deploy.tar.gz' };
     try {
+      // 清旧目录再解包，避免旧文件残留
+      await fs.promises.rm(DEPLOY_DIR, { recursive: true, force: true }).catch(() => {});
       await extractBundle(bundle, DEPLOY_DIR);
     } catch (e) {
       return { ok: false, error: e.message };
@@ -294,7 +349,7 @@ function registerIpc() {
     for (const f of ['deploy.sh', 'deploy.ps1']) {
       try { fs.chmodSync(path.join(DEPLOY_DIR, f), 0o755); } catch (_) { /* Windows 上无妨 */ }
     }
-    await fs.promises.writeFile(marker, new Date().toISOString(), 'utf8');
+    await fs.promises.writeFile(marker, appVersion, 'utf8');
     return { ok: true, dir: DEPLOY_DIR, cached: false };
   }
 
@@ -318,7 +373,11 @@ function registerIpc() {
   handle('buddy:deploy-to-server', (event, opts = {}) => {
     return new Promise(async (resolve) => {
       const sender = event.sender;
-      const send = (text) => safeSend(sender, 'buddy:deploy:progress', { text });
+      // 同时写日志和发 IPC 进度，这样用户关掉 UI 也能在 buddy.log 里看到部署过程
+      const send = (text) => {
+        logger.info('deploy-progress', { text: text.trim() });
+        safeSend(sender, 'buddy:deploy:progress', { text });
+      };
 
       // 确保部署包已初始化到 userData（首次运行自动提取）
       const initResult = await initDeployIfNeeded();
@@ -337,13 +396,27 @@ function registerIpc() {
       const keyPath = String(opts.keyPath || '').trim();
       const password = String(opts.password || '').trim();
       const sshPort = Number(opts.sshPort) || 22;
+      const upstreamBase = String(opts.upstreamBase || '').trim();
+      const upstreamKey = String(opts.upstreamKey || '').trim();
+      const upstreamModel = String(opts.upstreamModel || '').trim();
 
       if (!host) { send('ERROR: 请先填 Hermes 主机地址。\n'); return resolve({ ok: false, error: 'no host' }); }
       if (!keyPath && !password) { send('ERROR: 请填 SSH 私钥路径或 SSH 密码（二选一）。\n'); return resolve({ ok: false, error: 'no auth' }); }
 
       const remoteTar = '/tmp/hermes-buddy-server-deploy.tar.gz';
       const remoteDir = '/tmp/hermes-buddy-deploy';
-      const remoteCmd = `mkdir -p ${remoteDir} && tar -xzf ${remoteTar} -C ${remoteDir} && cd ${remoteDir} && (command -v sudo >/dev/null 2>&1 && sudo bash deploy.sh || bash deploy.sh)`;
+      // 通过环境变量把上游参数传给 deploy.sh。
+      // 关键：sudo 会清除环境变量，必须用 `sudo -E env VAR=... bash deploy.sh`，
+      // 而不是 `sudo VAR=... bash deploy.sh`（sudo 不支持 VAR=value 前缀语法）。
+      const envVars = [
+        upstreamBase ? `BUDDY_UPSTREAM_BASE=${JSON.stringify(upstreamBase)}` : '',
+        upstreamKey ? `BUDDY_UPSTREAM_KEY=${JSON.stringify(upstreamKey)}` : '',
+        upstreamModel ? `BUDDY_UPSTREAM_MODEL=${JSON.stringify(upstreamModel)}` : '',
+      ].filter(Boolean).join(' ');
+      const deployCmd = envVars ? `env ${envVars} bash deploy.sh` : 'bash deploy.sh';
+      // 有 sudo 时用 sudo -E env ...（-E 保留环境 + env 显式传递）；
+      // 无 sudo 时直接 env ... bash deploy.sh
+      const remoteCmd = `mkdir -p ${remoteDir} && tar -xzf ${remoteTar} -C ${remoteDir} && cd ${remoteDir} && (command -v sudo >/dev/null 2>&1 && sudo -E ${deployCmd} || ${deployCmd})`;
 
       // ---- 判断认证方式 ----
       const useKey = keyPath && fs.existsSync(keyPath);
@@ -430,6 +503,7 @@ function registerIpc() {
               stream.on('stderr', (d) => send(d.toString()));
               stream.on('close', (code) => {
                 send(`\n[deploy] 远程命令退出码: ${code}\n`);
+                logger.info('deploy-complete', { host, code: code ?? 0, ok: code === 0 });
                 conn.end();
                 resolve({ ok: code === 0, code: code ?? 0 });
               });
@@ -465,7 +539,10 @@ function registerIpc() {
   handle('buddy:ssh-check', (event, opts = {}) => {
     return new Promise(async (resolve) => {
       const sender = event.sender;
-      const send = (text) => safeSend(sender, 'buddy:deploy:progress', { text });
+      const send = (text) => {
+        logger.info('ssh-check-progress', { text: text.trim() });
+        safeSend(sender, 'buddy:deploy:progress', { text });
+      };
 
       const host = String(opts.host || '').trim();
       const user = String(opts.user || 'root').trim();
@@ -557,6 +634,7 @@ function registerIpc() {
               send('[check] 检查完成，可以连接。\n');
             }
 
+            logger.info('ssh-check-complete', { host, deployed, channelUp, proxyUp, apiKeyFound: !!apiKey });
             resolve({ ok: true, deployed, channelUp, proxyUp, apiKey, host });
           });
         });
