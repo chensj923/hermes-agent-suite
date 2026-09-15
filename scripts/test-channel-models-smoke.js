@@ -45,7 +45,7 @@ const upstream = http.createServer((req, res) => {
   if (url === '/v1/models') {
     seen.modelRequests.push(url);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }] }));
+    res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'bad-model' }] }));
     return;
   }
   if (url === '/v1/chat/completions') {
@@ -55,6 +55,14 @@ const upstream = http.createServer((req, res) => {
       let parsed = {};
       try { parsed = JSON.parse(body || '{}'); } catch (_) {}
       seen.lastChatModel = parsed.model || null;
+      // 模拟火山方舟 coding plan：某些模型端点根本不接受，直接 404 UnsupportedModel
+      if (parsed.model === 'bad-model') {
+        seen.unsupportedHits = (seen.unsupportedHits || 0) + 1;
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'UnsupportedModel',
+          message: 'The requested model does not support the coding plan feature.', param: '' } }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ choices: [{ message: { content: 'hello from ' + (parsed.model || '?') } }] }));
     });
@@ -160,19 +168,20 @@ async function main() {
     await waitForChannel(15000);
     console.log(`通道服务已启动: ws://127.0.0.1:${CHANNEL_PORT}`);
 
+    const events = [];
     const client = new ChannelClient({
       url: `ws://127.0.0.1:${CHANNEL_PORT}/api/buddy/channel`,
       token: TOKEN,
       tools: { invoke: async () => ({ ok: true, text: 'ok' }) },
       logger: { info() {}, warn() {}, error() {}, debug() {} },
-      emit: () => {},
+      emit: (e) => events.push(e),
     });
     await client.connect();
 
     // 1) 模型清单透传
     const models = await client.listModels();
     console.log(`listModels() => ${JSON.stringify(models)}`);
-    check('拿到上游真实模型清单', Array.isArray(models) && models.length === 3, JSON.stringify(models));
+    check('拿到上游真实模型清单', Array.isArray(models) && models.length === 4, JSON.stringify(models));
     check('清单包含 model-c', models.includes('model-c'), JSON.stringify(models));
     check('默认模型排在最前', models[0] === 'model-a', JSON.stringify(models));
     check('确实请求了上游 /v1/models', seen.modelRequests.includes('/v1/models'));
@@ -181,6 +190,18 @@ async function main() {
     const result = await client.sendMessage('你好', [], { model: 'model-c', timeoutMs: 20000 });
     console.log(`sendMessage(model=model-c) => ${JSON.stringify(result && result.text)}`);
     check('服务端用选中的模型请求了上游', seen.lastChatModel === 'model-c', String(seen.lastChatModel));
+
+    // 2.5) 上游拒绝这个模型（coding plan 场景）：自动改用默认模型，并把它从清单里剔除
+    const out = await client.sendMessage('你好', [], { model: 'bad-model', timeoutMs: 20000 });
+    console.log(`sendMessage(model=bad-model) => ${JSON.stringify(out && out.text)}`);
+    check('不被上游接受的模型自动改用默认模型', seen.lastChatModel === 'model-a', String(seen.lastChatModel));
+    check('回退后仍拿到正常回复', /hello from model-a/.test((out && out.text) || ''), out && out.text);
+    check('提示了「已自动改用默认模型」',
+      events.some((e) => e && e.type === 'status' && /不被上游支持/.test(e.text || '')),
+      JSON.stringify(events.filter((e) => e && e.type === 'status')));
+    const after = await client.listModels();
+    console.log(`listModels()（打回后） => ${JSON.stringify(after)}`);
+    check('被打回的模型从清单里移除', !after.includes('bad-model'), JSON.stringify(after));
 
     client.close();
 
