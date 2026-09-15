@@ -33,7 +33,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CHANNEL_VERSION = "1.1"
+CHANNEL_VERSION = "1.2"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -301,6 +301,12 @@ def models_url():
     return base + "/v1/models"
 
 
+# 运行期发现的「上游不接受」的模型名。上游 /models 往往会把账号下所有模型都列出来，
+# 但真正能聊的只是一部分（典型：火山方舟 Ark 的 coding plan 端点只接受特定模型，
+# 选错了就 404 UnsupportedModel）。这里记下被打回的模型，后续 list_models 不再返回。
+UNSUPPORTED_MODELS = set()
+
+
 def _flatten_names(items):
     """把 /models 返回的条目（字符串或 dict）平铺成模型名列表。"""
     out = []
@@ -389,13 +395,16 @@ def list_upstream_models():
     default = (STATE["model"] or "").strip()
     merged = []
     seen = set()
-    if default:
+    if default and default not in UNSUPPORTED_MODELS:
         merged.append(default)
         seen.add(default)
     for m in ids:
-        if m and m not in seen:
+        if m and m not in seen and m not in UNSUPPORTED_MODELS:
             seen.add(m)
             merged.append(m)
+    if not merged and default:
+        # 极端情况：所有候选都被打回过，至少保留默认模型，别让 UI 下拉变成空白
+        merged.append(default)
     return merged
 
 
@@ -488,6 +497,43 @@ SYSTEM_PROMPT = (
 
 # ----------------------------------------------------------------- LLM 调用
 
+class UpstreamError(RuntimeError):
+    """上游（LLM 供应商）返回的错误，带结构化 code / HTTP status / 给用户的建议。"""
+
+    def __init__(self, message, code="upstream_error", status=0, hint="", detail=""):
+        RuntimeError.__init__(self, message)
+        self.code = code
+        self.status = status
+        self.hint = hint
+        self.detail = detail
+
+
+def _upstream_error_fields(raw):
+    """从上游响应体里剥出 (code, message)。非 JSON 时原样返回。"""
+    try:
+        body = json.loads(raw or "")
+    except Exception:  # noqa: BLE001
+        return "", (raw or "").strip()
+    if not isinstance(body, dict):
+        return "", (raw or "").strip()
+    err = body.get("error")
+    if not isinstance(err, dict):
+        err = body
+    code = str(err.get("code") or err.get("type") or "").strip()
+    message = str(err.get("message") or err.get("msg") or "").strip() or (raw or "").strip()
+    return code, message
+
+
+def _is_model_unsupported(code, message):
+    """判断上游是不是在说「这个模型我用不了」。"""
+    c = (code or "").lower().replace("_", "").replace("-", "")
+    if c in ("unsupportedmodel", "modelunsupported", "modelnotsupported",
+             "invalidmodel", "modelnotfound", "modeldoesnotexist", "modelnotexist"):
+        return True
+    m = (message or "").lower()
+    return ("model" in m and "does not support" in m) or "unsupported model" in m
+
+
 def call_llm(messages, tools, signal_broken, model=None):
     """返回 { content, tool_calls:[{id,name,arguments}] }。mock 模式走脚本。
 
@@ -498,8 +544,9 @@ def call_llm(messages, tools, signal_broken, model=None):
     url = chat_url()
     if not url:
         raise RuntimeError("上游未配置：在 %s 或 config.yaml 的 model.base_url 写入上游" % PROXY_ENV)
+    payload_model = model or STATE["model"] or "hermes-agent"
     payload = {
-        "model": model or STATE["model"] or "hermes-agent",
+        "model": payload_model,
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
@@ -514,7 +561,27 @@ def call_llm(messages, tools, signal_broken, model=None):
     try:
         resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
     except urllib.error.HTTPError as exc:
-        raise RuntimeError("上游返回 %s: %s" % (exc.code, exc.read().decode("utf-8", "replace")[:300]))
+        raw = ""
+        try:
+            raw = exc.read().decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            pass
+        code, detail = _upstream_error_fields(raw)
+        if _is_model_unsupported(code, detail):
+            UNSUPPORTED_MODELS.add(payload_model)
+            raise UpstreamError(
+                "上游不接受模型 %s（HTTP %s，%s）：%s" % (
+                    payload_model, exc.code, code or "upstream error", detail[:200] or "无详细信息"),
+                code="model_unsupported", status=exc.code,
+                hint="该模型不被当前上游支持（例如火山方舟 coding plan 端点只接受特定模型）。"
+                     "本轮已自动改用默认模型继续；若仍失败，请在智能体配置里换一个模型。",
+                detail=detail,
+            )
+        raise UpstreamError(
+            "上游返回 HTTP %s%s：%s" % (exc.code, "（%s）" % code if code else "",
+                                    detail[:300] or raw[:300] or "无响应内容"),
+            code=code or "upstream_http_error", status=exc.code, detail=detail,
+        )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("上游不可达: %s" % exc)
     body = json.loads(resp.read().decode("utf-8"))
@@ -617,12 +684,29 @@ class Session:
         self.cancel_event = threading.Event()
         self.running = False
         self.model = None            # 客户端指定的模型（user_message.model）
+        self._model_fallback = False  # 本会话是否已因「模型不被支持」回退过
 
     def send(self, obj):
         try:
             self.conn.send_json(obj)
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write("[channel] send failed: %s\n" % exc)
+
+    def _call_llm_with_fallback(self):
+        """调上游；模型被上游拒绝（如 coding plan 不支持）时自动改用默认模型重试一次。"""
+        try:
+            return call_llm(self.messages, TOOL_SCHEMAS, self.cancel_event.is_set, self.model)
+        except UpstreamError as exc:
+            default = (STATE["model"] or "").strip()
+            if (exc.code != "model_unsupported" or self._model_fallback
+                    or not default or default == (self.model or "").strip()):
+                raise
+            self._model_fallback = True
+            bad = (self.model or "").strip() or default
+            self.model = default
+            self.send({"type": "status", "session": self.sid,
+                       "text": "模型 %s 不被上游支持，已自动改用默认模型 %s" % (bad, default)})
+            return call_llm(self.messages, TOOL_SCHEMAS, self.cancel_event.is_set, self.model)
 
     def run_task(self, user_text, history, model=None):
         self.running = True
@@ -643,7 +727,7 @@ class Session:
                     return
                 turns += 1
                 self.send({"type": "status", "session": self.sid, "text": "思考中…", "turn": turns})
-                r = call_llm(self.messages, TOOL_SCHEMAS, self.cancel_event.is_set, self.model)
+                r = self._call_llm_with_fallback()
                 if r.get("content"):
                     self.send({"type": "assistant_chunk", "session": self.sid, "text": r["content"]})
                 calls = r.get("tool_calls") or []
@@ -667,6 +751,9 @@ class Session:
                     self.messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
             self.send({"type": "task_done", "session": self.sid, "text": "",
                        "turns": turns, "stopped": "max_turns"})
+        except UpstreamError as exc:
+            sys.stderr.write("[channel] agent error: %s\n" % exc)
+            self.send({"type": "error", "code": exc.code, "message": str(exc), "hint": exc.hint})
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write("[channel] agent error: %s\n" % exc)
             self.send({"type": "error", "code": "agent_error", "message": str(exc)})
@@ -822,7 +909,8 @@ class WSConnection:
                 models = [STATE["model"] or "hermes-agent"]
                 sys.stderr.write("[channel] list_models error: %s\n" % exc)
             self.send_json({"type": "models", "models": models,
-                            "default": STATE["model"] or ""})
+                            "default": STATE["model"] or "",
+                            "unsupported": sorted(UNSUPPORTED_MODELS)})
         elif t == "tool_result":
             if s:
                 s.on_tool_result(msg.get("id"), msg.get("text", ""), bool(msg.get("blocked")))
