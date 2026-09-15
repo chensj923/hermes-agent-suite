@@ -55,6 +55,7 @@ class SessionManager {
     this.session = null;
     this.controllers = new Map();
     this.lastGatewayError = null; // { code, message, at }，仅用于 UI 诊断，不含密钥
+    this._unsupportedModels = new Set(); // 本会话内被上游拒绝过的模型名
 
     this.workspace = null;
     this.tools = null;
@@ -86,7 +87,10 @@ class SessionManager {
 
   effectiveModel(connection) {
     const agent = this.activeAgent;
-    return (agent && agent.model) || (connection && connection.model) || '';
+    const picked = (agent && agent.model) || (connection && connection.model) || '';
+    // 被上游打回过的模型（如 coding plan 不支持）本会话内不再发送，交给服务端默认模型。
+    if (picked && this._unsupportedModels && this._unsupportedModels.has(picked)) return '';
+    return picked;
   }
 
   /** 会话历史按智能体隔离：切换智能体即切换上下文。 */
@@ -600,6 +604,10 @@ class SessionManager {
         const outdated = (error && error.code === 'channel_outdated') || /通道版本过旧/.test(message);
         const connDead = !outdated && /通道连接已断开|通道握手|ECONN|socket|通道错误|通道连接超时|通道握手超时/.test(message);
         if (outdated) this._channelOutdated = message;
+        if (error && error.code === 'model_unsupported' && wantModel) {
+          this._unsupportedModels.add(wantModel);
+          this.logger.warn('upstream-model-unsupported', { model: wantModel });
+        }
         if (connDead && !toolInterrupted && (this.connection || this.store)) {
           this.logger.warn('channel-dropped-auto-reconnect', { message });
           try { if (this.channel) this.channel.close(); } catch (_) {}
@@ -621,7 +629,10 @@ class SessionManager {
             const wrapped = new Error(m2); wrapped.code = 'channel_error'; throw wrapped;
           }
         }
-        const wrapped = new Error(message || '通道错误'); wrapped.code = 'channel_error'; throw wrapped;
+        // 上游结构化错误（如 model_unsupported）要把 code 传下去，界面才能给针对性提示
+        const wrapped = new Error(message || '通道错误');
+        wrapped.code = (error && error.code) || 'channel_error';
+        throw wrapped;
       } finally {
         this.controllers.delete(id);
       }
