@@ -213,25 +213,52 @@ def discover_upstream():
     cfg = load_yaml(CONFIG_YAML) if os.path.exists(CONFIG_YAML) else {}
     model = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
 
+    # If model.provider is set, look it up in the providers list first.
+    # This handles the model-router pattern where the provider entry has the real
+    # base_url and api_key, while the model section itself has neither.
+    provider_name = model.get("provider") or ""
+    provider_match = {}
+    if provider_name:
+        # Hermes uses "custom_providers" (newer) or "providers" (older)
+        for pk in ("custom_providers", "providers"):
+            plist = cfg.get(pk) if isinstance(cfg.get(pk), list) else None
+            if not plist:
+                continue
+            for p in plist:
+                if isinstance(p, dict) and (p.get("name") == provider_name or p.get("id") == provider_name):
+                    provider_match = p
+                    break
+            if provider_match:
+                break
+
     base = (os.environ.get("BUDDY_UPSTREAM_BASE")
             or proxy_env.get("BUDDY_UPSTREAM_BASE")
+            or provider_match.get("base_url") or provider_match.get("base-url") or provider_match.get("endpoint")
             or model.get("base_url") or model.get("base-url") or model.get("endpoint")
-            or dig(cfg, "base_url", "base-url", "endpoint")
             or env.get("OPENAI_BASE_URL") or "")
+
     name = (os.environ.get("BUDDY_UPSTREAM_MODEL")
             or proxy_env.get("BUDDY_UPSTREAM_MODEL")
             or model.get("name") or model.get("model") or model.get("model_name")
+            or model.get("default")
             or env.get("OPENAI_MODEL") or "hermes-agent")
+
     key = (os.environ.get("BUDDY_UPSTREAM_KEY")
            or proxy_env.get("BUDDY_UPSTREAM_KEY")
-           or (model.get("api_key") or model.get("apiKey") or "")
-           or dig(model, "api_key", "apiKey", "key", "token")
-           or "")
+           or provider_match.get("api_key") or provider_match.get("apiKey") or ""
+           or model.get("api_key") or model.get("apiKey") or "")
+    if not key:
+        key = (dig(model, "api_key", "apiKey", "key", "token") or "")
     if not key:
         for hint in ENV_KEY_HINTS:
             if env.get(hint) and hint != "API_SERVER_KEY":
                 key = env[hint]
                 break
+
+    # Only fall back to the broad dig if provider lookup didn't give us a base
+    if not base:
+        base = (dig(cfg, "base_url", "base-url", "endpoint") or "")
+
     base = expand(base, env)
     name = expand(name, env)
     key = expand(key, env)
@@ -261,9 +288,18 @@ def chat_url():
 def expected_token():
     env = read_env_file(DOTENV)
     proxy_env = read_env_file(PROXY_ENV)
+    # 优先读 .api_server_key 文件（deploy.sh 和 ssh-check 都写这个）
+    key_file = os.path.join(HERMES_HOME, ".api_server_key")
+    file_key = ""
+    try:
+        with open(key_file, "r", encoding="utf-8", errors="replace") as fh:
+            file_key = fh.read().strip()
+    except OSError:
+        pass
     return (os.environ.get("BUDDY_CHANNEL_KEY")
             or proxy_env.get("BUDDY_CHANNEL_KEY")
             or env.get("API_SERVER_KEY")
+            or file_key
             or os.environ.get("API_SERVER_KEY") or "")
 
 
