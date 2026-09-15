@@ -587,6 +587,9 @@ function registerIpc() {
           echo "proxy_port=$(ss -tlnp 2>/dev/null | grep ':8811' | head -1 || echo none)"
           echo "channel_health=$(curl -s -m 3 http://127.0.0.1:8822/health 2>/dev/null || echo none)"
           echo "proxy_health=$(curl -s -m 3 http://127.0.0.1:8811/health 2>/dev/null || echo none)"
+          CHANNEL_VER=$(grep -oE '^CHANNEL_VERSION *= *"[0-9.]+"' "$HERMES_HOME/buddy-channel.py" 2>/dev/null | grep -oE '[0-9.]+' | head -1)
+          echo "channel_version=\${CHANNEL_VER:-none}"
+          echo "proxy_env=$([ -f "$HERMES_HOME/buddy-proxy.env" ] && echo yes || echo no)"
           API_KEY=""
           [ -f "$HERMES_HOME/.api_server_key" ] && API_KEY=$(cat "$HERMES_HOME/.api_server_key" 2>/dev/null | tr -d '\\r\\n')
           if [ -z "$API_KEY" ] && [ -f "$HERMES_HOME/data/.env" ]; then
@@ -617,6 +620,22 @@ function registerIpc() {
             const channelUp = result.channel_health && result.channel_health !== 'none' && result.channel_health.includes('ok');
             const proxyUp = result.proxy_health && result.proxy_health !== 'none' && result.proxy_health.includes('ok');
             const apiKey = result.api_key || '';
+            const channelVersion = result.channel_version || 'none';
+            const proxyEnv = result.proxy_env || 'no';
+            // 与 src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION 保持一致
+            const REQUIRED_CHANNEL_VERSION = '1.1';
+            const verAtLeast = (v, req) => {
+              if (!v || v === 'none') return false;
+              const a = String(v).split('.').map((n) => parseInt(n, 10) || 0);
+              const b = String(req).split('.').map((n) => parseInt(n, 10) || 0);
+              for (let i = 0; i < Math.max(a.length, b.length); i++) {
+                const x = a[i] || 0, y = b[i] || 0;
+                if (x !== y) return x > y;
+              }
+              return true;
+            };
+            // 已部署但服务端通道脚本缺失或版本低于客户端要求 → 需要升级部署
+            const channelOutdated = deployed && !verAtLeast(channelVersion, REQUIRED_CHANNEL_VERSION);
 
             send(`[check] Hermes 目录: ${result.hermes_home_exists || '?'}\n`);
             send(`[check] Hermes CLI: ${result.hermes_cli || 'none'}\n`);
@@ -624,18 +643,22 @@ function registerIpc() {
             send(`[check] WS 通道 8822: ${result.channel_port !== 'none' ? '监听中' : '未监听'}\n`);
             send(`[check] 推理代理 8811: ${result.proxy_port !== 'none' ? '监听中' : '未监听'}\n`);
             send(`[check] 通道健康: ${channelUp ? 'OK' : '不可达'}\n`);
+            send(`[check] 通道版本: ${channelVersion}${channelOutdated ? '（过旧，需要 ' + REQUIRED_CHANNEL_VERSION + '+）' : ''}\n`);
+            send(`[check] 上游配置 buddy-proxy.env: ${proxyEnv === 'yes' ? '存在' : '不存在'}\n`);
             send(`[check] API Key: ${apiKey ? apiKey.slice(0, 4) + '****' + apiKey.slice(-4) : '未找到'}\n`);
 
             if (!deployed) {
               send('[check] Hermes 尚未部署，请先执行部署。\n');
             } else if (!apiKey) {
               send('[check] 已部署但未找到 API Key，请手动检查服务端配置。\n');
+            } else if (channelOutdated) {
+              send('[check] 服务端通道版本过旧，需要升级部署。\n');
             } else {
               send('[check] 检查完成，可以连接。\n');
             }
 
-            logger.info('ssh-check-complete', { host, deployed, channelUp, proxyUp, apiKeyFound: !!apiKey });
-            resolve({ ok: true, deployed, channelUp, proxyUp, apiKey, host });
+            logger.info('ssh-check-complete', { host, deployed, channelUp, proxyUp, apiKeyFound: !!apiKey, channelVersion, channelOutdated, proxyEnv });
+            resolve({ ok: true, deployed, channelUp, proxyUp, apiKey, host, channelVersion, channelOutdated, proxyEnv });
           });
         });
       });
