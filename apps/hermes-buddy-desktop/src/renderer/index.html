@@ -120,16 +120,16 @@
             <small>上游供应商里的模型 ID（需支持 function calling）</small>
           </label>
           <h4 style="margin: 12px 0 4px;">Hermes 服务端安装（完整部署）</h4>
-          <p class="hint" style="margin: 0 0 8px; font-size: 12px; color: var(--text-secondary);">完整部署会在目标机用隔离 venv 安装 Hermes 服务端本体（Gateway 22122）。可指定私有 PyPI 索引；留空则用默认 PyPI。</p>
+          <p class="hint" style="margin: 0 0 8px; font-size: 12px; color: var(--text-secondary);">完整部署会在目标机用隔离 venv 安装 Hermes 服务端本体（Gateway 22122）。已默认使用国内清华 PyPI 镜像加速；如需私有源可自行修改。</p>
           <label class="connect-field">
-            <span>Hermes 安装源（pip index，可选）</span>
-            <input id="field-hermes-index" name="hermesIndex" placeholder="https://pypi.org/simple（留空则用默认）" spellcheck="false">
-            <small>对应 pip install 的 --index-url，私有源填这里</small>
+            <span>Hermes 安装源（pip index，可改）</span>
+            <input id="field-hermes-index" name="hermesIndex" value="https://pypi.tuna.tsinghua.edu.cn/simple" placeholder="https://pypi.tuna.tsinghua.edu.cn/simple" spellcheck="false">
+            <small>对应 pip install 的 --index-url，默认清华镜像；私有源请替换此处</small>
           </label>
           <label class="connect-field">
             <span>额外索引源（可选）</span>
             <input id="field-hermes-extra-index" name="hermesExtraIndex" placeholder="--extra-index-url，可留空" spellcheck="false">
-            <small>需要同时走多个源时填（如私有源 + PyPI）</small>
+            <small>同时走多个源时填（如私有源 + 清华），留空即单源</small>
           </label>
         </div>
 
