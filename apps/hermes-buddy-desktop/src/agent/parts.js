@@ -62,7 +62,12 @@ function partsToContent(parts) {
       case 'audio': {
         // 本地转写后的语音：作为文本块送给模型（注明来源）。
         const t = String(part.transcript || part.text || '').trim();
-        if (t) content.push({ type: 'text', text: `【语音 ${part.name || ''} 转写】\n${t}` });
+        if (t) {
+          content.push({ type: 'text', text: `【语音 ${part.name || ''} 转写】\n${t}` });
+        } else {
+          // 转写为空（静音/过短/被识别成环境音）也要留痕，否则用户以为语音根本没发出去
+          content.push({ type: 'text', text: `【语音 ${part.name || ''}】未识别出有效内容（可能是静音、时长过短或只有环境音）。` });
+        }
         break;
       }
       case 'video': {

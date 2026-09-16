@@ -1305,6 +1305,72 @@ async function toggleRecord() {
   await startRecording();
 }
 
+/**
+ * 把录音产物转成 whisper.cpp 唯一认的格式：16kHz / 单声道 / 16bit PCM WAV。
+ *
+ * 为什么必须这步：MediaRecorder 默认产出 webm(opus) 或 mp4(aac)，而 whisper.cpp
+ * 内部只用 miniaudio 解 PCM WAV，喂 webm 会直接 "failed to open / decode" 失败。
+ * 以前靠 ffmpeg 转，但 ffmpeg 是可选组件（用户常常没装），这里用浏览器自带的
+ * decodeAudioData + OfflineAudioContext 重采样，零外部依赖即可产出合规 WAV。
+ */
+function pcmToWav(samples, sampleRate) {
+  const len = samples.length;
+  const buf = new ArrayBuffer(44 + len * 2);
+  const view = new DataView(buf);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + len * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);          // fmt chunk size
+  view.setUint16(20, 1, true);           // PCM
+  view.setUint16(22, 1, true);           // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byteRate = rate * channels * bytesPerSample
+  view.setUint16(32, 2, true);           // blockAlign
+  view.setUint16(34, 16, true);          // bitsPerSample
+  writeStr(36, 'data');
+  view.setUint32(40, len * 2, true);
+  let off = 44;
+  for (let i = 0; i < len; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+  return buf;
+}
+
+/** 解码任意浏览器能放的音频 Blob，重采样到 16k 单声道，返回 WAV ArrayBuffer。失败返回 null。 */
+async function toWav16k(blob) {
+  const raw = await blob.arrayBuffer();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!AC && !OAC) return null;
+
+  // decodeAudioData 需要挂在某个 context 上；优先普通 AudioContext，没有就用离线上下文
+  let ctx = null;
+  try { ctx = AC ? new AC() : new OAC(1, 1, 16000); } catch (_) {
+    try { ctx = OAC ? new OAC(1, 1, 16000) : null; } catch (_e) { ctx = null; }
+  }
+  if (!ctx) return null;
+
+  try {
+    // 注意：decodeAudioData 会 detach 传入的 buffer，所以给副本
+    const decoded = await ctx.decodeAudioData(raw.slice(0));
+    const targetRate = 16000;
+    const frames = Math.max(1, Math.ceil(decoded.duration * targetRate));
+    const offline = new OAC(1, frames, targetRate);
+    const src = offline.createBufferSource();
+    src.buffer = decoded;               // 采样率不同时，WebAudio 会自动重采样到上下文采样率
+    src.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    return pcmToWav(rendered.getChannelData(0), targetRate);
+  } finally {
+    try { if (ctx.close) ctx.close(); } catch (_) {}
+  }
+}
+
 async function startRecording() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     addMessage('error', '当前环境不支持录音（缺少 navigator.mediaDevices.getUserMedia）');
@@ -1332,17 +1398,34 @@ async function startRecording() {
       const ext = type.includes('mp4') ? 'm4a' : 'webm';
       const stamp = new Date().toISOString().slice(0, 16).replace(/[:T-]/g, '');
       try {
-        const buf = await blob.arrayBuffer();
-        state.attachments.push({
-          id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          kind: 'audio',
-          name: `录音-${stamp}.${ext}`,
-          mime: type.split(';')[0],
-          size: blob.size,
-          previewUrl: '',
-          text: '',
-          data: buf
-        });
+        // 录音原始是 webm/mp4，先本地转成 16k 单声道 WAV（whisper.cpp 只认这个）
+        let wavBuf = null;
+        try { wavBuf = await toWav16k(blob); } catch (_) { wavBuf = null; }
+        if (wavBuf) {
+          state.attachments.push({
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            kind: 'audio',
+            name: `录音-${stamp}.wav`,
+            mime: 'audio/wav',
+            size: wavBuf.byteLength,
+            previewUrl: '',
+            text: '',
+            data: wavBuf
+          });
+        } else {
+          // 解码失败（极老环境/无音频子系统）：保留原始格式，让主进程用 ffmpeg 兜底转
+          const buf = await blob.arrayBuffer();
+          state.attachments.push({
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            kind: 'audio',
+            name: `录音-${stamp}.${ext}`,
+            mime: type.split(';')[0],
+            size: blob.size,
+            previewUrl: '',
+            text: '',
+            data: buf
+          });
+        }
         renderAttachments();
       } catch (error) {
         addMessage('error', `录音结果处理失败：${error.message || error}`);
@@ -2067,19 +2150,22 @@ async function renderMediaTab() {
   const items = [
     { key: 'whisper', label: 'Whisper（语音转写）', info: status && status.whisper },
     { key: 'model', label: '语音模型（ggml-*.bin）', info: status && status.model },
-    { key: 'ffmpeg', label: 'ffmpeg（视频抽帧 / 抽音轨）', info: status && status.ffmpeg }
+    // ffmpeg 现在只是「可选」：新录音直接产出 WAV，只有视频抽帧/抽音轨、以及导入的
+    // mp3/m4a/webm 等压缩音频才需要它转码。所以单独标成"可选"，别让用户以为缺了就不能用。
+    { key: 'ffmpeg', label: 'ffmpeg（可选：视频抽帧 / 导入音频转码）', info: status && status.ffmpeg, optional: true }
   ];
   const missing = [];
+  const optionalMissing = [];
   for (const it of items) {
     const ok = !!(it.info && it.info.ok);
-    if (!ok) missing.push(it.key);
+    if (!ok) (it.optional ? optionalMissing : missing).push(it.key);
     const card = document.createElement('div');
     card.className = 'tool-item';
     card.dataset.ok = ok ? 'true' : 'false';
     card.innerHTML = `
       <div class="tool-item-head">
         <span class="tool-item-name"></span>
-        <span class="tool-item-status">${ok ? '✓ 已就绪' : '✗ 缺失'}</span>
+        <span class="tool-item-status">${ok ? '✓ 已就绪' : (it.optional ? '○ 可选，未安装' : '✗ 缺失')}</span>
       </div>
       <div class="tool-item-path"></div>
     `;
@@ -2094,7 +2180,15 @@ async function renderMediaTab() {
     list.appendChild(dir);
   }
 
-  btn.textContent = missing.length ? '一键安装缺失组件' : '重新安装 / 更新';
+  if (optionalMissing.length) {
+    const opt = document.createElement('p');
+    opt.className = 'hint';
+    opt.textContent = 'ffmpeg 未安装也不影响录音转写（新录音已在本地直接转成 Whisper 可用的 WAV）；'
+      + '只有视频抽帧/抽音轨，或导入 mp3、m4a、webm 等压缩音频时才需要它。';
+    list.appendChild(opt);
+  }
+  btn.textContent = missing.length ? '一键安装缺失组件'
+    : (optionalMissing.length ? '安装可选组件（ffmpeg）' : '重新安装 / 更新');
   btn.addEventListener('click', async () => {
     const label = btn.textContent;
     btn.disabled = true;
@@ -2104,8 +2198,10 @@ async function renderMediaTab() {
       tip.textContent = (p && p.message) ? p.message : '安装中…';
     });
     try {
+      // 必装缺失优先；全都齐了就按用户点"重新安装"处理，把可选组件一起补上
+      const comps = missing.length ? missing : (optionalMissing.length ? optionalMissing : ['whisper', 'model', 'ffmpeg']);
       const res = await api.installMediaEngines({
-        components: missing.length ? missing : ['whisper', 'model', 'ffmpeg'],
+        components: comps,
         model: sel.value || 'base'
       });
       if (res && res.error) throw new Error(res.error);

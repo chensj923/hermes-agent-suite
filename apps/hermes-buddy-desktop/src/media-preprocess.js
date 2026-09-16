@@ -101,6 +101,56 @@ function whisperFlavor(bin) {
   return 'python';
 }
 
+/**
+ * whisper.cpp 只认 16bit PCM WAV；webm/opus、mp3、m4a 一律解不开。
+ * 所以只要不是 wav，就必须先转成 16k 单声道 WAV 再喂给它。
+ */
+function needsWav(mime, name) {
+  const m = String(mime || '').toLowerCase();
+  const n = String(name || '').toLowerCase();
+  if (m.includes('wav') || m.includes('pcm') || n.endsWith('.wav')) return false;
+  return true;
+}
+
+/** 用 ffmpeg 把任意音频归一到 16k 单声道 WAV。失败抛错，调用方降级。 */
+async function toWav16k(ffmpeg, srcFile, wavFile) {
+  await execFileAsync(ffmpeg, ['-y', '-i', srcFile, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-f', 'wav', wavFile],
+    { timeout: FFMPEG_TIMEOUT, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+}
+
+/**
+ * 压缩报错信息。
+ * execFile 的 message = "Command failed: ...\n<stdout>\n<stderr>"，
+ * 头部通常是 whisper 的 load_backend / system_info 噪音，真正原因在**末尾**——
+ * 之前只取前 120 字，结果用户只看到"loaded CPU backend"，看不到失败原因。
+ */
+// whisper 的正常日志行前缀——这些是噪音，挤占报错空间时必须先滤掉
+const NOISE_LINE = /^(load_backend|whisper_(init|print|model|ctx|backend|full|state)|system_info|main:|output_txt|Command failed)/i;
+// read_audio_data 只有"正在读/正在试解码"这两句是进度，报错行要留着
+const NOISE_PROGRESS = /^read_audio_data:\s*(reading|trying)/i;
+
+function condenseError(error) {
+  const raw = String((error && error.message) || error || '');
+  const lines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  // 先滤掉正常日志，剩下的尾部才是失败原因；全被滤光就退回最后两行
+  const useful = lines.filter((s) => !NOISE_LINE.test(s) && !NOISE_PROGRESS.test(s));
+  const picked = (useful.length ? useful : lines).slice(-3);
+  const code = error && error.code != null ? `（exit ${error.code}）` : '';
+  return (picked.join(' ') + code).slice(0, 300) || '未知错误';
+}
+
+/** 清掉 whisper 输出里的非语音标记（[BLANK_AUDIO]、(crickets chirping)、时间戳前缀等）。 */
+function cleanTranscript(text) {
+  const out = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    let s = line.replace(/\[\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}\]\s*/g, '').trim();
+    s = s.replace(/^\[\s*[^\]]{0,40}\s*\]$/, '').trim();   // [BLANK_AUDIO] / [Silence]
+    s = s.replace(/^\(\s*[^)]{0,60}\s*\)$/, '').trim();    // (crickets chirping)
+    if (s) out.push(s);
+  }
+  return out.join('\n').trim();
+}
+
 async function runTranscribe(bin, audioFile, outDir, model) {
   const flavor = whisperFlavor(bin);
   let args;
@@ -113,6 +163,7 @@ async function runTranscribe(bin, audioFile, outDir, model) {
   }
   const { stdout, stderr } = await execFileAsync(bin, args, {
     timeout: WHISPER_TIMEOUT,
+    cwd: path.dirname(bin),   // 保证 ggml-*.dll / whisper.dll 能被同目录加载
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024,
   });
@@ -250,15 +301,34 @@ async function preprocessParts(parts, { appDir, logger } = {}) {
           log.warn('media-extract-audio-failed', { error: error.message });
           audioFile = '';   // 有些视频没有音轨
         }
+      } else if (needsWav(part.mime, name)) {
+        // 非 WAV（webm/mp3/m4a…）：whisper.cpp 解不开，必须先转。
+        // 新版录音已在渲染层直接产出 WAV，这里兜的是旧录音和外部导入的音频文件。
+        if (!ffmpeg) {
+          noteMissing('ffmpeg',
+            `「${name}」是 ${part.mime || '压缩音频'}，Whisper 只认 16bit PCM WAV，需要 ffmpeg 先转码。` +
+            '可在设置里一键安装 ffmpeg（约 111 MB），或直接重新录一段（新版录音直接产出 WAV，不再依赖 ffmpeg）。');
+          out.push({ type: 'file', name, mime: part.mime, note: `（音频 ${name}：格式非 WAV 且本机缺少 ffmpeg，未能本地转写）` });
+          continue;
+        }
+        audioFile = path.join(dir, 'audio.wav');
+        try {
+          await toWav16k(ffmpeg, srcFile, audioFile);
+        } catch (error) {
+          log.warn('media-to-wav-failed', { error: error.message });
+          warnings.push(`${name} 转码 WAV 失败：${condenseError(error)}`);
+          audioFile = '';
+        }
       }
 
       let transcript = '';
       if (audioFile) {
         try {
-          transcript = await runTranscribe(whisper, audioFile, dir, model);
+          transcript = cleanTranscript(await runTranscribe(whisper, audioFile, dir, model));
         } catch (error) {
           log.warn('media-transcribe-failed', { error: error.message });
-          warnings.push(`${name} 转写失败：${String(error.message || '').slice(0, 120)}`);
+          const hint = needsWav(part.mime, name) ? '（提示：Whisper 只支持 16bit PCM WAV）' : '';
+          warnings.push(`${name} 转写失败：${condenseError(error)}${hint}`);
         }
       }
 
@@ -276,4 +346,8 @@ async function preprocessParts(parts, { appDir, logger } = {}) {
   return { parts: out, warnings, missing };
 }
 
-module.exports = { preprocessParts, toBuffer, findEngine, findWhisperModel };
+module.exports = {
+  preprocessParts, toBuffer, findEngine, findWhisperModel,
+  // 下面几个导出是为了能单测"格式判断 / 报错压缩 / 文本清洗"这几条关键逻辑
+  needsWav, condenseError, cleanTranscript,
+};
