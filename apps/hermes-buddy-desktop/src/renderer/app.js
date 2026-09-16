@@ -84,6 +84,13 @@ const el = {
   workdirTag: $('workdir-tag'),
   permBadge: $('perm-badge'),
 
+  // 多模态附件（图片 / 文件 / 语音 / 视频）
+  attachStrip: $('attach-strip'),
+  btnAttach: $('btn-attach'),
+  btnRecord: $('btn-record'),
+  recordTip: $('record-tip'),
+  fileInput: $('file-input'),
+
   // 右侧上下文面板（集成设置）
   contextPanel: $('context-panel'),
   contextTitle: $('context-title'),
@@ -166,7 +173,11 @@ const state = {
   bannerActionUrl: null,
   bannerActionClick: null,
   updateDownloading: false,
-  pendingConfirm: null         // confirmId
+  pendingConfirm: null,         // confirmId
+
+  // ---- 多模态附件 ----
+  attachments: [],              // [{ id, kind, name, mime, size, previewUrl, text, data }]
+  recording: null,              // { recorder, stream, chunks, startedAt, timer }
 };
 
 // ============================================================ 顶栏 / 横幅
@@ -841,6 +852,8 @@ function setBusy(busy) {
   el.btnSend.disabled = busy;
   el.btnStop.hidden = !busy;
   el.input.disabled = busy;
+  el.btnAttach.disabled = busy;
+  el.btnRecord.disabled = busy && !state.recording;
   setStatusDot(busy ? 'busy' : 'online');
   if (!busy) el.input.focus();
 }
@@ -852,17 +865,279 @@ function cleanIpcError(raw) {
   return String(raw || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '').trim();
 }
 
+// ============================================================ 多模态附件（图片 / 文件 / 语音 / 视频）
+//
+// 语义约定（与 main 进程 session-manager 的 _buildUserContent 对应）：
+//   image → base64，直接作为多模态图片发给模型
+//   file  → 文本文件内联内容；读不出的二进制只附一行说明
+//   audio → 原始字节，由主进程本地 Whisper 转写（不上传原始音频）
+//   video → 原始字节，由主进程本地转写 + ffmpeg 抽关键帧（不上传原始视频）
+// 即：语音/视频"在 win 端本地处理完"再发，原始媒体不出本机。
+
+const TEXT_EXT = /\.(txt|md|json|csv|log|yaml|yml|toml|ini|xml|js|ts|jsx|tsx|py|java|go|rb|rs|sh|sql|html|css)$/i;
+const MAX_FILE_TEXT = 200 * 1024;   // 单个文本文件内联上限，避免把超大文件塞进上下文
+
+function kindOfFile(file) {
+  const mime = (file.type || '').toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('audio/')) return 'audio';
+  if (mime.startsWith('video/')) return 'video';
+  return 'file';
+}
+
+function isTextFile(file) {
+  const mime = (file.type || '').toLowerCase();
+  if (mime.startsWith('text/')) return true;
+  if (/json|xml|javascript|csv/.test(mime)) return true;
+  return TEXT_EXT.test(file.name || '');
+}
+
+function formatSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function readWith(file, how) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error('读取文件失败'));
+    if (how === 'text') r.readAsText(file);
+    else if (how === 'buffer') r.readAsArrayBuffer(file);
+    else r.readAsDataURL(file);
+  });
+}
+
+async function addFiles(fileList) {
+  const files = Array.from(fileList || []);
+  for (const file of files) {
+    const kind = kindOfFile(file);
+    const att = {
+      id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      kind,
+      name: file.name || '未命名',
+      mime: file.type || '',
+      size: file.size || 0,
+      previewUrl: '',
+      text: '',
+      data: null
+    };
+    try {
+      if (kind === 'image') {
+        // dataURL 既能预览（CSP 允许 data:），也直接作为多模态内容发给模型
+        const url = String(await readWith(file, 'dataurl') || '');
+        att.previewUrl = url;
+        att.data = url.includes(',') ? url.slice(url.indexOf(',') + 1) : url;   // 纯 base64
+      } else if (kind === 'audio' || kind === 'video') {
+        att.data = await readWith(file, 'buffer');
+      } else if (isTextFile(file)) {
+        let text = String(await readWith(file, 'text') || '');
+        if (text.length > MAX_FILE_TEXT) {
+          text = `${text.slice(0, MAX_FILE_TEXT)}\n…（文件过长，已截断为前 ${MAX_FILE_TEXT} 字符）`;
+        }
+        att.text = text;
+      }
+      // 其余二进制文件：读不出文本，发送时只附文件名说明
+    } catch (error) {
+      addMessage('error', `读取附件「${att.name}」失败：${error.message || error}`);
+      continue;
+    }
+    state.attachments.push(att);
+  }
+  renderAttachments();
+}
+
+function removeAttachment(id) {
+  state.attachments = state.attachments.filter((a) => a.id !== id);
+  renderAttachments();
+}
+
+function clearAttachments() {
+  state.attachments = [];
+  renderAttachments();
+}
+
+/** 生成一个附件芯片；removable=true 时带移除按钮（预览条用），气泡里不带。 */
+function buildAttachmentChip(att, removable) {
+  const chip = document.createElement('div');
+  chip.className = `attach-chip kind-${att.kind}`;
+  if (att.kind === 'image' && att.previewUrl) {
+    const img = document.createElement('img');
+    img.src = att.previewUrl;      // data: URL，CSP img-src 'self' data: 已放行
+    img.alt = att.name;
+    chip.appendChild(img);
+  } else {
+    const icon = document.createElement('span');
+    icon.className = 'attach-icon';
+    icon.textContent = att.kind === 'audio' ? '🎤'
+      : att.kind === 'video' ? '🎬'
+        : (att.text ? '📄' : '📦');
+    chip.appendChild(icon);
+  }
+  const meta = document.createElement('div');
+  meta.className = 'attach-meta';
+  const title = document.createElement('div');
+  title.className = 'attach-name';
+  title.textContent = att.name;
+  const sub = document.createElement('div');
+  sub.className = 'attach-sub';
+  sub.textContent = att.kind === 'audio' ? '语音 · 本机转写后发送'
+    : att.kind === 'video' ? '视频 · 本机转写 + 关键帧后发送'
+      : att.kind === 'image' ? `图片 · ${formatSize(att.size)}`
+        : (att.text ? `文本 · ${formatSize(att.size)}` : `文件 · ${formatSize(att.size)}（无法直接读取，仅附文件名）`);
+  meta.appendChild(title);
+  meta.appendChild(sub);
+  chip.appendChild(meta);
+  if (removable) {
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'attach-remove';
+    rm.textContent = '×';
+    rm.title = '移除该附件';
+    rm.addEventListener('click', () => removeAttachment(att.id));
+    chip.appendChild(rm);
+  }
+  return chip;
+}
+
+function renderAttachments() {
+  const strip = el.attachStrip;
+  if (!strip) return;
+  strip.textContent = '';
+  if (!state.attachments.length) { strip.hidden = true; return; }
+  strip.hidden = false;
+  for (const att of state.attachments) strip.appendChild(buildAttachmentChip(att, true));
+}
+
+/** 把附件转成要发给主进程的 parts（不含文本，文本由 sendMessage 单独加）。 */
+function attachmentParts(atts) {
+  return (atts || []).map((a) => {
+    if (a.kind === 'image') return { type: 'image', mime: a.mime, data: a.data };
+    if (a.kind === 'audio') return { type: 'audio', name: a.name, mime: a.mime, data: a.data };
+    if (a.kind === 'video') return { type: 'video', name: a.name, mime: a.mime, data: a.data };
+    return { type: 'file', name: a.name, mime: a.mime, text: a.text };
+  });
+}
+
+/** 用户气泡：文本 + 附件缩略图/芯片（全程 textContent / createElement，不拼 HTML）。 */
+function addUserMessage(text, atts) {
+  clearPlaceholder();
+  const node = document.createElement('div');
+  node.className = 'msg user';
+  if (text) {
+    const p = document.createElement('div');
+    p.className = 'msg-text';
+    p.textContent = text;
+    node.appendChild(p);
+  }
+  const list = (atts || []).filter(Boolean);
+  if (list.length) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-attachments';
+    for (const att of list) wrap.appendChild(buildAttachmentChip(att, false));
+    node.appendChild(wrap);
+  }
+  el.chatLog.appendChild(node);
+  scrollToEnd();
+  return node;
+}
+
+// ---- 录音（MediaRecorder，纯本地；产物交给主进程转写） ----
+
+async function toggleRecord() {
+  if (state.recording) { stopRecording(); return; }
+  await startRecording();
+}
+
+async function startRecording() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    addMessage('error', '当前环境不支持录音（缺少 navigator.mediaDevices.getUserMedia）');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const chunks = [];
+    let recorder = null;
+    for (const mimeType of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', '']) {
+      try {
+        recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+        break;
+      } catch (_) { /* 换下一个候选 */ }
+    }
+    if (!recorder) {
+      stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+      addMessage('error', '无法创建录音器（MediaRecorder 不可用）');
+      return;
+    }
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    recorder.onstop = async () => {
+      const type = recorder.mimeType || 'audio/webm';
+      const blob = new Blob(chunks, { type });
+      const ext = type.includes('mp4') ? 'm4a' : 'webm';
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[:T-]/g, '');
+      try {
+        const buf = await blob.arrayBuffer();
+        state.attachments.push({
+          id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          kind: 'audio',
+          name: `录音-${stamp}.${ext}`,
+          mime: type.split(';')[0],
+          size: blob.size,
+          previewUrl: '',
+          text: '',
+          data: buf
+        });
+        renderAttachments();
+      } catch (error) {
+        addMessage('error', `录音结果处理失败：${error.message || error}`);
+      }
+    };
+    recorder.start();
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      const s = Math.floor((Date.now() - startedAt) / 1000);
+      el.recordTip.textContent = `录音中 ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} · 点击结束`;
+    }, 200);
+    state.recording = { recorder, stream, chunks, startedAt, timer };
+    el.btnRecord.classList.add('recording');
+    el.recordTip.hidden = false;
+    el.recordTip.textContent = '录音中 0:00 · 点击结束';
+  } catch (error) {
+    addMessage('error', `无法开始录音：${error.message || error}（请检查麦克风权限）`);
+  }
+}
+
+function stopRecording() {
+  const rec = state.recording;
+  if (!rec) return;
+  state.recording = null;
+  clearInterval(rec.timer);
+  el.recordTip.hidden = true;
+  el.btnRecord.classList.remove('recording');
+  try { rec.recorder.stop(); } catch (_) {}
+  rec.stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+}
+
 async function sendMessage() {
   const text = el.input.value.trim();
-  if (!text || state.activeRequestId) return;
+  if (state.activeRequestId) return;
+  const atts = state.attachments.slice();
+  if (!text && !atts.length) return;          // 没有文本也没有附件就别发
+  const parts = [];
+  if (text) parts.push({ type: 'text', text });
+  for (const part of attachmentParts(atts)) parts.push(part);
+
   const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   state.activeRequestId = requestId;
-  addMessage('user', text);
+  addUserMessage(text, atts);
   el.input.value = '';
+  clearAttachments();
   beginAssistantBubble();
   setBusy(true);
   try {
-    const result = await api.chat({ requestId, text, model: el.modelSelect.value || undefined });
+    const result = await api.chat({ requestId, parts, model: el.modelSelect.value || undefined });
     finishAssistantBubble(result && result.text);
   } catch (error) {
     finishAssistantBubble('');
@@ -1039,6 +1314,31 @@ async function enterChat(status) {
 el.composer.addEventListener('submit', (event) => { event.preventDefault(); sendMessage(); });
 el.input.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); }
+});
+
+// ---- 多模态：附件选择 / 录音 / 拖拽 ----
+el.btnAttach.addEventListener('click', () => el.fileInput.click());
+el.fileInput.addEventListener('change', () => {
+  addFiles(el.fileInput.files);
+  el.fileInput.value = '';   // 清空后才能重复选同一个文件
+});
+el.btnRecord.addEventListener('click', () => { toggleRecord(); });
+
+['dragenter', 'dragover'].forEach((type) => {
+  el.composer.addEventListener(type, (event) => {
+    event.preventDefault();
+    el.composer.classList.add('dragover');
+  });
+});
+['dragleave', 'dragend'].forEach((type) => {
+  el.composer.addEventListener(type, () => el.composer.classList.remove('dragover'));
+});
+el.composer.addEventListener('drop', (event) => {
+  event.preventDefault();
+  el.composer.classList.remove('dragover');
+  if (event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length) {
+    addFiles(event.dataTransfer.files);
+  }
 });
 
 el.btnStop.addEventListener('click', async () => {

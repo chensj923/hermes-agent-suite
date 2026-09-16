@@ -46,7 +46,7 @@ ws://<hermes-host>:<port>/api/buddy/channel?token=<API_SERVER_KEY>&client=buddy&
 | type | 字段 | 说明 |
 |---|---|---|
 | `hello` | `client`, `version`, `capabilities:["tool_execute"]`, `session?` | 握手后首条，声明能力 |
-| `user_message` | `session`, `text`, `history?`, `model?` | 发起/继续一次任务；`model` 指定本轮用的模型（缺省用服务端默认） |
+| `user_message` | `session`, `content`, `text`, `history?`, `model?` | 发起/继续一次任务；`content` 是 **OpenAI 多模态 content 数组**（v1.3，本轮用户消息正文），`text` 是同义纯文本（供日志/老服务端兼容），`model` 指定本轮用的模型（缺省用服务端默认） |
 | `list_models` | `session?` | 请求可用模型清单（服务端去上游 `/models` 拉取） |
 | `tool_result` | `id`, `ok`, `text`, `blocked?`, `exit_code?`, `data?` | 工具执行结果 |
 | `tool_rejected` | `id`, `reason`, `rule?` | 被命令护栏拦截（服务器需把它作为"失败的工具结果"回灌模型） |
@@ -82,6 +82,33 @@ ws://<hermes-host>:<port>/api/buddy/channel?token=<API_SERVER_KEY>&client=buddy&
 
 > 约束：给通道加新的消息类型 / 改变协议语义时，**必须同时抬 `CHANNEL_VERSION`
 > 和客户端的 `REQUIRED_CHANNEL_VERSION`**，否则旧服务端会与新客户端悄悄错配。
+
+#### 多模态输入（v1.3）
+
+Buddy 支持图片 / 文件 / 语音 / 视频，但最终进协议的只有一种形态：
+**OpenAI 多模态 content 数组**（`user_message.content`）。
+
+| 附件类型 | Win 端处理 | 进 content 的形态 |
+|---|---|---|
+| 图片 | 直接读字节 | `{"type":"image_url","image_url":{"url":"data:<mime>;base64,..."}}` |
+| 文本文件 | 读出内容 | `{"type":"text","text":"【文件 xxx】\n..."}` |
+| 二进制文件 | 读不出文本 | `{"type":"text","text":"（文件 xxx：无法直接读取，仅附文件名）"}` |
+| 语音 | **本地 Whisper 转写** | `{"type":"text","text":"【语音 xxx 转写】\n..."}` |
+| 视频 | **本地 ffmpeg 抽音轨 → Whisper 转写；再抽关键帧** | 转写文本 + 若干 `image_url`（关键帧 PNG） |
+
+设计要点：
+
+- **语音/视频在 Win 端本地处理完再发**：原始音视频**不出本机**、不上传服务端，
+  服务端只收到转写文字与关键帧图片。
+- 本地引擎（ffmpeg / whisper）是**可选**的：找不到时降级（视频仍尽量抽关键帧），
+  并给会话回一条 `notice` 提示，绝不让「缺引擎」变成「消息发不出去」。
+- 服务端 `run_task(content, ...)` 把 `content` 原样 append 进 messages；
+  老客户端只发 `text` 时自动兜底成纯字符串，行为与 v1.2 完全一致。
+- 归一化逻辑集中在客户端 `src/agent/parts.js`（`partsToContent`），
+  通道模式与直连模式共用同一份，避免两边语义漂移。
+
+引擎查找顺序：环境变量 `BUDDY_FFMPEG_BIN` / `BUDDY_WHISPER_BIN` / `BUDDY_WHISPER_MODEL`
+→ `%APPDATA%\@hermes\buddy-desktop\media` → PATH。
 
 #### 模型清单与选择（v1.1）
 

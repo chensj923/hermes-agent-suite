@@ -750,7 +750,7 @@ if command -v curl >/dev/null 2>&1; then
   CHANNEL_HEALTH=$(curl -s -m 5 "http://127.0.0.1:${CHANNEL_PORT}/health" 2>/dev/null || true)
   if [[ -n "$CHANNEL_HEALTH" ]]; then CHANNEL_UP=1; fi
 fi
-CHANNEL_VERSION_EXPECTED="1.2"
+CHANNEL_VERSION_EXPECTED="1.3"
 
 if [[ "$PROXY_UP" == "1" ]]; then
   echo "  [OK] 推理直通代理  : http://0.0.0.0:$PROXY_PORT  (用 Gateway API Key 鉴权)"

@@ -9,6 +9,7 @@ const { ToolRegistry } = require('./tools');
 const { Brain, describeBrainError, BUDDY_PROXY_PORT } = require('./agent/brain');
 const { AgentLoop } = require('./agent/loop');
 const { ChannelClient } = require('./agent/channel');
+const { partsToContent, textToContent, contentToPlainText } = require('./agent/parts');
 const { DashboardClient } = require('./agent/dashboard-client');
 const { buildSystemPrompt, DEFAULT_PERSONA } = require('./agent/prompts');
 const { MemoryStore, rememberLine } = require('./memory');
@@ -576,7 +577,7 @@ class SessionManager {
 
   // ---------------------------------------------------------------- 对话
 
-  async send({ requestId, text, onConfirm, model }, onEvent) {
+  async send({ requestId, text, parts, onConfirm, model }, onEvent) {
     await this.ensureReady();
     const id = String(requestId || `req-${Date.now()}`);
     if (this.controllers.has(id)) throw new Error('该请求已在进行中');
@@ -586,6 +587,10 @@ class SessionManager {
     const history = this.messages.slice(-MAX_HISTORY_MESSAGES);
     // 通道模式也要把模型透传过去：智能体配置的模型优先，其次界面下拉选的。
     const wantModel = this.effectiveModel(this.connection) || model || '';
+    // 把高层 parts 归一成 OpenAI 多模态 content（含本地音视频预处理）；
+    // 没有 parts 时退回纯文本 text。预处理失败/缺引擎时降级并提示，不阻断发送。
+    const { content, warnings } = await this._buildUserContent(parts, text);
+    for (const w of (warnings || [])) emit({ type: 'notice', message: w });
 
     // 通道模式：把消息发给 WS 通道，服务端跑 Agent 循环，事件原样转发给 UI。
     // 断线自愈：若通道已死，用已存配置自动重建并重发一次，用户无需手动点「重连」。
@@ -596,7 +601,7 @@ class SessionManager {
     if (this.channel) {
       this.channel.emit = emit;
       try {
-        return await this._sendOverChannel(text, history, id, wantModel);
+        return await this._sendOverChannel(content, history, id, wantModel);
       } catch (error) {
         const message = error.message || '';
         const toolInterrupted = /工具执行中中断/.test(message);
@@ -621,7 +626,7 @@ class SessionManager {
           }
           this.channel.emit = emit;
           try {
-            return await this._sendOverChannel(text, history, id, wantModel);
+            return await this._sendOverChannel(content, history, id, wantModel);
           } catch (e2) {
             this.channel = null;
             const m2 = e2.message || '通道连接已断开';
@@ -641,7 +646,7 @@ class SessionManager {
       try {
         await this._ensureChannel();
         this.channel.emit = emit;
-        const out = await this._sendOverChannel(text, history, id, wantModel);
+        const out = await this._sendOverChannel(content, history, id, wantModel);
         return out;
       } catch (error) {
         const m = error.message || '通道连接已断开';
@@ -657,7 +662,8 @@ class SessionManager {
       const result = await this.loop.run({
         systemPrompt,
         history,
-        userMessage: text,
+        // 多模态：content 数组（文本/图片/文件/音视频预处理后的派生内容）
+        userContent: content,
         signal: controller.signal,
         onEvent: emit,
         onConfirm,
@@ -665,10 +671,10 @@ class SessionManager {
         model: this.effectiveModel(this.connection) || model
       });
 
-      this.messages.push({ role: 'user', content: String(text || '') });
+      this.messages.push({ role: 'user', content });
       if (result.text) this.messages.push({ role: 'assistant', content: result.text });
       this.trimHistory();
-      this.remember({ role: 'user', text: String(text || ''), at: Date.now() });
+      this.remember({ role: 'user', text: contentToPlainText(content), at: Date.now() });
       this.maybeJournal(result);
       return { requestId: id, text: result.text, turns: result.turns, toolCalls: result.toolCalls.length, stopped: result.stopped };
     } catch (error) {
@@ -709,17 +715,50 @@ class SessionManager {
   }
 
   /** 通过 WS 通道发一条消息并等待 task_done，顺带维护本地历史。 */
-  async _sendOverChannel(text, history, id, model) {
-    const result = await this.channel.sendMessage(text, history, {
+  async _sendOverChannel(content, history, id, model) {
+    const result = await this.channel.sendMessage(content, history, {
       timeoutMs: 10 * 60 * 1000,
       // 把选中的模型透传给服务端，让它用这个模型跑 Agent 循环
       model: model || '',
     });
-    this.messages.push({ role: 'user', content: String(text || '') });
+    this.messages.push({ role: 'user', content });
     if (result && result.text) this.messages.push({ role: 'assistant', content: result.text });
     this.trimHistory();
-    this.remember({ role: 'user', text: String(text || ''), at: Date.now() });
+    this.remember({ role: 'user', text: contentToPlainText(content), at: Date.now() });
     return { requestId: id, text: result.text, turns: result.turns || 0, toolCalls: 0, stopped: result.stopped };
+  }
+
+  /**
+   * 把渲染层传来的高层 parts 归一成 OpenAI 多模态 content 数组。
+   *
+   * 关键点：语音/视频在这里之前**已经**由 media-preprocess 在 Win 端本地预处理
+   * （Whisper 转写 + ffmpeg 抽关键帧），所以原始音视频不会离开本机、不会上传服务端；
+   * 最终只有 text / image / file 三类进 content。
+   *
+   * 返回 { content, warnings }。缺引擎/预处理失败时降级（丢弃无法处理的媒体并提示），
+   * 绝不阻断发送——否则用户一条消息就彻底发不出去。
+   */
+  async _buildUserContent(parts, text) {
+    let normalized = parts;
+    let warnings = [];
+    const hasRawMedia = Array.isArray(parts)
+      && parts.some((p) => p && (p.type === 'audio' || p.type === 'video'));
+    if (hasRawMedia) {
+      try {
+        const { preprocessParts } = require('./media-preprocess');
+        const out = await preprocessParts(parts, { appDir: this.appDir, logger: this.logger });
+        normalized = out.parts;
+        warnings = out.warnings || [];
+      } catch (error) {
+        this.logger.warn('media-preprocess-failed', { error: error.message });
+        warnings = [`音视频本地处理失败：${error.message || '未知错误'}（已跳过这些附件）`];
+        normalized = (parts || []).filter((p) => p && p.type !== 'audio' && p.type !== 'video');
+      }
+    }
+    const content = (normalized && normalized.length)
+      ? (partsToContent(normalized) || textToContent(''))
+      : textToContent(text);
+    return { content, warnings };
   }
 
   /** 自动记一笔流水，方便用户事后看"今天让它干了啥"。 */

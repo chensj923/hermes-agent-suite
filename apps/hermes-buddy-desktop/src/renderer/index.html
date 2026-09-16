@@ -303,12 +303,19 @@
       </div>
 
       <form class="composer" id="composer">
-        <textarea id="input" rows="2" placeholder="和 Hermes 说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <!-- 附件预览条：图片缩略图 + 文件/音视频芯片，发送前可逐个移除 -->
+        <div class="attach-strip" id="attach-strip" hidden></div>
+        <textarea id="input" rows="2" placeholder="和 Hermes 说点什么…（Enter 发送，Shift+Enter 换行；可拖入图片/文件/视频）"></textarea>
         <div class="composer-actions">
+          <button class="ghost icon-btn" id="btn-attach" type="button" title="添加图片 / 文件 / 视频">📎</button>
+          <button class="ghost icon-btn" id="btn-record" type="button" title="点一下开始录音，再点一下结束">🎤</button>
+          <span class="record-tip" id="record-tip" hidden></span>
           <span class="workdir-tag" id="workdir-tag" hidden></span>
           <button class="ghost" id="btn-stop" type="button" hidden>停止</button>
           <button class="primary" id="btn-send" type="submit">发送</button>
         </div>
+        <input type="file" id="file-input" multiple hidden
+               accept="image/*,audio/*,video/*,.txt,.md,.json,.csv,.log,.yaml,.yml,.toml,.ini,.xml,.js,.ts,.jsx,.tsx,.py,.java,.go,.rb,.rs,.sh,.sql,.html,.css,.csv,.pdf,.docx,.xlsx,.zip">
       </form>
     </main>
 

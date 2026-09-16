@@ -687,6 +687,91 @@ button:disabled { opacity: .5; cursor: default; }
 .composer-actions { display: flex; align-items: center; gap: 10px; }
 .workdir-tag { margin-right: auto; font-size: 11px; color: var(--muted); }
 
+/* ---- 多模态附件：预览条 / 芯片 / 录音 ---- */
+.composer.dragover { outline: 2px dashed var(--accent, #4c8dff); outline-offset: -4px; }
+
+.icon-btn {
+  padding: 4px 8px;
+  font-size: 15px;
+  line-height: 1;
+  border-radius: 8px;
+}
+.icon-btn:disabled { opacity: .45; cursor: not-allowed; }
+.icon-btn.recording {
+  background: #d93025;
+  color: #fff;
+  border-color: #d93025;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+@keyframes rec-pulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
+
+.record-tip {
+  font-size: 12px;
+  color: #d93025;
+  font-variant-numeric: tabular-nums;
+}
+
+.attach-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+.attach-strip[hidden] { display: none; }
+
+.attach-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg, var(--surface));
+}
+.attach-chip > img {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.attach-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  border-radius: 6px;
+  background: var(--surface);
+  flex-shrink: 0;
+}
+.attach-meta { min-width: 0; }
+.attach-name {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.attach-sub { font-size: 11px; color: var(--muted); }
+.attach-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.attach-remove:hover { color: #d93025; }
+
+/* 用户气泡里的附件（不可移除，紧凑展示） */
+.msg-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.msg-text { white-space: pre-wrap; word-break: break-word; }
+
 /* 右侧上下文面板 */
 .context-panel {
   width: var(--context-width);

@@ -631,7 +631,7 @@ function registerIpc() {
             const channelVersion = result.channel_version || 'none';
             const proxyEnv = result.proxy_env || 'no';
             // 与 src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION 保持一致
-            const REQUIRED_CHANNEL_VERSION = '1.2';
+            const REQUIRED_CHANNEL_VERSION = '1.3';
             const verAtLeast = (v, req) => {
               if (!v || v === 'none') return false;
               const a = String(v).split('.').map((n) => parseInt(n, 10) || 0);
@@ -704,7 +704,14 @@ function registerIpc() {
     };
     try {
       return await manager.send(
-        { requestId, text: request && request.text, model: request && request.model, onConfirm: (payload) => requestConfirm(event.sender, payload) },
+        {
+          requestId,
+          // 多模态：渲染层构造的高层 parts（text/image/file/audio/video）
+          parts: (request && request.parts) || undefined,
+          text: request && request.text,
+          model: request && request.model,
+          onConfirm: (payload) => requestConfirm(event.sender, payload)
+        },
         forward
       );
     } finally {

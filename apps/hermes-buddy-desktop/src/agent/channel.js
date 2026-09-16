@@ -26,8 +26,10 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
  * 服务端（例如不认识 list_models，模型下拉只剩默认那一个）。与其静默降级，
  * 不如在握手时就把版本谈清楚：不满足就断开并明确提示重新部署。
  * 加新协议能力（新的消息类型）时记得同步抬这个版本号。
+ * 1.3：user_message 支持多模态 content（OpenAI content 数组），图片/文件/音视频
+ *       预处理后的派生内容都归一成 content 发过来，取代原先的纯 text。
  */
-const REQUIRED_CHANNEL_VERSION = '1.2';
+const REQUIRED_CHANNEL_VERSION = '1.3';
 
 /** 解析 "1.1" / "1" / "v2.0.3" 这类版本号，取 major.minor 比较。 */
 function parseVersion(value) {
@@ -43,6 +45,24 @@ function versionAtLeast(have, want) {
   if (!h || !w) return false;   // 解析不出来（老服务端没带版本）按「不满足」处理
   if (h.major !== w.major) return h.major > w.major;
   return h.minor >= w.minor;
+}
+
+/** 把要发出去的 content 归一成 OpenAI content 数组（字符串兜底成 text part）。 */
+function normalizeOutgoingContent(content) {
+  if (typeof content === 'string') return [{ type: 'text', text: content }];
+  if (Array.isArray(content) && content.length) return content;
+  return [{ type: 'text', text: '' }];
+}
+
+/** 从 content 数组里抽出纯文本（给服务端日志/老版本兼容用）。 */
+function contentToPlainText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
+    .map((p) => p.text)
+    .join('\n')
+    .trim();
 }
 
 function maskFrame(opcode, payload) {
@@ -343,10 +363,11 @@ class ChannelClient {
     throw err;
   }
 
-  async sendMessage(text, history, opts = {}) {
+  async sendMessage(content, history, opts = {}) {
     this._assertUsable();
     await this.connect();
     const timeoutMs = (opts && typeof opts.timeoutMs === 'number') ? opts.timeoutMs : 10 * 60 * 1000;
+    const payload = normalizeOutgoingContent(content);
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer = null;
@@ -369,7 +390,9 @@ class ChannelClient {
       this.send({
         type: 'user_message',
         session: this.sessionId,
-        text: String(text || ''),
+        content: payload,
+        // 仍带 text 字段：方便服务端日志/老版本识别（多模态时就是拼出的纯文本）
+        text: contentToPlainText(payload),
         history: history || [],
         ...(opts && opts.model ? { model: String(opts.model) } : {}),
       });

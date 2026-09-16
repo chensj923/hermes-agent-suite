@@ -12,6 +12,7 @@ const { buildSystemPrompt } = require('../src/agent/prompts');
 const { MemoryStore, rememberLine } = require('../src/memory');
 const { SkillStore } = require('../src/skills');
 const { Workspace } = require('../src/workspace');
+const { partsToContent, textToContent, contentToPlainText } = require('../src/agent/parts');
 
 function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'buddy-agent-')); }
 
@@ -236,4 +237,83 @@ test('技能：内置与项目共存，同名项目优先', () => {
   assert.throws(() => store.remove('b'), /内置技能不能删除/);
   assert.equal(store.remove('a'), true);
   assert.throws(() => store.save('bad name!', 'x'), /技能名/);
+});
+
+// ============================================================ 多模态：文本 / 图片 / 文件 / 音视频
+
+test('partsToContent: 文本 + 图片 + 文本文件归一成 content 数组', () => {
+  const content = partsToContent([
+    { type: 'text', text: '看看这张图' },
+    { type: 'image', mime: 'image/png', data: 'AAAABBBB' },
+    { type: 'file', name: 'notes.txt', mime: 'text/plain', text: '文件内容' }
+  ]);
+  assert.equal(content.length, 3);
+  assert.deepEqual(content[0], { type: 'text', text: '看看这张图' });
+  assert.equal(content[1].type, 'image_url');
+  assert.equal(content[1].image_url.url, 'data:image/png;base64,AAAABBBB');
+  assert.match(content[2].text, /【文件 notes\.txt】/);
+  assert.match(content[2].text, /文件内容/);
+});
+
+test('partsToContent: 读不出的二进制文件只附说明，不塞内容', () => {
+  const content = partsToContent([{ type: 'file', name: 'a.zip', mime: 'application/zip' }]);
+  assert.equal(content.length, 1);
+  assert.equal(content[0].type, 'text');
+  assert.match(content[0].text, /a\.zip/);
+  assert.match(content[0].text, /无法直接读取/);
+});
+
+test('partsToContent: 语音/视频只带本地转写与关键帧（原始媒体不进内容）', () => {
+  const content = partsToContent([
+    { type: 'audio', name: 'v.wav', transcript: '你好世界' },
+    { type: 'video', name: 'c.mp4', transcript: '画面内容', frames: [
+      { mime: 'image/png', data: 'FRAME1' },
+      { mime: 'image/png', data: 'FRAME2' }
+    ] }
+  ]);
+  assert.equal(content.length, 4);   // 音频转写 1 + 视频转写 1 + 关键帧 2
+  assert.match(content[0].text, /语音 v\.wav 转写/);
+  assert.match(content[0].text, /你好世界/);
+  assert.match(content[1].text, /视频 c\.mp4 转写/);
+  assert.match(content[1].text, /画面内容/);
+  assert.equal(content[2].image_url.url, 'data:image/png;base64,FRAME1');
+  assert.equal(content[3].image_url.url, 'data:image/png;base64,FRAME2');
+});
+
+test('partsToContent: 空 parts 返回 null，由调用方回退纯文本', () => {
+  assert.equal(partsToContent([]), null);
+  assert.equal(partsToContent(null), null);
+  assert.deepEqual(textToContent('hi'), [{ type: 'text', text: 'hi' }]);
+  // 摘要只取文本块，图片不影响纯文本抽取
+  assert.equal(contentToPlainText([
+    { type: 'text', text: 'a' },
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } }
+  ]), 'a');
+});
+
+test('AgentLoop: 多模态 content 数组原样进模型（不再被 String 强转拍平）', async () => {
+  const seen = [];
+  const brain = new Brain({
+    endpoint: 'http://h:8800/v1/chat/completions',
+    fetchImpl: fakeFetch((body) => {
+      seen.push(body);
+      return { status: 200, body: { choices: [{ message: { content: 'ok' } }] } };
+    })
+  });
+  const loop = new AgentLoop({ brain, tools: fakeTools(async () => ({ ok: true, text: 'x' })), workspace: null });
+  const result = await loop.run({
+    systemPrompt: 'sys',
+    history: [],
+    userContent: [
+      { type: 'text', text: '这是什么' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }
+    ]
+  });
+  assert.equal(result.text, 'ok');
+  const sent = seen[0].messages;
+  const last = sent[sent.length - 1];
+  assert.equal(last.role, 'user');
+  assert.ok(Array.isArray(last.content), 'content 应保持数组而不是被 String() 拍平');
+  assert.equal(last.content.length, 2);
+  assert.equal(last.content[1].image_url.url, 'data:image/png;base64,AAAA');
 });

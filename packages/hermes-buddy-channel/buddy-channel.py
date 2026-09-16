@@ -33,7 +33,13 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CHANNEL_VERSION = "1.2"
+# 通道协议版本。客户端（src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION）会做能力协商，
+# 版本不够就直接断开并提示重新部署，避免带着残缺能力静默降级。
+#   1.1  模型透传
+#   1.2  错误帧带 code/hint、模型清单带 unsupported、上游拒绝模型时自动回退默认模型
+#   1.3  user_message 支持多模态 content（OpenAI content 数组），
+#        图片/文件/音视频（Win 端本地预处理后的派生内容）都能带过来
+CHANNEL_VERSION = "1.3"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -708,18 +714,31 @@ class Session:
                        "text": "模型 %s 不被上游支持，已自动改用默认模型 %s" % (bad, default)})
             return call_llm(self.messages, TOOL_SCHEMAS, self.cancel_event.is_set, self.model)
 
-    def run_task(self, user_text, history, model=None):
+    def run_task(self, content, history, model=None):
+        """跑一轮 Agent 循环。
+
+        content：本轮用户消息内容。自 1.3 起可以是
+          · OpenAI 多模态 content 数组：
+            [{"type":"text","text":...}, {"type":"image_url","image_url":{"url":"data:..."}}]
+          · 纯字符串（老客户端 / 兼容路径）
+        两种都原样塞进 messages，上游 OpenAI 兼容端点天然支持。
+        """
         self.running = True
         # 模型按会话记住：后续轮次（工具回灌后再问）继续用用户选的。
         if model:
             self.model = str(model)
         try:
-            if history:
-                # 简单去重：只保留最近若干条，避免系统提示被冲掉
+            # 客户端历史只在会话刚开始时采用一次。
+            # 之前每轮都 append 一遍 history，服务端自己的 self.messages 里
+            # 已经保留了这些消息，等于每轮重复一份——文字时代只是浪费 token，
+            # 多模态之后会把图片 base64 每轮都重复发一遍，代价很大。
+            # 服务端累积的上下文（含 tool 消息）本就是客户端历史的超集，
+            # 所以只在还没有任何用户消息时接入一次即可。
+            if history and len(self.messages) <= 1:
                 for m in history[-30:]:
                     if isinstance(m, dict) and m.get("role") in ("user", "assistant", "tool"):
                         self.messages.append(m)
-            self.messages.append({"role": "user", "content": user_text})
+            self.messages.append({"role": "user", "content": content})
             turns = 0
             while turns < MAX_TURNS:
                 if self.cancel_event.is_set():
@@ -894,8 +913,13 @@ class WSConnection:
             sys.stderr.write("[channel] hello caps=%s\n" % caps)
         elif t == "user_message":
             if s and not s.running:
+                # 1.3：优先用多模态 content（OpenAI content 数组）。
+                # 老客户端只发 text，这里兜底成字符串，行为与以前一致。
+                content = msg.get("content")
+                if not isinstance(content, (list, str)):
+                    content = msg.get("text", "")
                 threading.Thread(target=s.run_task,
-                                 args=(msg.get("text", ""), msg.get("history") or []),
+                                 args=(content, msg.get("history") or []),
                                  kwargs={"model": msg.get("model") or ""},
                                  daemon=True).start()
             elif s and s.running:

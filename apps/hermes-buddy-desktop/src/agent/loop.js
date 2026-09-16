@@ -27,19 +27,24 @@ class AgentLoop {
    * @param {object} options
    * @param {string} options.systemPrompt
    * @param {Array} options.history 之前的对话（OpenAI 消息格式）
-   * @param {string} options.userMessage
+   * @param {string} [options.userMessage] 纯文本用户消息（旧路径）
+   * @param {Array}  [options.userContent] 多模态 content 数组（图片/文件/音视频预处理后的派生内容）
    * @param {AbortSignal} [options.signal]
    * @param {(event:object)=>void} [options.onEvent]
    * @param {(request:object)=>Promise<boolean>} [options.onConfirm]
    * @returns {Promise<{ text: string, turns: number, toolCalls: Array, stopped?: string }>}
    */
-  async run({ systemPrompt, history = [], userMessage, signal, onEvent, onConfirm, stream = true, model }) {
+  async run({ systemPrompt, history = [], userMessage, userContent, signal, onEvent, onConfirm, stream = true, model }) {
     const emit = (event) => { if (typeof onEvent === 'function') onEvent(event); };
     const modelOverride = String(model || '').trim() || null;
+    // 多模态优先：userContent 是 OpenAI content 数组；否则退回纯文本 userMessage。
+    const userMsgContent = (Array.isArray(userContent) && userContent.length)
+      ? userContent
+      : [{ type: 'text', text: String(userMessage || '') }];
     const messages = [
       { role: 'system', content: String(systemPrompt || '') },
       ...history.filter((item) => item && item.role !== 'system'),
-      { role: 'user', content: String(userMessage || '') }
+      { role: 'user', content: userMsgContent }
     ];
 
     const toolSchemas = this.tools.schemas();
