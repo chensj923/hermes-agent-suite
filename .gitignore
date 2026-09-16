@@ -4,6 +4,7 @@ apps/*/dist/
 node_modules/
 *.sh
 !build-installer.sh
+!apps/hermes-buddy-desktop/deploy/deploy.sh
 
 # Runtime data
 data/
