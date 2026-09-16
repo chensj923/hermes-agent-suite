@@ -299,13 +299,24 @@ install_hermes() {
   local idx_args=""
   [[ -n "$HERMES_INDEX_URL" ]] && idx_args="$idx_args --index-url $HERMES_INDEX_URL"
   [[ -n "$HERMES_EXTRA_INDEX_URL" ]] && idx_args="$idx_args --extra-index-url $HERMES_EXTRA_INDEX_URL"
-  # 内部/私有镜像常为 HTTP 或自签证书：pip 用 --trusted-host，uv 用 --allow-insecure
+  # 内部/私有镜像常是 HTTP 或自签证书：
+  #   pip 用 --trusted-host（仅 http 需要）
+  #   uv 用 --allow-insecure-host（新版 uv ≥0.5）或 --allow-insecure（旧版），按版本探测
+  # 注意：https 有效证书源（如清华）不要加任何不安全参数，否则新版 uv 会因未知参数报错
   local trust_pip="" trust_uv=""
+  local uv_insecure_flag="--allow-insecure"
+  if [[ -n "$UV_BIN" ]] && "$UV_BIN" pip install --help 2>&1 | grep -q -- '--allow-insecure-host'; then
+    uv_insecure_flag="--allow-insecure-host"
+  fi
   for u in "$HERMES_INDEX_URL" "$HERMES_EXTRA_INDEX_URL"; do
     [[ -n "$u" ]] || continue
-    local h="${u#*://}"; h="${h%%/*}"; h="${h%:*}"   # 取 host（去 scheme/path/port）
-    trust_pip="$trust_pip --trusted-host $h"
-    trust_uv="$trust_uv --allow-insecure $h"
+    case "$u" in
+      http://*)
+        local h="${u#*://}"; h="${h%%/*}"; h="${h%:*}"   # 取 host（去 scheme/path/port）
+        trust_pip="$trust_pip --trusted-host $h"
+        trust_uv="$trust_uv $uv_insecure_flag $h"
+        ;;
+    esac
   done
   echo "[deploy] 在隔离 venv 安装 $HERMES_PKG（索引: ${HERMES_INDEX_URL:-PyPI}）…"
   if [[ -n "$UV_BIN" ]]; then
