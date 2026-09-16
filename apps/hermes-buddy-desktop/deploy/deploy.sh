@@ -254,6 +254,31 @@ SVCEOF
     nohup "$HERMES_VENV/bin/python" -m hermes_cli.main gateway run >> "$HERMES_HOME/gateway.log" 2>&1 &
     sleep 5
   fi
+  # 必须确认 22122 真的在监听，否则视为失败（防止 Gateway 启动即崩溃被误判成功）
+  local ok=0
+  for _ in $(seq 1 12); do
+    if (command -v curl >/dev/null && curl -fsS -o /dev/null "http://127.0.0.1:22122/health" 2>/dev/null) \
+       || (command -v wget >/dev/null && wget -q -O /dev/null "http://127.0.0.1:22122/health" 2>/dev/null) \
+       || "$HERMES_VENV/bin/python" -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:22122/health',timeout=2); sys.exit(0)" 2>/dev/null; then
+      ok=1; break
+    fi
+    sleep 2
+  done
+  if [[ "$ok" != "1" ]]; then
+    echo "[deploy][FAIL] Hermes Gateway 拉起后 22122 未在监听（Gateway 可能启动即崩溃）"
+    if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+      echo "[deploy] ---- hermes-gateway 服务状态 ----"
+      systemctl status hermes-gateway --no-pager 2>&1 | sed 's/^/  /' | head -20
+      echo "[deploy] ---- hermes-gateway 最近日志（journalctl）----"
+      journalctl -u hermes-gateway --no-pager -n 30 2>&1 | sed 's/^/  /'
+    else
+      echo "[deploy] ---- gateway.log 末尾 ----"
+      tail -30 "$HERMES_HOME/gateway.log" 2>&1 | sed 's/^/  /'
+    fi
+    return 1
+  fi
+  echo "[deploy] Hermes Gateway 已在 22122 监听（/health OK）"
+  return 0
 }
 
 install_hermes() {
@@ -301,8 +326,11 @@ install_hermes() {
   fi
   echo "[deploy] $HERMES_PKG 已装入 $HERMES_VENV"
   generate_hermes_config
-  register_hermes_gateway
-  echo "[deploy] Hermes 本体安装完成（Gateway 22122 应已在监听）"
+  if ! register_hermes_gateway; then
+    echo "[deploy][FAIL] Hermes 本体已装入 venv，但 Gateway 拉起失败，完整部署未完成"
+    return 1
+  fi
+  echo "[deploy] Hermes 本体安装完成（Gateway 22122 已监听）"
   return 0
 }
 
