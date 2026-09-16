@@ -173,21 +173,32 @@ ensure_python_uv() {
     fi
   fi
 
-  # 优先用 uv（自带 Python 管理、隔离好、速度快）
+  # 优先用 uv（自带 Python 管理、隔离好、速度快）。
+  # 注意：uv 官方安装器默认装到 ~/.local/bin，但该目录在 SSH 非交互会话里通常不在 PATH，
+  # 导致“上次装好的 uv 这次 command -v 找不到”。先把 ~/.local/bin 加进 PATH 再探测。
+  export PATH="$HOME/.local/bin:$PATH"
   if command -v uv >/dev/null 2>&1; then
     UV_BIN="$(command -v uv)"
   else
     echo "[env] 未找到 uv，尝试安装（官方安装器 -> ~/.local/bin/uv）…"
     if command -v curl >/dev/null 2>&1; then
-      curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh >/dev/null 2>&1 || true
-    elif command -v pip3 >/dev/null 2>&1; then
-      pip3 install --user -q uv >/dev/null 2>&1 || true
+      echo "[env] 下载 uv 官方安装器（astral.sh）…"
+      if curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh 2>&1; then
+        sh /tmp/uv-install.sh 2>&1 | sed 's/^/  /' || echo "[env][WARN] uv 官方安装器执行失败（常见：内网无外网 / 代理拦截 astral.sh）"
+      else
+        echo "[env][WARN] 无法下载 astral.sh/uv/install.sh（内网/代理不可达），改走 pip 兜底"
+      fi
     fi
-    UV_BIN="$HOME/.local/bin/uv"
-    [[ -x "$UV_BIN" ]] || UV_BIN="$(command -v uv 2>/dev/null || true)"
+    # 官方安装器失败时用 pip3 装到用户目录（走已配置的 PyPI 源，内网镜像通常可达）
+    if [[ ! -x "$HOME/.local/bin/uv" ]] && command -v pip3 >/dev/null 2>&1; then
+      echo "[env] 尝试 pip3 install --user uv（走已配置 PyPI 源）…"
+      pip3 install --user -q uv 2>&1 | sed 's/^/  /' || echo "[env][WARN] pip3 安装 uv 也失败"
+    fi
+    # PATH 已含 ~/.local/bin，重新探测；仍找不到就退回 pip + venv
+    UV_BIN="$(command -v uv 2>/dev/null || true)"
   fi
   if [[ -n "$UV_BIN" && -x "$UV_BIN" ]]; then
-    echo "[env] uv = $UV_BIN ($("$UV_BIN" --version 2>&1)"
+    echo "[env] uv = $UV_BIN ($("$UV_BIN" --version 2>&1))"
   else
     echo "[env] uv 不可用，将退回 pip + venv"
     UV_BIN=""
