@@ -1,0 +1,8 @@
+# Force LF for scripts that run on the Linux deploy target.
+# CRLF in a shell script breaks the shebang (#!/bin/bash^M) and any
+# here-doc / variable expansion, so these must stay LF regardless of
+# core.autocrlf on the Windows build machine. The deploy tar.gz is
+# built from the working tree, so a CRLF checkout would ship a broken
+# script to Ubuntu.
+*.sh text eol=lf
+*.py text eol=lf
