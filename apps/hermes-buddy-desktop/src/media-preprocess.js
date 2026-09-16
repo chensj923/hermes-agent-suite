@@ -174,13 +174,15 @@ function safeName(name, fallback) {
 /**
  * 预处理 parts：把 audio / video 就地替换成本地派生出的 text + image。
  * 其余 part（text/image/file）原样透传。
- * @returns {Promise<{parts: Array, warnings: string[]}>}
+ * @returns {Promise<{parts: Array, warnings: string[], missing: string[]}>}
+ *   missing 是结构化的"缺什么"（whisper / model / ffmpeg），渲染层据此决定要不要给安装按钮。
  */
 async function preprocessParts(parts, { appDir, logger } = {}) {
   const warnings = [];
+  const missing = [];
   const list = Array.isArray(parts) ? parts : [];
   const hasMedia = list.some((p) => p && (p.type === 'audio' || p.type === 'video'));
-  if (!hasMedia) return { parts: list, warnings };
+  if (!hasMedia) return { parts: list, warnings, missing };
 
   const log = logger || { info() {}, warn() {}, error() {}, debug() {} };
   const ffmpeg = findEngine('ffmpeg', appDir);
@@ -189,6 +191,12 @@ async function preprocessParts(parts, { appDir, logger } = {}) {
 
   const out = [];
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-media-'));
+
+  /** 记一条"缺引擎"警告，并登记到 missing 供 UI 弹安装按钮。 */
+  const noteMissing = (kind, message) => {
+    if (missing.indexOf(kind) === -1) missing.push(kind);
+    warnings.push(message);
+  };
 
   try {
     for (const part of list) {
@@ -204,12 +212,12 @@ async function preprocessParts(parts, { appDir, logger } = {}) {
 
       // 视频需要 ffmpeg 才能抽帧/抽音轨；音频只要有 whisper 就能转写
       if (isVideo && !ffmpeg) {
-        warnings.push(`未检测到 ffmpeg，视频「${name}」只能在本地抽帧/转写——已跳过，仅保留文件名。`);
+        noteMissing('ffmpeg', `未检测到 ffmpeg，视频「${name}」无法在本地抽帧/转写，已跳过。`);
         out.push({ type: 'file', name, mime: part.mime, note: `（视频 ${name}：本机缺少 ffmpeg，未能本地转写/抽帧）` });
         continue;
       }
       if (!whisper) {
-        warnings.push(`未检测到 Whisper，语音/视频无法本地转写。请把 whisper(或 whisper-cli) 放进 PATH 或配置 BUDDY_WHISPER_BIN。`);
+        noteMissing('whisper', '未检测到 Whisper，语音/视频无法本地转写。可点下方「安装本地转写引擎」一键装上。');
         // 视频即使没有 whisper，也把关键帧抽出来给模型看
         if (isVideo && ffmpeg) {
           const vdir = fs.mkdtempSync(path.join(tmpRoot, 'v-'));
@@ -223,7 +231,7 @@ async function preprocessParts(parts, { appDir, logger } = {}) {
         continue;
       }
       if (whisperFlavor(whisper) === 'cpp' && !model) {
-        warnings.push('未检测到 Whisper 模型文件（ggml-*.bin），请放到 userData/media 或配置 BUDDY_WHISPER_MODEL。');
+        noteMissing('model', '未检测到 Whisper 模型文件（ggml-*.bin），无法本地转写。可点下方「安装本地转写引擎」一键装上。');
         out.push({ type: 'file', name, mime: part.mime, note: `（${name}：缺少 Whisper 模型文件，未能本地转写）` });
         continue;
       }
@@ -265,7 +273,7 @@ async function preprocessParts(parts, { appDir, logger } = {}) {
     try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch (_) {}
   }
 
-  return { parts: out, warnings };
+  return { parts: out, warnings, missing };
 }
 
 module.exports = { preprocessParts, toBuffer, findEngine, findWhisperModel };

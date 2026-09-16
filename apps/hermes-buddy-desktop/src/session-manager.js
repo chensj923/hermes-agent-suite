@@ -9,7 +9,7 @@ const { ToolRegistry } = require('./tools');
 const { Brain, describeBrainError, BUDDY_PROXY_PORT } = require('./agent/brain');
 const { AgentLoop } = require('./agent/loop');
 const { ChannelClient } = require('./agent/channel');
-const { partsToContent, textToContent, contentToPlainText } = require('./agent/parts');
+const { partsToContent, textToContent, contentToPlainText, stripImagesFromHistory } = require('./agent/parts');
 const { DashboardClient } = require('./agent/dashboard-client');
 const { buildSystemPrompt, DEFAULT_PERSONA } = require('./agent/prompts');
 const { MemoryStore, rememberLine } = require('./memory');
@@ -584,13 +584,21 @@ class SessionManager {
     const controller = new AbortController();
     this.controllers.set(id, controller);
     const emit = (event) => { if (typeof onEvent === 'function') onEvent({ requestId: id, ...event }); };
-    const history = this.messages.slice(-MAX_HISTORY_MESSAGES);
+    // 历史里只留最近一张图：图片是 base64 内嵌的，不剔除会每轮累积、把请求撑爆。
+    const history = stripImagesFromHistory(this.messages.slice(-MAX_HISTORY_MESSAGES));
     // 通道模式也要把模型透传过去：智能体配置的模型优先，其次界面下拉选的。
     const wantModel = this.effectiveModel(this.connection) || model || '';
     // 把高层 parts 归一成 OpenAI 多模态 content（含本地音视频预处理）；
     // 没有 parts 时退回纯文本 text。预处理失败/缺引擎时降级并提示，不阻断发送。
-    const { content, warnings } = await this._buildUserContent(parts, text);
-    for (const w of (warnings || [])) emit({ type: 'notice', message: w });
+    const { content, warnings, missing } = await this._buildUserContent(parts, text);
+    for (const w of (warnings || [])) {
+      emit({
+        type: 'notice',
+        message: w,
+        // 缺引擎时带上动作标记，渲染层据此渲染「一键安装」按钮
+        ...(missing && missing.length ? { action: 'install-media-engines', missing } : {}),
+      });
+    }
 
     // 通道模式：把消息发给 WS 通道，服务端跑 Agent 循环，事件原样转发给 UI。
     // 断线自愈：若通道已死，用已存配置自动重建并重发一次，用户无需手动点「重连」。
@@ -735,12 +743,13 @@ class SessionManager {
    * （Whisper 转写 + ffmpeg 抽关键帧），所以原始音视频不会离开本机、不会上传服务端；
    * 最终只有 text / image / file 三类进 content。
    *
-   * 返回 { content, warnings }。缺引擎/预处理失败时降级（丢弃无法处理的媒体并提示），
+   * 返回 { content, warnings, missing }。缺引擎/预处理失败时降级（丢弃无法处理的媒体并提示），
    * 绝不阻断发送——否则用户一条消息就彻底发不出去。
    */
   async _buildUserContent(parts, text) {
     let normalized = parts;
     let warnings = [];
+    let missing = [];
     const hasRawMedia = Array.isArray(parts)
       && parts.some((p) => p && (p.type === 'audio' || p.type === 'video'));
     if (hasRawMedia) {
@@ -749,6 +758,7 @@ class SessionManager {
         const out = await preprocessParts(parts, { appDir: this.appDir, logger: this.logger });
         normalized = out.parts;
         warnings = out.warnings || [];
+        missing = out.missing || [];
       } catch (error) {
         this.logger.warn('media-preprocess-failed', { error: error.message });
         warnings = [`音视频本地处理失败：${error.message || '未知错误'}（已跳过这些附件）`];
@@ -758,7 +768,7 @@ class SessionManager {
     const content = (normalized && normalized.length)
       ? (partsToContent(normalized) || textToContent(''))
       : textToContent(text);
-    return { content, warnings };
+    return { content, warnings, missing };
   }
 
   /** 自动记一笔流水，方便用户事后看"今天让它干了啥"。 */

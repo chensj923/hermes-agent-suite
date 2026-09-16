@@ -78,6 +78,12 @@ const api = {
   toolchain: () => invoke('buddy:toolchain'),
   installTool: (id) => invoke('buddy:toolchain:install', id),
 
+  // ---- 本地媒体引擎（语音/视频本地转写用） ----
+  mediaEngineStatus: () => invoke('buddy:media-engines:status'),
+  installMediaEngines: (opts) => invoke('buddy:media-engines:install', opts || {}),
+  openMediaEngineDir: () => invoke('buddy:media-engines:open-dir'),
+  onMediaEngineProgress: (handler) => subscribe('buddy:media-engines:progress', handler),
+
   // ---- 诊断 + 服务端准备脚本 ----
   diagnose: (options) => invoke('buddy:diagnose', options || {}),
   bootstrapScript: (options) => invoke('buddy:bootstrap-script', options || {}),

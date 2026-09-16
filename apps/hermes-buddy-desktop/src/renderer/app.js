@@ -178,6 +178,7 @@ const state = {
   // ---- 多模态附件 ----
   attachments: [],              // [{ id, kind, name, mime, size, previewUrl, text, data }]
   recording: null,              // { recorder, stream, chunks, startedAt, timer }
+  mediaInstallNode: null,       // 安装本地引擎时的进度气泡（用于就地更新文案）
 };
 
 // ============================================================ 顶栏 / 横幅
@@ -748,15 +749,91 @@ function secondsPrecision(ms) {
   return 0;
 }
 
-function renderNotice({ message }) {
+function renderNotice(event) {
+  const { message, action, missing } = event || {};
   const track = ensureToolTrack();
   const node = document.createElement('div');
   node.className = 'notice';
-  node.textContent = message;
+  node.textContent = message || '';
+  if (action === 'install-media-engines') {
+    node.appendChild(makeInstallButton(missing || []));
+  }
   track.appendChild(node);
   hideToolEmpty();
   scrollTools();
+  // 缺引擎这种事用户多半只盯着左侧对话看，所以在聊天区也补一条带按钮的提示。
+  if (action === 'install-media-engines') addEnginePrompt(message || '', missing || []);
 }
+
+/** 生成「安装本地转写引擎」按钮，点一次就禁用，避免重复触发。 */
+function makeInstallButton(missing) {
+  const btn = document.createElement('button');
+  btn.className = 'ghost notice-action';
+  btn.type = 'button';
+  btn.textContent = '安装本地转写引擎';
+  btn.addEventListener('click', () => {
+    btn.disabled = true;
+    installMediaEngines(missing);
+  });
+  return btn;
+}
+
+function addEnginePrompt(message, missing) {
+  const node = addMessage('system', message);
+  node.appendChild(makeInstallButton(missing));
+  return node;
+}
+
+/**
+ * 一键安装本地转写引擎（Whisper + 模型 + ffmpeg）。
+ * 装在 userData/media，不需要管理员权限；装完重新发一次语音/视频即可。
+ */
+async function installMediaEngines(missing, progressNode) {
+  const list = Array.isArray(missing) ? missing : [];
+  const pick = (c) => !list.length || list.indexOf(c) !== -1;
+  const components = [];
+  if (pick('whisper')) components.push('whisper');
+  if (pick('model')) components.push('model');
+  if (pick('ffmpeg')) components.push('ffmpeg');
+  if (!components.length) components.push('whisper', 'model', 'ffmpeg');
+
+  const node = progressNode || addMessage('system', '');
+  state.mediaInstallNode = node;
+  node.textContent = '正在准备安装本地转写引擎…';
+  scrollToEnd();
+  try {
+    const res = await api.installMediaEngines({ components, model: 'base' });
+    if (res && res.error) {
+      node.textContent = `安装失败：${res.error}`;
+      node.appendChild(makeOpenDirButton());
+      return;
+    }
+    const names = (res && res.installed || []).join('、');
+    node.textContent = `本地转写引擎已就绪（${names || '已安装'}）。重新发送一次语音/视频就会在本机转写后再发给 AI。`;
+  } catch (error) {
+    node.textContent = `安装失败：${cleanIpcError(error && error.message) || error}`;
+    node.appendChild(makeOpenDirButton());
+  } finally {
+    state.mediaInstallNode = null;
+    scrollToEnd();
+  }
+}
+
+/** 一键安装失败时的兜底：打开引擎目录，让用户自己把文件放进去。 */
+function makeOpenDirButton() {
+  const btn = document.createElement('button');
+  btn.className = 'ghost notice-action';
+  btn.type = 'button';
+  btn.textContent = '打开引擎目录（手动放置）';
+  btn.addEventListener('click', () => { api.openMediaEngineDir(); });
+  return btn;
+}
+
+api.onMediaEngineProgress((progress) => {
+  if (!state.mediaInstallNode || !progress) return;
+  state.mediaInstallNode.textContent = progress.message || '安装中…';
+  scrollToEnd();
+});
 
 function beginAssistantBubble() {
   state.pendingTools = new Map();
@@ -865,6 +942,19 @@ function cleanIpcError(raw) {
   return String(raw || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '').trim();
 }
 
+/**
+ * 上游连接被掐断时给个排查方向。
+ * 这种报错最常见的原因是请求体过大（图片 base64 撑爆）或模型不支持图片输入，
+ * 光把"上游不可达"甩给用户等于什么都没说。
+ */
+function withUpstreamHint(message) {
+  if (/Remote end closed|上游不可达|Connection aborted|Connection reset|Broken pipe/i.test(message)) {
+    return `${message}\n\n常见原因：附件体积过大，或当前模型不支持图片输入。`
+      + '可以试试只发文字、换小一点的图，或到「设置 → 智能体」换一个支持视觉的模型。';
+  }
+  return message;
+}
+
 // ============================================================ 多模态附件（图片 / 文件 / 语音 / 视频）
 //
 // 语义约定（与 main 进程 session-manager 的 _buildUserContent 对应）：
@@ -876,6 +966,10 @@ function cleanIpcError(raw) {
 
 const TEXT_EXT = /\.(txt|md|json|csv|log|yaml|yml|toml|ini|xml|js|ts|jsx|tsx|py|java|go|rb|rs|sh|sql|html|css)$/i;
 const MAX_FILE_TEXT = 200 * 1024;   // 单个文本文件内联上限，避免把超大文件塞进上下文
+// 图片发送前先压缩：原图动辄好几 MB，base64 之后还要再涨 1/3，
+// 直接发会让上游因请求体过大而断开（表现为"上游不可达"）。
+const MAX_IMAGE_EDGE = 1600;        // 长边上限像素
+const TARGET_IMAGE_BYTES = 1024 * 1024;  // 压缩目标：base64 后不超过 1 MB
 
 function kindOfFile(file) {
   const mime = (file.type || '').toLowerCase();
@@ -910,6 +1004,69 @@ function readWith(file, how) {
   });
 }
 
+/** 图片芯片副标题：压缩过就把"发出去多大"也标出来，方便判断是不是体积惹的祸。 */
+function imageSub(att) {
+  const before = formatSize(att.size);
+  if (att.compressedSize && att.compressedSize < att.size) {
+    return `图片 · ${before}（已压缩至 ${formatSize(att.compressedSize)}）`;
+  }
+  return `图片 · ${before}`;
+}
+
+/** data URL 里的 base64 折算成字节数。 */
+function base64Bytes(dataUrl) {
+  const i = String(dataUrl || '').indexOf(',');
+  const b64 = i >= 0 ? dataUrl.slice(i + 1) : String(dataUrl || '');
+  return Math.floor(b64.length * 3 / 4);
+}
+
+function loadImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('图片解码失败'));
+    img.src = dataUrl;
+  });
+}
+
+/** 等比缩放后转 JPEG（垫白底，避免 PNG 透明通道变黑）。 */
+function drawToJpeg(img, maxEdge, quality) {
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  const scale = Math.min(1, maxEdge / Math.max(w, h || 1));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', quality);
+}
+
+/**
+ * 压缩图片到 1MB 以内（先降质量，再缩尺寸）。
+ * 失败就原样返回——宁可发大图，也绝不因为压缩出错让用户发不出东西。
+ */
+async function shrinkImage(dataUrl) {
+  try {
+    if (base64Bytes(dataUrl) <= TARGET_IMAGE_BYTES) return dataUrl;
+    const img = await loadImage(dataUrl);
+    let quality = 0.82;
+    let edge = MAX_IMAGE_EDGE;
+    let best = dataUrl;
+    for (let i = 0; i < 6; i++) {
+      best = drawToJpeg(img, edge, quality);
+      if (base64Bytes(best) <= TARGET_IMAGE_BYTES) return best;
+      if (quality > 0.55) quality -= 0.12;
+      else edge = Math.round(edge * 0.7);
+    }
+    return best;
+  } catch (_) {
+    return dataUrl;
+  }
+}
+
 async function addFiles(fileList) {
   const files = Array.from(fileList || []);
   for (const file of files) {
@@ -926,10 +1083,14 @@ async function addFiles(fileList) {
     };
     try {
       if (kind === 'image') {
-        // dataURL 既能预览（CSP 允许 data:），也直接作为多模态内容发给模型
-        const url = String(await readWith(file, 'dataurl') || '');
+        // dataURL 既能预览（CSP 允许 data:），也直接作为多模态内容发给模型。
+        // 先压缩：原图直接发会因为请求体过大被上游掐断。
+        const raw = String(await readWith(file, 'dataurl') || '');
+        const url = await shrinkImage(raw);
         att.previewUrl = url;
+        att.mime = url.indexOf('data:image/png') === 0 ? 'image/png' : 'image/jpeg';
         att.data = url.includes(',') ? url.slice(url.indexOf(',') + 1) : url;   // 纯 base64
+        att.compressedSize = base64Bytes(url);   // 实际会发出去的体积，UI 上要让用户看见
       } else if (kind === 'audio' || kind === 'video') {
         att.data = await readWith(file, 'buffer');
       } else if (isTextFile(file)) {
@@ -985,7 +1146,7 @@ function buildAttachmentChip(att, removable) {
   sub.className = 'attach-sub';
   sub.textContent = att.kind === 'audio' ? '语音 · 本机转写后发送'
     : att.kind === 'video' ? '视频 · 本机转写 + 关键帧后发送'
-      : att.kind === 'image' ? `图片 · ${formatSize(att.size)}`
+      : att.kind === 'image' ? imageSub(att)
         : (att.text ? `文本 · ${formatSize(att.size)}` : `文件 · ${formatSize(att.size)}（无法直接读取，仅附文件名）`);
   meta.appendChild(title);
   meta.appendChild(sub);
@@ -1153,7 +1314,7 @@ async function sendMessage() {
     finishAssistantBubble(result && result.text);
   } catch (error) {
     finishAssistantBubble('');
-    const message = cleanIpcError(error && error.message) || '本地 Agent 调用失败';
+    const message = withUpstreamHint(cleanIpcError(error && error.message) || '本地 Agent 调用失败');
     addMessage('error', message);
     setStatusDot('error');
     // 模型被上游打回：服务端已把它从可用列表移除，这里刷新下拉让用户别再选到它。
@@ -1472,6 +1633,7 @@ async function renderSettings() {
     memory: '记忆',
     skills: '技能',
     toolchain: '本机工具',
+    media: '本地媒体引擎',
     workspace: '工作区',
     'gateway-diag': 'Gateway 诊断'
   };
@@ -1483,6 +1645,7 @@ async function renderSettings() {
     else if (state.settingsTab === 'memory') await renderMemoryTab();
     else if (state.settingsTab === 'skills') await renderSkillsTab();
     else if (state.settingsTab === 'toolchain') await renderToolchainTab();
+    else if (state.settingsTab === 'media') await renderMediaTab();
     else if (state.settingsTab === 'workspace') await renderWorkspaceTab();
     else if (state.settingsTab === 'gateway-diag') await renderGatewayDiagTab();
   } catch (error) {
@@ -1767,6 +1930,92 @@ async function renderToolchainTab() {
     }
     list.appendChild(card);
   }
+}
+
+// ---- 本地媒体引擎：语音/视频本地转写所需（Whisper + 模型 + ffmpeg） ----
+
+async function renderMediaTab() {
+  el.contextBody.innerHTML = `
+    <h2>本地媒体引擎</h2>
+    <p class="hint">发语音或视频时，Buddy 会先在本机把它转成文字、抽出关键帧，只把文字和图片发给 AI——原始音视频不出本机。这需要本机的 Whisper 与 ffmpeg，点一下就能装好（装在应用数据目录，不写 PATH、不需要管理员权限）。</p>
+    <div id="media-engine-list"></div>
+    <label class="settings-field">语音模型
+      <select id="media-engine-model">
+        <option value="tiny">tiny（约 78 MB，最快、精度一般）</option>
+        <option value="base" selected>base（约 148 MB，推荐）</option>
+        <option value="small">small（约 488 MB，更准但更慢）</option>
+      </select>
+    </label>
+    <div class="settings-actions">
+      <button class="primary" id="media-engine-install" type="button">一键安装</button>
+      <button class="ghost" id="media-engine-opendir" type="button">打开引擎目录</button>
+    </div>
+    <p class="hint" id="media-engine-tip"></p>
+  `;
+
+  const list = $('media-engine-list');
+  const tip = $('media-engine-tip');
+  const btn = $('media-engine-install');
+  const sel = $('media-engine-model');
+
+  const status = await api.mediaEngineStatus().catch(() => null);
+  const items = [
+    { key: 'whisper', label: 'Whisper（语音转写）', info: status && status.whisper },
+    { key: 'model', label: '语音模型（ggml-*.bin）', info: status && status.model },
+    { key: 'ffmpeg', label: 'ffmpeg（视频抽帧 / 抽音轨）', info: status && status.ffmpeg }
+  ];
+  const missing = [];
+  for (const it of items) {
+    const ok = !!(it.info && it.info.ok);
+    if (!ok) missing.push(it.key);
+    const card = document.createElement('div');
+    card.className = 'tool-item';
+    card.dataset.ok = ok ? 'true' : 'false';
+    card.innerHTML = `
+      <div class="tool-item-head">
+        <span class="tool-item-name"></span>
+        <span class="tool-item-status">${ok ? '✓ 已就绪' : '✗ 缺失'}</span>
+      </div>
+      <div class="tool-item-path"></div>
+    `;
+    card.querySelector('.tool-item-name').textContent = it.label;
+    card.querySelector('.tool-item-path').textContent = (it.info && it.info.path) || '未检测到';
+    list.appendChild(card);
+  }
+  if (status && status.dir) {
+    const dir = document.createElement('p');
+    dir.className = 'hint';
+    dir.textContent = `引擎目录：${status.dir}`;
+    list.appendChild(dir);
+  }
+
+  btn.textContent = missing.length ? '一键安装缺失组件' : '重新安装 / 更新';
+  btn.addEventListener('click', async () => {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '安装中…';
+    tip.textContent = '正在准备…';
+    const off = api.onMediaEngineProgress((p) => {
+      tip.textContent = (p && p.message) ? p.message : '安装中…';
+    });
+    try {
+      const res = await api.installMediaEngines({
+        components: missing.length ? missing : ['whisper', 'model', 'ffmpeg'],
+        model: sel.value || 'base'
+      });
+      if (res && res.error) throw new Error(res.error);
+      await renderMediaTab();
+    } catch (error) {
+      tip.textContent = `安装失败：${cleanIpcError(error && error.message) || error}。`
+        + '你也可以手动把 whisper-cli.exe / ffmpeg.exe / ggml-*.bin 放进引擎目录。';
+      btn.disabled = false;
+      btn.textContent = label;
+    } finally {
+      if (typeof off === 'function') off();
+    }
+  });
+
+  $('media-engine-opendir').addEventListener('click', () => { api.openMediaEngineDir(); });
 }
 
 async function renderWorkspaceTab() {

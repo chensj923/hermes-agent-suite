@@ -15,6 +15,7 @@ const { install: installTool } = require('./toolchain');
 const { diagnose } = require('./diagnostics');
 const { generateBootstrapScript } = require('./server-bootstrap');
 const { Updater } = require('./updater');
+const mediaEngines = require('./media-engines');
 
 // 打包冒烟：启动 → 加载完成 → 退出，用于 CI 校验主进程与渲染层能起来。
 const SMOKE_TEST = process.argv.includes('--smoke-test');
@@ -729,6 +730,23 @@ function registerIpc() {
     pendingConfirms.delete(String(id));
     resolver(approved);
     return { ok: true };
+  });
+
+  // ---- 本地媒体引擎（Whisper / ffmpeg 的一键安装） ----
+  // 引擎装在 <userData>/media，不需要管理员权限，也不写 PATH。
+  handle('buddy:media-engines:status', () => mediaEngines.getStatus(app.getPath('userData')));
+  handle('buddy:media-engines:open-dir', () => mediaEngines.openDir(app.getPath('userData')));
+  handle('buddy:media-engines:install', async (event, opts = {}) => {
+    try {
+      return await mediaEngines.install({
+        appDir: app.getPath('userData'),
+        components: opts.components || ['whisper', 'model', 'ffmpeg'],
+        model: opts.model || 'base',
+        onProgress: (p) => safeSend(event.sender, 'buddy:media-engines:progress', p || {}),
+      });
+    } catch (error) {
+      return { error: String((error && error.message) || error || '安装失败') };
+    }
   });
 
   // ---- 智能体 ----

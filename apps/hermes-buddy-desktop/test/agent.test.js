@@ -12,7 +12,7 @@ const { buildSystemPrompt } = require('../src/agent/prompts');
 const { MemoryStore, rememberLine } = require('../src/memory');
 const { SkillStore } = require('../src/skills');
 const { Workspace } = require('../src/workspace');
-const { partsToContent, textToContent, contentToPlainText } = require('../src/agent/parts');
+const { partsToContent, textToContent, contentToPlainText, stripImagesFromHistory } = require('../src/agent/parts');
 
 function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'buddy-agent-')); }
 
@@ -316,4 +316,46 @@ test('AgentLoop: 多模态 content 数组原样进模型（不再被 String 强�
   assert.ok(Array.isArray(last.content), 'content 应保持数组而不是被 String() 拍平');
   assert.equal(last.content.length, 2);
   assert.equal(last.content[1].image_url.url, 'data:image/png;base64,AAAA');
+});
+
+// ---- 历史里的图片剔除（防止每轮重复携带 base64 把请求撑爆） ----
+
+function imgMsg(text, n) {
+  const content = [{ type: 'text', text }];
+  for (let i = 0; i < n; i++) content.push({ type: 'image_url', image_url: { url: 'data:image/png;base64,' + 'A'.repeat(1000) } });
+  return { role: 'user', content };
+}
+
+test('历史只保留最近一张图，更早的换成占位文本', () => {
+  const history = [imgMsg('第一轮', 1), { role: 'assistant', content: '收到' }, imgMsg('第二轮', 1)];
+  const out = stripImagesFromHistory(history, 1);
+  const first = out[0].content.filter((p) => p.type === 'image_url').length;
+  const last = out[2].content.filter((p) => p.type === 'image_url').length;
+  assert.equal(first, 0, '最早那张应被剔除');
+  assert.equal(last, 1, '最近那张应保留');
+  assert.ok(out[0].content.some((p) => p.type === 'text' && /图片/.test(p.text)), '应留下占位说明');
+});
+
+test('历史里只有一张图时不动它', () => {
+  const history = [imgMsg('唯一', 1)];
+  const out = stripImagesFromHistory(history, 1);
+  assert.equal(out[0].content.filter((p) => p.type === 'image_url').length, 1);
+});
+
+test('单条消息里有多张图时，只保留最后一张', () => {
+  const history = [imgMsg('三张', 3)];
+  const out = stripImagesFromHistory(history, 1);
+  assert.equal(out[0].content.filter((p) => p.type === 'image_url').length, 1);
+});
+
+test('剔除图片不会改动原始历史（不能就地修改）', () => {
+  const history = [imgMsg('第一轮', 1), imgMsg('第二轮', 1)];
+  stripImagesFromHistory(history, 1);
+  assert.equal(history[0].content.filter((p) => p.type === 'image_url').length, 1, '原数组不应被改动');
+});
+
+test('没有图片的历史原样返回', () => {
+  const history = [{ role: 'user', content: '纯文本' }, { role: 'assistant', content: [{ type: 'text', text: '嗯' }] }];
+  const out = stripImagesFromHistory(history, 1);
+  assert.deepEqual(out, history);
 });

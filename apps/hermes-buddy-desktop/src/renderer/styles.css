@@ -665,6 +665,16 @@ button:disabled { opacity: .5; cursor: default; }
   font-style: italic;
 }
 
+/* 提示里的一键安装按钮：右侧执行记录栏里要小巧，聊天气泡里也要看得清 */
+.notice-action {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11px;
+  font-style: normal;
+  padding: 4px 10px;
+}
+.notice .notice-action { margin-top: 4px; }
+
 .empty { margin: auto; color: var(--muted); font-size: 13px; text-align: center; max-width: 480px; }
 
 /* 输入栏 */
