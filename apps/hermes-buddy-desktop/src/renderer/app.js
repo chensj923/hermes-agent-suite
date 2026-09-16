@@ -179,6 +179,7 @@ const state = {
   // ---- 多模态附件 ----
   attachments: [],              // [{ id, kind, name, mime, size, previewUrl, text, data }]
   recording: null,              // { recorder, stream, chunks, startedAt, timer }
+  upstream: '',                 // 服务端实际在调的模型地址（连接后上报，出错提示用）
   mediaInstallNode: null,       // 安装本地引擎时的进度气泡（用于就地更新文案）
 };
 
@@ -881,6 +882,10 @@ api.onChatEvent((event) => {
     case 'notice':
       renderNotice(event);
       break;
+    case 'upstream':
+      // 记下服务端实际在调的模型地址，出错时提示里能用上
+      if (event.url) state.upstream = String(event.url);
+      break;
     case 'error':
       finishAssistantBubble('');
       addMessage('error', cleanIpcError(event.text || event.message) || '本地 Agent 出错');
@@ -944,16 +949,30 @@ function cleanIpcError(raw) {
 }
 
 /**
- * 上游连接被掐断时给个排查方向。
- * 这种报错最常见的原因是请求体过大（图片 base64 撑爆）或模型不支持图片输入，
- * 光把"上游不可达"甩给用户等于什么都没说。
+ * 给上游错误补排查方向。不同错误的成因完全不同，提示必须分开：
+ *   Connection refused = 那个地址上没服务在听（跟体积毫无关系）
+ *   Remote end closed  = 连上了但被对方掐断（常见是请求体过大）
+ * 混成一句"附件太大"会把人带到完全错误的方向上去。
  */
 function withUpstreamHint(message) {
-  if (/Remote end closed|上游不可达|Connection aborted|Connection reset|Broken pipe/i.test(message)) {
-    return `${message}\n\n常见原因：附件体积过大，或当前模型不支持图片输入。`
+  const m = String(message || '');
+  if (/Connection refused|Errno 111|ECONNREFUSED/i.test(m)) {
+    const inline = (m.match(/https?:\/\/[^\s，,）)"']+/) || [])[0] || '';
+    const addr = inline || state.upstream;
+    return `${m}\n\n这是「连不上」，不是附件太大——服务端配置的模型地址上现在没有服务在监听。`
+      + (addr ? `\n上游地址：${addr}` : '')
+      + '\n请到服务器上确认这个地址的服务在跑（推理服务 / 8811 直通代理），'
+      + '或核对 Hermes config.yaml 里的 model.base_url；改完在 Buddy 里重连一次。';
+  }
+  if (/timed out|请求超时/i.test(m)) {
+    return `${m}\n\n上游连上了但没在超时时间内返回，通常是模型仍在加载或推理很慢。`
+      + '可以稍后重试，或到「设置 → 智能体」换一个响应更快的模型。';
+  }
+  if (/Remote end closed|上游不可达|Connection aborted|Connection reset|Broken pipe/i.test(m)) {
+    return `${m}\n\n常见原因：附件体积过大，或当前模型不支持图片输入。`
       + '可以试试只发文字、换小一点的图，或到「设置 → 智能体」换一个支持视觉的模型。';
   }
-  return message;
+  return m;
 }
 
 // ============================================================ 多模态附件（图片 / 文件 / 语音 / 视频）

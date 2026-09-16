@@ -14,6 +14,7 @@
  */
 
 const http = require('http');
+const https = require('https');
 const crypto = require('crypto');
 const { URL } = require('url');
 
@@ -122,6 +123,7 @@ class ChannelClient {
     this.pendingTask = null;   // 当前 user_message 的 { resolve, reject }
     this.pendingModels = null; // 当前 list_models 的 { resolve, reject }
     this.serverVersion = '';   // 服务端 welcome 里声明的通道版本
+    this.serverUpstream = '';  // 服务端实际在调的模型地址（出错时才知道该去查哪里）
     this._welcomed = false;    // 是否已收到 welcome（决定断连时该 resolve 还是 reject）
     this.outdated = null;      // 版本不满足时置为 { server, required }，此时通道已断开
     this._rejectOpen = null;   // 握手阶段主动失败（如版本过旧）用
@@ -229,6 +231,38 @@ class ChannelClient {
     }
   }
 
+  /**
+   * 兜底拿上游地址：老服务端的 welcome 帧里没有 upstream，但 HTTP /health 一直有
+   * upstream_base。出「连接被拒绝」时用户要知道该去查哪个地址，所以这里问一次。
+   * 探测失败完全不影响连接——只是少显示一个地址而已。
+   */
+  _probeUpstreamFromHealth() {
+    if (this.serverUpstream) return;
+    try {
+      const u = new URL(/^wss?:\/\//i.test(this.url) ? this.url : `ws://${this.url}`);
+      const mod = u.protocol === 'wss:' ? https : http;
+      const req = mod.request({
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'wss:' ? 443 : 80),
+        path: '/health',
+        method: 'GET',
+        timeout: 5000,
+      }, (res) => {
+        let body = '';
+        res.on('data', (c) => { body += String(c); });
+        res.on('end', () => {
+          try {
+            const info = JSON.parse(body);
+            if (info && info.upstream_base) this.serverUpstream = String(info.upstream_base);
+          } catch (_) { /* 不是 JSON 就算了 */ }
+        });
+      });
+      req.on('error', () => {});
+      req.on('timeout', () => { try { req.destroy(); } catch (_) {} });
+      req.end();
+    } catch (_) { /* 地址解析不出来就算了 */ }
+  }
+
   _onMessage(msg) {
     if (msg.type === 'welcome') {
       this._welcomed = true;
@@ -236,6 +270,7 @@ class ChannelClient {
       // 能力协商：服务端版本不够就直接断开，不做静默降级。
       const serverVersion = msg.channel_version || msg.version || '';
       this.serverVersion = String(serverVersion);
+      if (msg.upstream) this.serverUpstream = String(msg.upstream);
       if (!versionAtLeast(serverVersion, REQUIRED_CHANNEL_VERSION)) {
         this.outdated = { server: this.serverVersion || '未知', required: REQUIRED_CHANNEL_VERSION };
         const err = new Error(
@@ -249,6 +284,7 @@ class ChannelClient {
         try { this.close(); } catch (_) {}
         return;
       }
+      this._probeUpstreamFromHealth();   // 老服务端 welcome 里没有 upstream，兜底问一次 /health
       if (this._resolveOpen) this._resolveOpen();
       return;
     }

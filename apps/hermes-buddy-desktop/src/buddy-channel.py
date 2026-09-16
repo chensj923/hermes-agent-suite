@@ -278,6 +278,15 @@ def discover_upstream():
     return STATE["base"], STATE["key"], STATE["model"], STATE["chat_path"]
 
 
+def _public_upstream():
+    """可展示给用户的上游地址（去掉查询串，避免把 token 之类带出去）。"""
+    base = str(STATE["base"] or "")
+    i = base.find("?")
+    if i >= 0:
+        base = base[:i]
+    return base or "(未配置)"
+
+
 def chat_url():
     base = STATE["base"]
     if not base:
@@ -588,8 +597,43 @@ def call_llm(messages, tools, signal_broken, model=None):
                                     detail[:300] or raw[:300] or "无响应内容"),
             code=code or "upstream_http_error", status=exc.code, detail=detail,
         )
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        # Connection refused（errno 111）= 那个地址上根本没有服务在监听。
+        # 这跟"请求体过大被掐断"完全是两回事，提示必须区分开，否则用户会往错误方向排查。
+        if isinstance(reason, ConnectionRefusedError) or "Connection refused" in str(reason) \
+                or "Errno 111" in str(reason):
+            raise UpstreamError(
+                "连不上上游（Connection refused）：%s" % _public_upstream(),
+                code="upstream_refused",
+                hint="这个地址上没有服务在监听。常见原因：上游推理服务/8811 代理进程没启动、"
+                     "端口写错、或服务只监听了 127.0.0.1。请到服务器上确认该端口在听，"
+                     "或核对 config.yaml 里 model.base_url 的配置。",
+                detail=str(reason),
+            )
+        if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason):
+            raise UpstreamError(
+                "上游请求超时：%s" % _public_upstream(),
+                code="upstream_timeout",
+                hint="上游连上了但没有在超时时间内返回，可能是模型还在加载或推理很慢。"
+                     "可稍后重试，或到「设置 → 智能体」换一个更快的模型。",
+                detail=str(reason),
+            )
+        raise UpstreamError(
+            "上游不可达（%s）：%s —— 目标 %s" % (type(reason).__name__, reason, _public_upstream()),
+            code="upstream_unreachable",
+            hint="网络层连不上上游，请检查地址与端口、服务器防火墙，以及上游服务是否在运行。",
+            detail=str(reason),
+        )
+    except (TimeoutError, socket.timeout) as exc:
+        raise UpstreamError(
+            "上游请求超时：%s" % _public_upstream(),
+            code="upstream_timeout",
+            hint="上游没有在超时时间内返回，可能是模型还在加载或推理很慢。可稍后重试。",
+            detail=str(exc),
+        )
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("上游不可达: %s" % exc)
+        raise RuntimeError("上游不可达: %s（目标 %s）" % (exc, _public_upstream()))
     body = json.loads(resp.read().decode("utf-8"))
     choice = body["choices"][0]
     msg = choice.get("message") or {}
@@ -860,7 +904,10 @@ class WSConnection:
         # 而不是带着残缺能力（比如拿不到模型清单）继续跑。
         self.send_json({"type": "welcome", "session": sid,
                         "model": STATE["model"], "server": "hermes-buddy-channel",
-                        "version": "1", "channel_version": CHANNEL_VERSION})
+                        "version": "1", "channel_version": CHANNEL_VERSION,
+                        # 把上游地址告诉客户端：连不上时用户才知道该去查哪个地址，
+                        # 而不是只看到一句"上游不可达"。纯增量字段，老客户端忽略。
+                        "upstream": _public_upstream()})
         try:
             while not self.closed:
                 frame = self.read_frame()

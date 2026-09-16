@@ -586,6 +586,10 @@ class SessionManager {
     const emit = (event) => { if (typeof onEvent === 'function') onEvent({ requestId: id, ...event }); };
     // 历史里只留最近一张图：图片是 base64 内嵌的，不剔除会每轮累积、把请求撑爆。
     const history = stripImagesFromHistory(this.messages.slice(-MAX_HISTORY_MESSAGES));
+    // 把服务端实际在调的模型地址告诉界面：出「连接被拒绝」时用户才知道该去查哪个地址
+    if (this.channel && this.channel.serverUpstream) {
+      emit({ type: 'upstream', url: this.channel.serverUpstream });
+    }
     // 通道模式也要把模型透传过去：智能体配置的模型优先，其次界面下拉选的。
     const wantModel = this.effectiveModel(this.connection) || model || '';
     // 把高层 parts 归一成 OpenAI 多模态 content（含本地音视频预处理）；
