@@ -267,7 +267,7 @@ SVCEOF
   fi
   # 必须确认 22122 真的在监听，否则视为失败（防止 Gateway 启动即崩溃被误判成功）
   local ok=0
-  for _ in $(seq 1 12); do
+  for _ in $(seq 1 45); do
     if (command -v curl >/dev/null && curl -fsS -o /dev/null "http://127.0.0.1:22122/health" 2>/dev/null) \
        || (command -v wget >/dev/null && wget -q -O /dev/null "http://127.0.0.1:22122/health" 2>/dev/null) \
        || "$HERMES_VENV/bin/python" -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:22122/health',timeout=2); sys.exit(0)" 2>/dev/null; then
@@ -340,6 +340,17 @@ install_hermes() {
       echo "[deploy][FAIL] pip 安装 $HERMES_PKG 失败（检查索引/网络/代理证书）"
       return 1
     fi
+  fi
+  # hermes-agent 的 api_server 适配器需要 aiohttp，但它只出现在 extras 里、不在基础依赖中。
+  # 不装的话 Gateway 进程能起来，但 22122 不提供 HTTP 服务（Buddy 连上后 fetch failed）。
+  # 这里显式补齐 aiohttp（版本对齐 hermes-agent extras 中声明的 3.14.1）。
+  echo "[deploy] 确保 api_server 适配器依赖 aiohttp 已安装…"
+  if [[ -n "$UV_BIN" ]]; then
+    "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" $idx_args $trust_uv aiohttp==3.14.1 2>&1 | sed 's/^/  /' || \
+      "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" aiohttp 2>&1 | sed 's/^/  /'
+  else
+    "$HERMES_VENV/bin/python" -m pip install $idx_args $trust_pip aiohttp==3.14.1 2>&1 | sed 's/^/  /' || \
+      "$HERMES_VENV/bin/python" -m pip install aiohttp 2>&1 | sed 's/^/  /'
   fi
   # 安装后必须验证 Hermes 真的可用，否则视为失败（防止空 venv 被误判成功）
   if [[ ! -x "$HERMES_VENV/bin/hermes" ]] && ! "$HERMES_VENV/bin/python" -c "import hermes_agent" >/dev/null 2>&1; then
