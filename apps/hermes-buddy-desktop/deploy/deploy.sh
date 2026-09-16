@@ -49,7 +49,7 @@ PROXY_PORT="${BUDDY_PROXY_PORT:-8811}"
 CHANNEL_PORT="${BUDDY_CHANNEL_PORT:-8822}"
 SHOW_KEYS="${SHOW_KEYS:-0}"
 INSTALL_HERMES="${INSTALL_HERMES:-0}"
-HERMES_INDEX_URL="${HERMES_INDEX_URL:-}"
+HERMES_INDEX_URL="${HERMES_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 HERMES_EXTRA_INDEX_URL="${HERMES_EXTRA_INDEX_URL:-}"
 HERMES_PKG="${HERMES_PKG:-hermes-agent}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -173,21 +173,32 @@ ensure_python_uv() {
     fi
   fi
 
-  # 优先用 uv（自带 Python 管理、隔离好、速度快）
+  # 优先用 uv（自带 Python 管理、隔离好、速度快）。
+  # 注意：uv 官方安装器默认装到 ~/.local/bin，但该目录在 SSH 非交互会话里通常不在 PATH，
+  # 导致“上次装好的 uv 这次 command -v 找不到”。先把 ~/.local/bin 加进 PATH 再探测。
+  export PATH="$HOME/.local/bin:$PATH"
   if command -v uv >/dev/null 2>&1; then
     UV_BIN="$(command -v uv)"
   else
     echo "[env] 未找到 uv，尝试安装（官方安装器 -> ~/.local/bin/uv）…"
     if command -v curl >/dev/null 2>&1; then
-      curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh >/dev/null 2>&1 || true
-    elif command -v pip3 >/dev/null 2>&1; then
-      pip3 install --user -q uv >/dev/null 2>&1 || true
+      echo "[env] 下载 uv 官方安装器（astral.sh）…"
+      if curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh 2>&1; then
+        sh /tmp/uv-install.sh 2>&1 | sed 's/^/  /' || echo "[env][WARN] uv 官方安装器执行失败（常见：内网无外网 / 代理拦截 astral.sh）"
+      else
+        echo "[env][WARN] 无法下载 astral.sh/uv/install.sh（内网/代理不可达），改走 pip 兜底"
+      fi
     fi
-    UV_BIN="$HOME/.local/bin/uv"
-    [[ -x "$UV_BIN" ]] || UV_BIN="$(command -v uv 2>/dev/null || true)"
+    # 官方安装器失败时用 pip3 装到用户目录（走已配置的 PyPI 源，内网镜像通常可达）
+    if [[ ! -x "$HOME/.local/bin/uv" ]] && command -v pip3 >/dev/null 2>&1; then
+      echo "[env] 尝试 pip3 install --user uv（走已配置 PyPI 源）…"
+      pip3 install --user -q uv 2>&1 | sed 's/^/  /' || echo "[env][WARN] pip3 安装 uv 也失败"
+    fi
+    # PATH 已含 ~/.local/bin，重新探测；仍找不到就退回 pip + venv
+    UV_BIN="$(command -v uv 2>/dev/null || true)"
   fi
   if [[ -n "$UV_BIN" && -x "$UV_BIN" ]]; then
-    echo "[env] uv = $UV_BIN ($("$UV_BIN" --version 2>&1)"
+    echo "[env] uv = $UV_BIN ($("$UV_BIN" --version 2>&1))"
   else
     echo "[env] uv 不可用，将退回 pip + venv"
     UV_BIN=""
@@ -219,6 +230,30 @@ generate_hermes_config() {
     echo "      port: 22122"
   } > "$cfg"
   echo "[deploy] 已生成 $cfg（Gateway 绑定 0.0.0.0:22122）"
+}
+
+# 把 venv 与 HERMES_HOME 写到系统级环境，使所有用户 / 登录会话 / 重启后都生效
+setup_system_env() {
+  echo "[deploy] 写入系统级环境变量（/etc/profile.d + /etc/environment.d）…"
+  # 1) 登录 shell（所有用户 source /etc/profile.d/*）；HERMES_HOME/HERMES_VENV 用真实值展开，$PATH 保持字面
+  cat > /etc/profile.d/hermes.sh <<ENVEOF
+# 由 Buddy 完整部署写入：使 hermes venv 与 HERMES_HOME 对所有用户生效
+export HERMES_HOME=$HERMES_HOME
+export PATH="$HERMES_VENV/bin:\$PATH"
+ENVEOF
+  chmod 644 /etc/profile.d/hermes.sh 2>/dev/null || true
+  # 2) systemd 全局环境（cron / 非登录单元也能拿到 HERMES_HOME）
+  mkdir -p /etc/environment.d
+  cat > /etc/environment.d/hermes.conf <<ENVEOF
+HERMES_HOME=$HERMES_HOME
+ENVEOF
+  chmod 644 /etc/environment.d/hermes.conf 2>/dev/null || true
+  # 3) 放开 venv 对其他用户的读/执行权限，使"所有用户"真能调用 hermes 等命令
+  chmod -R a+rX "$HERMES_VENV" 2>/dev/null || true
+  # 4) 让当前部署会话立即生效（非登录 shell 不会 source profile.d）
+  export HERMES_HOME="$HERMES_HOME"
+  export PATH="$HERMES_VENV/bin:$PATH"
+  echo "[deploy] 系统级环境变量已写入：HERMES_HOME=$HERMES_HOME，venv=$HERMES_VENV/bin"
 }
 
 register_hermes_gateway() {
@@ -254,6 +289,31 @@ SVCEOF
     nohup "$HERMES_VENV/bin/python" -m hermes_cli.main gateway run >> "$HERMES_HOME/gateway.log" 2>&1 &
     sleep 5
   fi
+  # 必须确认 22122 真的在监听，否则视为失败（防止 Gateway 启动即崩溃被误判成功）
+  local ok=0
+  for _ in $(seq 1 45); do
+    if (command -v curl >/dev/null && curl -fsS -o /dev/null "http://127.0.0.1:22122/health" 2>/dev/null) \
+       || (command -v wget >/dev/null && wget -q -O /dev/null "http://127.0.0.1:22122/health" 2>/dev/null) \
+       || "$HERMES_VENV/bin/python" -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:22122/health',timeout=2); sys.exit(0)" 2>/dev/null; then
+      ok=1; break
+    fi
+    sleep 2
+  done
+  if [[ "$ok" != "1" ]]; then
+    echo "[deploy][FAIL] Hermes Gateway 拉起后 22122 未在监听（Gateway 可能启动即崩溃）"
+    if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+      echo "[deploy] ---- hermes-gateway 服务状态 ----"
+      systemctl status hermes-gateway --no-pager 2>&1 | sed 's/^/  /' | head -20
+      echo "[deploy] ---- hermes-gateway 最近日志（journalctl）----"
+      journalctl -u hermes-gateway --no-pager -n 30 2>&1 | sed 's/^/  /'
+    else
+      echo "[deploy] ---- gateway.log 末尾 ----"
+      tail -30 "$HERMES_HOME/gateway.log" 2>&1 | sed 's/^/  /'
+    fi
+    return 1
+  fi
+  echo "[deploy] Hermes Gateway 已在 22122 监听（/health OK）"
+  return 0
 }
 
 install_hermes() {
@@ -274,13 +334,24 @@ install_hermes() {
   local idx_args=""
   [[ -n "$HERMES_INDEX_URL" ]] && idx_args="$idx_args --index-url $HERMES_INDEX_URL"
   [[ -n "$HERMES_EXTRA_INDEX_URL" ]] && idx_args="$idx_args --extra-index-url $HERMES_EXTRA_INDEX_URL"
-  # 内部/私有镜像常为 HTTP 或自签证书：pip 用 --trusted-host，uv 用 --allow-insecure
+  # 内部/私有镜像常是 HTTP 或自签证书：
+  #   pip 用 --trusted-host（仅 http 需要）
+  #   uv 用 --allow-insecure-host（新版 uv ≥0.5）或 --allow-insecure（旧版），按版本探测
+  # 注意：https 有效证书源（如清华）不要加任何不安全参数，否则新版 uv 会因未知参数报错
   local trust_pip="" trust_uv=""
+  local uv_insecure_flag="--allow-insecure"
+  if [[ -n "$UV_BIN" ]] && "$UV_BIN" pip install --help 2>&1 | grep -q -- '--allow-insecure-host'; then
+    uv_insecure_flag="--allow-insecure-host"
+  fi
   for u in "$HERMES_INDEX_URL" "$HERMES_EXTRA_INDEX_URL"; do
     [[ -n "$u" ]] || continue
-    local h="${u#*://}"; h="${h%%/*}"; h="${h%:*}"   # 取 host（去 scheme/path/port）
-    trust_pip="$trust_pip --trusted-host $h"
-    trust_uv="$trust_uv --allow-insecure $h"
+    case "$u" in
+      http://*)
+        local h="${u#*://}"; h="${h%%/*}"; h="${h%:*}"   # 取 host（去 scheme/path/port）
+        trust_pip="$trust_pip --trusted-host $h"
+        trust_uv="$trust_uv $uv_insecure_flag $h"
+        ;;
+    esac
   done
   echo "[deploy] 在隔离 venv 安装 $HERMES_PKG（索引: ${HERMES_INDEX_URL:-PyPI}）…"
   if [[ -n "$UV_BIN" ]]; then
@@ -294,6 +365,17 @@ install_hermes() {
       return 1
     fi
   fi
+  # hermes-agent 的 api_server 适配器需要 aiohttp，但它只出现在 extras 里、不在基础依赖中。
+  # 不装的话 Gateway 进程能起来，但 22122 不提供 HTTP 服务（Buddy 连上后 fetch failed）。
+  # 这里显式补齐 aiohttp（版本对齐 hermes-agent extras 中声明的 3.14.1）。
+  echo "[deploy] 确保 api_server 适配器依赖 aiohttp 已安装…"
+  if [[ -n "$UV_BIN" ]]; then
+    "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" $idx_args $trust_uv aiohttp==3.14.1 2>&1 | sed 's/^/  /' || \
+      "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" $idx_args $trust_uv aiohttp 2>&1 | sed 's/^/  /'
+  else
+    "$HERMES_VENV/bin/python" -m pip install $idx_args $trust_pip aiohttp==3.14.1 2>&1 | sed 's/^/  /' || \
+      "$HERMES_VENV/bin/python" -m pip install $idx_args $trust_pip aiohttp 2>&1 | sed 's/^/  /'
+  fi
   # 安装后必须验证 Hermes 真的可用，否则视为失败（防止空 venv 被误判成功）
   if [[ ! -x "$HERMES_VENV/bin/hermes" ]] && ! "$HERMES_VENV/bin/python" -c "import hermes_agent" >/dev/null 2>&1; then
     echo "[deploy][FAIL] $HERMES_PKG 安装后未找到 hermes 命令/模块，安装不完整"
@@ -301,8 +383,12 @@ install_hermes() {
   fi
   echo "[deploy] $HERMES_PKG 已装入 $HERMES_VENV"
   generate_hermes_config
-  register_hermes_gateway
-  echo "[deploy] Hermes 本体安装完成（Gateway 22122 应已在监听）"
+  setup_system_env
+  if ! register_hermes_gateway; then
+    echo "[deploy][FAIL] Hermes 本体已装入 venv，但 Gateway 拉起失败，完整部署未完成"
+    return 1
+  fi
+  echo "[deploy] Hermes 本体安装完成（Gateway 22122 已监听）"
   return 0
 }
 
