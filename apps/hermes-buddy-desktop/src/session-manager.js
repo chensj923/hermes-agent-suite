@@ -733,7 +733,33 @@ class SessionManager {
     });
     await channel.connect();
     this.channel = channel;
+    // 1.5「结晶」：连上服务端后自动把本机记忆同步上去，让服务端形成跨会话持久知识。
+    // 这是"结晶系统"的核心--本机记忆不只在当前会话生效，而是沉淀到服务端、跨连接/跨 Buddy 持续。
+    this._crystallizeInBackground();
     return channel;
+  }
+
+  /**
+   * 1.5「结晶」：把本机记忆和项目约定异步同步到服务端。
+   * 不阻塞发送流程，失败了也不影响聊天--结晶是"尽力做"不是"必须做"。
+   */
+  _crystallizeInBackground() {
+    if (!this.channel || !this.channel._supportsResume) return;  // 老服务端不支持 sync_memory
+    const globalMem = this.memory ? this.memory.globalMemory().trim() : '';
+    const projectMem = this.memory ? this.memory.projectMemory().trim() : '';
+    const agentsDoc = this.workspace ? String(this.workspace.readAgents() || '').trim() : '';
+    // 全局记忆 -> 服务端 GLOBAL.md
+    if (globalMem) {
+      this.channel.syncMemory(globalMem, 'global').catch(() => {});
+    }
+    // 项目记忆 -> 服务端 PROJECT.md
+    if (projectMem) {
+      this.channel.syncMemory(projectMem, 'project').catch(() => {});
+    }
+    // AGENTS.md -> 服务端 AGENTS.md
+    if (agentsDoc) {
+      this.channel.syncMemory(agentsDoc, 'agents').catch(() => {});
+    }
   }
 
   /** 通过 WS 通道发一条消息并等待 task_done，顺带维护本地历史。 */

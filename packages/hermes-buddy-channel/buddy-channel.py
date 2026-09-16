@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 #   1.2  错误帧带 code/hint、模型清单带 unsupported、上游拒绝模型时自动回退默认模型
 #   1.3  user_message 支持多模态 content（OpenAI content 数组），
 #        图片/文件/音视频（Win 端本地预处理后的派生内容）都能带过来
-CHANNEL_VERSION = "1.4"
+CHANNEL_VERSION = "1.5"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -56,6 +56,8 @@ WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 LOCK = threading.Lock()
 STATE = {"base": "", "key": "", "model": "", "chat_path": ""}
 SESSIONS = {}  # session_id -> Session
+SESSIONS_DIR = os.path.join(HERMES_HOME, "buddy-sessions")  # 持久化目录
+MAX_SESSIONS_DISK = 200  # 磁盘上保留的会话文件上限
 
 
 # ----------------------------------------------------------------- 配置发现（复用推理代理逻辑）
@@ -738,13 +740,96 @@ class Session:
     def __init__(self, conn, sid):
         self.conn = conn
         self.sid = sid
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [{"role": "system", "content": self._build_system_prompt()}]
         self.pending = {}            # id -> {"event": Event, "result": None}
         self.lock = threading.Lock()
         self.cancel_event = threading.Event()
         self.running = False
         self.model = None            # 客户端指定的模型（user_message.model）
         self._model_fallback = False  # 本会话是否已因「模型不被支持」回退过
+
+    @staticmethod
+    def _build_system_prompt():
+        """系统提示词 = 基础 SYSTEM_PROMPT + 服务端结晶记忆。
+        结晶记忆来自所有 Buddy 客户端通过 sync_memory 上传的知识，
+        存在 HERMES_HOME/buddy-memory/ 下，每次新 Session 自动注入。"""
+        parts = [SYSTEM_PROMPT]
+        mem_dir = os.path.join(HERMES_HOME, "buddy-memory")
+        for fname in ("GLOBAL.md", "AGENTS.md", "PROJECT.md"):
+            path = os.path.join(mem_dir, fname)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if content:
+                    title = {"GLOBAL": "跨项目结晶记忆", "AGENTS": "项目约定结晶",
+                             "PROJECT": "项目结晶记忆"}.get(fname.replace(".md", ""), "结晶记忆")
+                    parts.append("\n\n【%s】\n%s" % (title, content[:8000]))
+            except Exception:  # noqa: BLE001
+                pass
+        return "".join(parts)
+
+    # ---- 持久化（C：session 落盘 + resume）----
+
+    def _session_file(self):
+        """会话落盘路径：HERMES_HOME/buddy-sessions/<sid>.json"""
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.sid))
+        return os.path.join(SESSIONS_DIR, "%s.json" % safe)
+
+    def save_to_disk(self):
+        """把 self.messages 落盘，供断线后 resume 恢复。"""
+        try:
+            os.makedirs(SESSIONS_DIR, exist_ok=True)
+            # 只存 role + content，tool_calls 太大可以截
+            msgs = []
+            for m in self.messages:
+                item = {"role": m.get("role"), "content": m.get("content", "")}
+                if m.get("tool_calls"):
+                    item["tool_calls"] = m["tool_calls"][:20]  # 最多存 20 个 tool_call
+                msgs.append(item)
+            payload = {"sid": self.sid, "model": self.model or "",
+                        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "messages": msgs[-60:]}  # 最多 60 条
+            with open(self._session_file(), "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            self._gc_disk()
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write("[channel] session save failed: %s\n" % exc)
+
+    def load_from_disk(self, sid):
+        """从磁盘恢复历史到 self.messages，成功返回 True。"""
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(sid))
+        path = os.path.join(SESSIONS_DIR, "%s.json" % safe)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            msgs = payload.get("messages") or []
+            if not msgs:
+                return False
+            # 保留 system 消息（可能含 system_extra），后面接恢复的历史
+            self.messages = [self.messages[0]] + msgs[1:]  # 替换掉空 system 以外的
+            if payload.get("model"):
+                self.model = payload["model"]
+            sys.stderr.write("[channel] session %s resumed from disk (%d msgs)\n" % (sid, len(self.messages)))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write("[channel] session load failed: %s\n" % exc)
+            return False
+
+    def _gc_disk(self):
+        """磁盘会话文件超限时删最老的。"""
+        try:
+            files = [(os.path.join(SESSIONS_DIR, f), os.path.getmtime(os.path.join(SESSIONS_DIR, f)))
+                     for f in os.listdir(SESSIONS_DIR) if f.endswith(".json")]
+            if len(files) <= MAX_SESSIONS_DISK:
+                return
+            files.sort(key=lambda x: x[1])
+            for path, _ in files[:len(files) - MAX_SESSIONS_DISK]:
+                try:
+                    os.remove(path)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
 
     def send(self, obj):
         try:
@@ -840,6 +925,8 @@ class Session:
             self.send({"type": "error", "code": "agent_error", "message": str(exc)})
         finally:
             self.running = False
+            # 每轮对话结束后把会话落盘，供断线/重连后 resume
+            self.save_to_disk()
 
     def dispatch_tool(self, call):
         """发送 tool_request 并等待结果；返回给模型的 tool content 字符串或 None。"""
@@ -925,7 +1012,9 @@ class WSConnection:
                         "version": "1", "channel_version": CHANNEL_VERSION,
                         # 把上游地址告诉客户端：连不上时用户才知道该去查哪个地址，
                         # 而不是只看到一句"上游不可达"。纯增量字段，老客户端忽略。
-                        "upstream": _public_upstream()})
+                        "upstream": _public_upstream(),
+                        # 1.5：告诉客户端可以用 resume_session_id 恢复旧会话
+                        "supports_resume": True})
         try:
             while not self.closed:
                 frame = self.read_frame()
@@ -976,6 +1065,17 @@ class WSConnection:
         if t == "hello":
             caps = msg.get("capabilities") or []
             sys.stderr.write("[channel] hello caps=%s\n" % caps)
+        elif t == "resume_session":
+            # 1.5：客户端断线重连后请求恢复旧会话
+            if s and not s.running:
+                old_sid = msg.get("resume_session_id") or ""
+                if old_sid:
+                    ok = s.load_from_disk(old_sid)
+                    self.send_json({"type": "resume_result", "session": s.sid,
+                                     "resumed": ok, "messages": len(s.messages)})
+                else:
+                    self.send_json({"type": "resume_result", "session": s.sid,
+                                     "resumed": False, "message": "未指定 resume_session_id"})
         elif t == "user_message":
             if s and not s.running:
                 # 1.3：优先用多模态 content（OpenAI content 数组）。
@@ -1013,8 +1113,36 @@ class WSConnection:
                 s.on_cancel()
         elif t == "pong":
             pass
+        elif t == "sync_memory":
+            # 1.5「结晶」：客户端把本机记忆/约定上传到服务端，归拢成跨会话/跨连接的持久知识。
+            # 落盘到 HERMES_HOME/buddy-memory/，下次 Session 初始化时自动注入 system prompt。
+            self._handle_sync_memory(msg)
         else:
             self.send_json({"type": "error", "code": "unknown_type", "message": "未知消息类型: %s" % t})
+
+    def _handle_sync_memory(self, msg):
+        """1.5「结晶」：接收客户端上传的记忆/约定，归拢到服务端持久目录。
+        每次新 Session 初始化时自动把结晶记忆注入 system prompt，
+        这样断线重连、甚至换一台 Buddy 连上来都能继承之前的知识。
+        """
+        try:
+            mem_dir = os.path.join(HERMES_HOME, "buddy-memory")
+            os.makedirs(mem_dir, exist_ok=True)
+            scope = msg.get("scope") or "project"
+            content = msg.get("content") or ""
+            if not content.strip():
+                self.send_json({"type": "sync_memory_result", "ok": False, "error": "内容为空"})
+                return
+            # 按 scope 分文件：project / global / agents
+            fname = {"global": "GLOBAL.md", "agents": "AGENTS.md"}.get(scope, "PROJECT.md")
+            path = os.path.join(mem_dir, fname)
+            # 追加而非覆盖（每次同步是增量贡献，不是替换）
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("\n## %s\n%s\n" % (time.strftime("%Y-%m-%d %H:%M"), content))
+            sys.stderr.write("[channel] memory crystallized to %s (%d chars)\n" % (fname, len(content)))
+            self.send_json({"type": "sync_memory_result", "ok": True, "scope": scope, "file": fname})
+        except Exception as exc:  # noqa: BLE001
+            self.send_json({"type": "sync_memory_result", "ok": False, "error": str(exc)})
 
 
 # ----------------------------------------------------------------- HTTP / WS 升级

@@ -30,7 +30,7 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
  * 1.3：user_message 支持多模态 content（OpenAI content 数组），图片/文件/音视频
  *       预处理后的派生内容都归一成 content 发过来，取代原先的纯 text。
  */
-const REQUIRED_CHANNEL_VERSION = '1.4';
+const REQUIRED_CHANNEL_VERSION = '1.5';
 
 /** 解析 "1.1" / "1" / "v2.0.3" 这类版本号，取 major.minor 比较。 */
 function parseVersion(value) {
@@ -122,9 +122,12 @@ class ChannelClient {
     this.openPromise = null;
     this.pendingTask = null;   // 当前 user_message 的 { resolve, reject }
     this.pendingModels = null; // 当前 list_models 的 { resolve, reject }
+    this.pendingResume = null;  // 当前 resume_session 的 { resolve, reject }
+    this.pendingSync = null;  // 当前 sync_memory 的 { resolve, reject }
     this.serverVersion = '';   // 服务端 welcome 里声明的通道版本
     this.serverUpstream = '';  // 服务端实际在调的模型地址（出错时才知道该去查哪里）
     this._welcomed = false;    // 是否已收到 welcome（决定断连时该 resolve 还是 reject）
+    this._supportsResume = false;  // 服务端是否支持 resume_session（1.5+）
     this.outdated = null;      // 版本不满足时置为 { server, required }，此时通道已断开
     this._rejectOpen = null;   // 握手阶段主动失败（如版本过旧）用
     this.fragmentOpcode = null;
@@ -271,6 +274,8 @@ class ChannelClient {
       const serverVersion = msg.channel_version || msg.version || '';
       this.serverVersion = String(serverVersion);
       if (msg.upstream) this.serverUpstream = String(msg.upstream);
+      // 1.5：服务端 welcome 里带 supports_resume=true 表示可以 resume_session
+      this._supportsResume = Boolean(msg.supports_resume);
       if (!versionAtLeast(serverVersion, REQUIRED_CHANNEL_VERSION)) {
         this.outdated = { server: this.serverVersion || '未知', required: REQUIRED_CHANNEL_VERSION };
         const err = new Error(
@@ -294,6 +299,25 @@ class ChannelClient {
         const p = this.pendingModels;
         this.pendingModels = null;
         p.resolve(Array.isArray(msg.models) ? msg.models : []);
+      }
+      return;
+    }
+    if (msg.type === 'resume_result') {
+      // 1.5：resume_session 的应答
+      if (this.pendingResume) {
+        const p = this.pendingResume;
+        this.pendingResume = null;
+        p.resolve({ resumed: Boolean(msg.resumed), messages: Number(msg.messages) || 0 });
+      }
+      return;
+    }
+    if (msg.type === 'sync_memory_result') {
+      // 1.5「结晶」：sync_memory 的应答
+      if (this.pendingSync) {
+        const p = this.pendingSync;
+        this.pendingSync = null;
+        if (msg.ok) p.resolve({ ok: true, scope: msg.scope, file: msg.file });
+        else p.reject(new Error(msg.error || '同步失败'));
       }
       return;
     }
@@ -404,6 +428,12 @@ class ChannelClient {
     await this.connect();
     const timeoutMs = (opts && typeof opts.timeoutMs === 'number') ? opts.timeoutMs : 10 * 60 * 1000;
     const payload = normalizeOutgoingContent(content);
+    // 1.5：断线重连后尝试恢复服务端旧会话（服务端 messages 在内存里丢了，但落盘了）
+    if (opts && opts.resumeSessionId && this._supportsResume) {
+      try {
+        await this._sendResume(opts.resumeSessionId);
+      } catch (_) { /* 恢复失败不阻断：照常发新消息 */ }
+    }
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer = null;
@@ -436,6 +466,49 @@ class ChannelClient {
         ...(opts && opts.systemExtra ? { system_extra: String(opts.systemExtra) } : {}),
         ...(opts && opts.model ? { model: String(opts.model) } : {}),
       });
+    });
+  }
+
+  /**
+   * 1.5：请求服务端恢复旧会话。服务端从落盘文件里把 messages 读回，
+   * 这样断线重连后服务端的 Agent 上下文不丢。
+   * 返回 Promise<{resumed:boolean, messages:number}>。
+   */
+  async resumeSession(oldSessionId) {
+    this._assertUsable();
+    await this.connect();
+    if (!this._supportsResume) return { resumed: false, messages: 0 };
+    return this._sendResume(oldSessionId);
+  }
+
+  _sendResume(oldSessionId) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => { if (!settled) { settled = true; reject(new Error('resume 超时')); } }, 5000);
+      this.pendingResume = {
+        resolve: (result) => { if (settled) return; settled = true; clearTimeout(timer); resolve(result); },
+        reject: (err) => { if (settled) return; settled = true; clearTimeout(timer); reject(err); },
+      };
+      this.send({ type: 'resume_session', resume_session_id: String(oldSessionId || '') });
+    });
+  }
+
+  /**
+   * 1.5「结晶」：把本机记忆/约定上传到服务端，归拢成跨会话/跨连接的持久知识。
+   * 服务端落盘到 HERMES_HOME/buddy-memory/，下次新 Session 自动注入 system prompt。
+   * 这样即使用户换一台 Buddy、或服务端重启，知识都不会丢。
+   */
+  async syncMemory(content, scope = 'project') {
+    this._assertUsable();
+    await this.connect();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => { if (!settled) { settled = true; reject(new Error('sync_memory 超时')); } }, 10000);
+      this.pendingSync = {
+        resolve: (r) => { if (settled) return; settled = true; clearTimeout(timer); resolve(r); },
+        reject: (e) => { if (settled) return; settled = true; clearTimeout(timer); reject(e); },
+      };
+      this.send({ type: 'sync_memory', scope: String(scope), content: String(content || '') });
     });
   }
 
