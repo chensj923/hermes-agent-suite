@@ -1092,6 +1092,9 @@ async function startRecording() {
         renderAttachments();
       } catch (error) {
         addMessage('error', `录音结果处理失败：${error.message || error}`);
+      } finally {
+        // 放行可能正在等这段录音的 sendMessage
+        if (stopResolve) { const r = stopResolve; stopResolve = null; r(); }
       }
     };
     recorder.start();
@@ -1109,20 +1112,29 @@ async function startRecording() {
   }
 }
 
+let stopResolve = null;   // 等待 onstop 把录音变成附件的 resolver
+
 function stopRecording() {
   const rec = state.recording;
-  if (!rec) return;
-  state.recording = null;
-  clearInterval(rec.timer);
-  el.recordTip.hidden = true;
-  el.btnRecord.classList.remove('recording');
-  try { rec.recorder.stop(); } catch (_) {}
-  rec.stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+  if (!rec) return Promise.resolve();
+  return new Promise((resolve) => {
+    stopResolve = resolve;
+    state.recording = null;
+    clearInterval(rec.timer);
+    el.recordTip.hidden = true;
+    el.btnRecord.classList.remove('recording');
+    try { rec.recorder.stop(); } catch (_) {}
+    rec.stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+    // 兜底：极端情况下 onstop 没触发也要放行，别把发送卡死
+    setTimeout(() => { if (stopResolve) { const r = stopResolve; stopResolve = null; r(); } }, 1500);
+  });
 }
 
 async function sendMessage() {
   const text = el.input.value.trim();
   if (state.activeRequestId) return;
+  // 还在录音就先收尾：等 onstop 把录音变成附件，再一起发出去
+  if (state.recording) await stopRecording();
   const atts = state.attachments.slice();
   if (!text && !atts.length) return;          // 没有文本也没有附件就别发
   const parts = [];
