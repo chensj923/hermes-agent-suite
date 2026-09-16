@@ -260,16 +260,16 @@ install_hermes() {
   echo ""
   echo "[deploy] ---- 安装 Hermes 本体（完整部署前置）----"
   if ! ensure_python_uv; then
-    echo "[deploy][WARN] 环境准备失败，跳过 Hermes 安装（仅部署外挂组件）"
-    return 0
+    echo "[deploy][FAIL] 环境准备失败（python3/uv 缺失且无法安装），Hermes 无法安装"
+    return 1
   fi
   mkdir -p "$HERMES_VENV"
   if [[ -n "$UV_BIN" ]]; then
     "$UV_BIN" venv "$HERMES_VENV" >/dev/null 2>&1 || "$PY_BIN" -m venv "$HERMES_VENV" || {
-      echo "[deploy][WARN] venv 创建失败，跳过 Hermes 安装"; return 0; }
+      echo "[deploy][FAIL] venv 创建失败，Hermes 无法安装"; return 1; }
   else
     "$PY_BIN" -m venv "$HERMES_VENV" || {
-      echo "[deploy][WARN] venv 创建失败，跳过 Hermes 安装"; return 0; }
+      echo "[deploy][FAIL] venv 创建失败，Hermes 无法安装"; return 1; }
   fi
   local idx_args=""
   [[ -n "$HERMES_INDEX_URL" ]] && idx_args="$idx_args --index-url $HERMES_INDEX_URL"
@@ -277,23 +277,32 @@ install_hermes() {
   echo "[deploy] 在隔离 venv 安装 $HERMES_PKG（索引: ${HERMES_INDEX_URL:-PyPI}）…"
   if [[ -n "$UV_BIN" ]]; then
     if ! "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" $idx_args -U pip "$HERMES_PKG" 2>&1 | sed 's/^/  /'; then
-      echo "[deploy][WARN] uv 安装 $HERMES_PKG 失败，跳过 Hermes 安装"
-      return 0
+      echo "[deploy][FAIL] uv 安装 $HERMES_PKG 失败（检查索引/网络/代理证书）"
+      return 1
     fi
   else
     if ! "$HERMES_VENV/bin/python" -m pip install $idx_args -U pip "$HERMES_PKG" 2>&1 | sed 's/^/  /'; then
-      echo "[deploy][WARN] pip 安装 $HERMES_PKG 失败，跳过 Hermes 安装"
-      return 0
+      echo "[deploy][FAIL] pip 安装 $HERMES_PKG 失败（检查索引/网络/代理证书）"
+      return 1
     fi
+  fi
+  # 安装后必须验证 Hermes 真的可用，否则视为失败（防止空 venv 被误判成功）
+  if [[ ! -x "$HERMES_VENV/bin/hermes" ]] && ! "$HERMES_VENV/bin/python" -c "import hermes_agent" >/dev/null 2>&1; then
+    echo "[deploy][FAIL] $HERMES_PKG 安装后未找到 hermes 命令/模块，安装不完整"
+    return 1
   fi
   echo "[deploy] $HERMES_PKG 已装入 $HERMES_VENV"
   generate_hermes_config
   register_hermes_gateway
   echo "[deploy] Hermes 本体安装完成（Gateway 22122 应已在监听）"
+  return 0
 }
 
 if [[ "$INSTALL_HERMES" == "1" ]]; then
-  install_hermes || true
+  if ! install_hermes; then
+    HERMES_INSTALL_FAILED=1
+    echo "[deploy][FAIL] Hermes 本体安装失败，完整部署未完成（外挂组件仍会部署）。请排查后重新执行完整部署。"
+  fi
 fi
 
 # =============================================================================
