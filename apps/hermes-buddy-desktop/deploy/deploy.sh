@@ -232,6 +232,30 @@ generate_hermes_config() {
   echo "[deploy] 已生成 $cfg（Gateway 绑定 0.0.0.0:22122）"
 }
 
+# 把 venv 与 HERMES_HOME 写到系统级环境，使所有用户 / 登录会话 / 重启后都生效
+setup_system_env() {
+  echo "[deploy] 写入系统级环境变量（/etc/profile.d + /etc/environment.d）…"
+  # 1) 登录 shell（所有用户 source /etc/profile.d/*）；HERMES_HOME/HERMES_VENV 用真实值展开，$PATH 保持字面
+  cat > /etc/profile.d/hermes.sh <<ENVEOF
+# 由 Buddy 完整部署写入：使 hermes venv 与 HERMES_HOME 对所有用户生效
+export HERMES_HOME=$HERMES_HOME
+export PATH="$HERMES_VENV/bin:\$PATH"
+ENVEOF
+  chmod 644 /etc/profile.d/hermes.sh 2>/dev/null || true
+  # 2) systemd 全局环境（cron / 非登录单元也能拿到 HERMES_HOME）
+  mkdir -p /etc/environment.d
+  cat > /etc/environment.d/hermes.conf <<ENVEOF
+HERMES_HOME=$HERMES_HOME
+ENVEOF
+  chmod 644 /etc/environment.d/hermes.conf 2>/dev/null || true
+  # 3) 放开 venv 对其他用户的读/执行权限，使"所有用户"真能调用 hermes 等命令
+  chmod -R a+rX "$HERMES_VENV" 2>/dev/null || true
+  # 4) 让当前部署会话立即生效（非登录 shell 不会 source profile.d）
+  export HERMES_HOME="$HERMES_HOME"
+  export PATH="$HERMES_VENV/bin:$PATH"
+  echo "[deploy] 系统级环境变量已写入：HERMES_HOME=$HERMES_HOME，venv=$HERMES_VENV/bin"
+}
+
 register_hermes_gateway() {
   local gw_bin="$HERMES_VENV/bin/hermes"
   local gw_exec
@@ -359,6 +383,7 @@ install_hermes() {
   fi
   echo "[deploy] $HERMES_PKG 已装入 $HERMES_VENV"
   generate_hermes_config
+  setup_system_env
   if ! register_hermes_gateway; then
     echo "[deploy][FAIL] Hermes 本体已装入 venv，但 Gateway 拉起失败，完整部署未完成"
     return 1
