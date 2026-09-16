@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 #   1.2  错误帧带 code/hint、模型清单带 unsupported、上游拒绝模型时自动回退默认模型
 #   1.3  user_message 支持多模态 content（OpenAI content 数组），
 #        图片/文件/音视频（Win 端本地预处理后的派生内容）都能带过来
-CHANNEL_VERSION = "1.3"
+CHANNEL_VERSION = "1.4"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -495,6 +495,14 @@ TOOL_SCHEMAS = [
         "name": "system_info",
         "description": "查看这台 Windows 电脑的基本信息：CPU、内存、系统版本、工作区路径等。",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "remember",
+        "description": "把一条重要事实写进长期记忆，之后每次对话开头都会自动带上。适合记：用户偏好与习惯、项目约定（构建/发布/命名规则）、装了什么工具及其路径、踩过的坑与结论。不要记流水账或临时状态。",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "要记住的一句话，写成可独立理解的陈述句"},
+            "scope": {"type": "string", "description": "可选，project（默认，仅本工作区）或 global（跨工作区）"},
+            "kind": {"type": "string", "description": "可选，long（默认，长期记忆）或 daily（当天工作日志）"}
+        }, "required": ["text"]}}},
 ]
 
 TOOL_NAMES = [t["function"]["name"] for t in TOOL_SCHEMAS]
@@ -507,6 +515,8 @@ SYSTEM_PROMPT = (
     "危险命令（格式化磁盘、关机、删系统目录等）会被客户端的安全规则拦截，"
     "被拦截时请换一种安全的方式完成任务，或向用户说明无法执行。"
     "优先用 find_files/search_content 而非递归遍历整盘。"
+    "用户确认过的事实、工具安装位置、项目约定，请用 remember 工具记下来，"
+    "这样下次对话开头就能直接看到，不用用户重复交代。"
 )
 
 
@@ -758,7 +768,7 @@ class Session:
                        "text": "模型 %s 不被上游支持，已自动改用默认模型 %s" % (bad, default)})
             return call_llm(self.messages, TOOL_SCHEMAS, self.cancel_event.is_set, self.model)
 
-    def run_task(self, content, history, model=None):
+    def run_task(self, content, history, model=None, system_extra=None):
         """跑一轮 Agent 循环。
 
         content：本轮用户消息内容。自 1.3 起可以是
@@ -766,12 +776,20 @@ class Session:
             [{"type":"text","text":...}, {"type":"image_url","image_url":{"url":"data:..."}}]
           · 纯字符串（老客户端 / 兼容路径）
         两种都原样塞进 messages，上游 OpenAI 兼容端点天然支持。
+
+        system_extra（1.4 起）：客户端的本机上下文（记忆/项目约定/技能/工作目录）。
+        之前服务端只有自己硬编码的 SYSTEM_PROMPT，客户端记忆写了模型也看不到--
+        这是「记忆功能形同虚设」的根因。现在把它拼到 system 消息末尾。
         """
         self.running = True
         # 模型按会话记住：后续轮次（工具回灌后再问）继续用用户选的。
         if model:
             self.model = str(model)
         try:
+            # 1.4：把客户端带来的上下文拼到 system 消息里（只在会话首条消息时拼一次）。
+            # system 消息始终是 self.messages[0]，首条用户消息进来时 len<=1 说明还没拼过。
+            if system_extra and len(self.messages) <= 1:
+                self.messages[0]["content"] = SYSTEM_PROMPT + "\n\n" + str(system_extra)
             # 客户端历史只在会话刚开始时采用一次。
             # 之前每轮都 append 一遍 history，服务端自己的 self.messages 里
             # 已经保留了这些消息，等于每轮重复一份——文字时代只是浪费 token，
@@ -967,7 +985,8 @@ class WSConnection:
                     content = msg.get("text", "")
                 threading.Thread(target=s.run_task,
                                  args=(content, msg.get("history") or []),
-                                 kwargs={"model": msg.get("model") or ""},
+                                 kwargs={"model": msg.get("model") or "",
+                                         "system_extra": msg.get("system_extra") or ""},
                                  daemon=True).start()
             elif s and s.running:
                 self.send_json({"type": "error", "code": "busy", "message": "上一次任务还在进行"})

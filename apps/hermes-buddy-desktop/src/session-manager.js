@@ -19,6 +19,10 @@ const { AgentStore } = require('./agent-store');
 
 const MAX_HISTORY_MESSAGES = 30;
 const PERSONA_FILE = 'persona.md';
+// 会话历史落盘：按智能体隔离，存到 appDir/history/<agentId>.json。
+// 落盘前先脱图（stripImagesFromHistory），避免 base64 图片占满磁盘和下次重载时的体积。
+const HISTORY_DIR = 'history';
+const HISTORY_MAX_CHARS = 200000;   // 落盘上限，超了从最老开始截
 
 /**
  * 主进程编排器。
@@ -149,9 +153,12 @@ class SessionManager {
       this.tools = new ToolRegistry({
         workspace: this.workspace,
         logger: this.logger,
-        permission: (agent && agent.permission) || (connection && connection.permission) || 'read-write'
+        permission: (agent && agent.permission) || (connection && connection.permission) || 'read-write',
+        memory: this.memory
       });
       this.logger.info('workspace-ready', { workspace: this.workspace.dir, agent: agent && agent.name });
+      // 工作区就绪后恢复该智能体的历史记录（之前只存在内存里，重开 Buddy 就丢了）
+      this.loadHistory();
     }
     if (!this.brain && connection && connection.mode !== 'channel') {
       // 通道模式：决策在 Hermes 服务端外挂通道，本机不建 Brain/本地 ReAct 循环。
@@ -336,7 +343,7 @@ class SessionManager {
     this.brain = brain;
     this.gateway = health ? this.provisioning.createGateway({ baseUrl: normalized.baseUrl, apiKey: normalized.apiKey }) : null;
     this.session = session;
-    this.messages = [];
+    this.loadHistory();
     this.loop = new AgentLoop({ brain, tools: this.tools, workspace: this.workspace, logger: this.logger });
     this.logger.info('connected', {
       baseUrl: normalized.baseUrl,
@@ -393,8 +400,8 @@ class SessionManager {
 
     const saved = this.store.save(normalized);
     this.connection = saved;
-    this.messages = [];
-    this.logger.info('connected-channel', { channelUrl: normalized.channelUrl });
+    this.loadHistory();
+    this.logger.info('connected-channel', { channelUrl: normalized.channelUrl, history: this.messages.length });
     return {
       connection: publicView(saved),
       session: null,
@@ -436,8 +443,8 @@ class SessionManager {
 
     const saved = this.store.save(normalized);
     this.connection = saved;
-    this.messages = [];
-    this.logger.info('connected-dashboard', { dashboardUrl: normalized.dashboardUrl });
+    this.loadHistory();
+    this.logger.info('connected-dashboard', { dashboardUrl: normalized.dashboardUrl, history: this.messages.length });
     return {
       connection: publicView(saved),
       session: null,
@@ -560,8 +567,10 @@ class SessionManager {
     this._registerGatewayInBackground(stored);
 
     this.connection = stored;
-    this.messages = [];
-    this.logger.info('resumed-channel', { channelUrl: stored.channelUrl });
+    // 之前每次重连/重开都把历史清零 -> 模型"转个头就忘"。
+    // 现在从落盘恢复：保证连续对话体验。
+    this.loadHistory();
+    this.logger.info('resumed-channel', { channelUrl: stored.channelUrl, history: this.messages.length });
     return { ok: true, connection: publicView(stored), workspace: this.describeWorkspace() };
   }
 
@@ -686,6 +695,7 @@ class SessionManager {
       this.messages.push({ role: 'user', content });
       if (result.text) this.messages.push({ role: 'assistant', content: result.text });
       this.trimHistory();
+      this.saveHistory();
       this.remember({ role: 'user', text: contentToPlainText(content), at: Date.now() });
       this.maybeJournal(result);
       return { requestId: id, text: result.text, turns: result.turns, toolCalls: result.toolCalls.length, stopped: result.stopped };
@@ -732,10 +742,14 @@ class SessionManager {
       timeoutMs: 10 * 60 * 1000,
       // 把选中的模型透传给服务端，让它用这个模型跑 Agent 循环
       model: model || '',
+      // 本机上下文（记忆/项目约定/技能/工作区）一并发过去，否则服务端模型
+      // 只看得到它自己那份硬编码 SYSTEM_PROMPT，客户端记忆写了也白写。
+      systemExtra: this.buildContextBlock(),
     });
     this.messages.push({ role: 'user', content });
     if (result && result.text) this.messages.push({ role: 'assistant', content: result.text });
     this.trimHistory();
+    this.saveHistory();
     this.remember({ role: 'user', text: contentToPlainText(content), at: Date.now() });
     return { requestId: id, text: result.text, turns: result.turns || 0, toolCalls: 0, stopped: result.stopped };
   }
@@ -805,11 +819,6 @@ class SessionManager {
     return true;
   }
 
-  clearHistory() {
-    this.messages = [];
-    return { cleared: true };
-  }
-
   /** 把 Gateway 错误写成明文诊断文件，方便远程排查。 */
   dumpGatewayDiagnostic(baseUrl, managementUrl, error) {
     try {
@@ -840,6 +849,73 @@ class SessionManager {
     }
   }
 
+  // ---------------------------------------------------------------- 历史落盘
+
+  /**
+   * 会话历史落盘到 appDir/history/<agentId>.json。
+   *
+   * 为什么必须落盘：之前 this.messages 纯内存，重开 Buddy / 断线重连 / 重启服务端
+   * 都会让上下文清零--模型"转个头就忘"。落盘后启动时恢复，体验跟连续对话一致。
+   *
+   * 落盘内容：已脱图的纯文本/工具消息（图片 base64 不存盘，既省空间又避免
+   * 下次重载时把它们原样塞回 history 再发一遍）。
+   */
+  _historyFile(agentId) {
+    const id = String(agentId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const dir = path.join(this.appDir, HISTORY_DIR);
+    return path.join(dir, `${id}.json`);
+  }
+
+  saveHistory() {
+    try {
+      const file = this._historyFile(this.activeAgent ? this.activeAgent.id : null);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      // 落盘前脱图：只存 text，避免 base64 图片占满磁盘
+      const stripped = stripImagesFromHistory(this.messages.slice(-MAX_HISTORY_MESSAGES), 0);
+      const payload = {
+        agentId: this.activeAgent ? this.activeAgent.id : 'default',
+        savedAt: new Date().toISOString(),
+        messages: stripped,
+      };
+      let json = JSON.stringify(payload, null, 0);
+      // 硬上限：超了从头部截（最老的对话先丢）
+      if (json.length > HISTORY_MAX_CHARS) {
+        json = json.slice(0, HISTORY_MAX_CHARS);
+        // 截断后可能不是合法 JSON，补个尾巴闭合
+        json = json.replace(/,\s*$/, '') + ']}';
+      }
+      fs.writeFileSync(file, json, 'utf8');
+      this.logger.info('history-saved', { agentId: payload.agentId, messages: stripped.length });
+    } catch (error) {
+      this.logger.warn('history-save-failed', { error: error.message });
+    }
+  }
+
+  loadHistory() {
+    try {
+      const file = this._historyFile(this.activeAgent ? this.activeAgent.id : null);
+      const json = fs.readFileSync(file, 'utf8');
+      const payload = JSON.parse(json);
+      const messages = Array.isArray(payload.messages) ? payload.messages : [];
+      if (!messages.length) return;
+      // 恢复到 this.messages（getter 会按 agentId 自动找到正确的数组）
+      this.messages = messages.slice(-MAX_HISTORY_MESSAGES);
+      this.logger.info('history-loaded', { agentId: payload.agentId, messages: this.messages.length });
+    } catch (_) {
+      // 文件不存在/损坏：静默跳过，用空历史启动
+    }
+  }
+
+  clearHistory() {
+    this.messages = [];
+    // 同步删掉落盘文件：重开 Buddy 也不把已清的历史恢复回来
+    try {
+      const file = this._historyFile(this.activeAgent ? this.activeAgent.id : null);
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    } catch (_) {}
+    return { cleared: true };
+  }
+
   remember(entry) {
     if (!this.transcript) this.transcript = [];
     this.transcript.push(entry);
@@ -847,6 +923,27 @@ class SessionManager {
   }
 
   history() { return (this.transcript || []).slice(); }
+
+  /**
+   * 发给服务端补在 system 提示词后面的"本机上下文"。
+   *
+   * 通道模式下服务端有自己的身份与工具说明，所以这里**不重复身份**，只补它拿不到的东西：
+   * 长期记忆、项目约定（AGENTS.md）、技能、工作目录。没有这段，客户端记忆写得再全，
+   * 服务端模型也一个字都看不到。
+   */
+  buildContextBlock() {
+    const blocks = [];
+    const memory = this.memory ? this.memory.render().trim() : '';
+    if (memory) blocks.push(memory);
+    const agentsDoc = this.workspace ? String(this.workspace.readAgents() || '').trim() : '';
+    if (agentsDoc) blocks.push(`【项目约定（AGENTS.md）】\n${agentsDoc.slice(0, 4000)}`);
+    const skills = this.skills ? String(this.skills.render() || '').trim() : '';
+    if (skills) blocks.push(skills);
+    if (this.workspace) blocks.push(`【工作目录】${this.workspace.dir}`);
+    blocks.push(`【当前时间】${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+    const text = blocks.join('\n\n').trim();
+    return text ? text.slice(0, 12000) : '';
+  }
 
   /** 系统提示词：身份 + 环境 + 约定 + 记忆 + 技能 + 工具链现状。 */
   buildPrompt() {
@@ -908,6 +1005,8 @@ class SessionManager {
           // 目录没变也可能被用户手动删过：保存即补建。
           this.workspace.ensure();
           if (this.tools && agent.permission) this.tools.setPermission(agent.permission);
+          // 切换智能体后 getter 已指向新 agentId 的数组，但那是空的--加载该智能体的落盘历史
+          this.loadHistory();
         }
       }
       if (this.connection && this.brain && this.tools) {
@@ -1098,11 +1197,11 @@ class SessionManager {
     if (this.channel) { this.channel.close(); this.channel = null; }
     // 多连接场景：断开只结束当前会话，保留已保存的连接（profile），
     // 方便在连接页直接切换 / 重连，不用每次重填主机与 Key。
+    // 历史不清零：重连后从落盘恢复，保证连续对话体验。
     this.connection = null;
     this.brain = null;
     this.gateway = null;
     this.session = null;
-    this.messages = [];
     this.lastGatewayError = null;
     this.workspace = null;
     this.tools = null;
@@ -1120,7 +1219,7 @@ class SessionManager {
     const appData = this.store.dir || app.getPath('userData');
     const fs = require('fs');
     const path = require('path');
-    const dirs = ['gateway-cache', 'logs', 'memory', 'persona', 'skills'];
+    const dirs = ['gateway-cache', 'logs', 'memory', 'persona', 'skills', 'history'];
     dirs.forEach((subDir) => {
       const dirPath = path.join(appData, subDir);
       try { fs.rmSync(dirPath, { recursive: true, force: true }); } catch (_) {}
@@ -1132,6 +1231,7 @@ class SessionManager {
     this.gateway = null;
     this.session = null;
     this.messages = [];
+    this.agentMessages.clear();
     this.lastGatewayError = null;
     this.workspace = null;
     this.tools = null;

@@ -3,6 +3,7 @@
 const { ShellRunner } = require('./shell');
 const { FileTools } = require('./files');
 const { CommandGuard } = require('./guard');
+const { rememberLine } = require('../memory');
 
 /**
  * 工具注册表：一份定义同时产出 OpenAI function-calling schema 与本地执行入口。
@@ -98,11 +99,25 @@ const TOOL_DEFINITIONS = [
     category: 'read',
     description: '查看这台 Windows 电脑的基本信息：CPU、内存、系统版本、工作区路径等。用于判断是否具备运行某命令的条件。',
     parameters: { type: 'object', properties: {}, required: [] }
+  },
+  {
+    name: 'remember',
+    category: 'memory',
+    description: '把一条重要事实写进长期记忆，之后的每次对话开头都会自动带上它。适合记：用户的偏好与习惯、本项目的约定（构建/发布/命名规则）、装了什么工具及其路径、踩过的坑与结论。**不要**记流水账或临时状态。scope 选 project（只在本工作区生效）还是 global（跨工作区生效）；kind 选 long（长期记忆，默认）还是 daily（只记进当天工作日志）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '要记住的一句话，写成可独立理解的陈述句，例如「图片分析工具在 C:\\Users\\chens\\SynologyDrive\\Temp\\imganalyze.py，用 py imganalyze.py 调用」' },
+        scope: { type: 'string', description: '可选，project（默认，仅本工作区）或 global（跨工作区）' },
+        kind: { type: 'string', description: '可选，long（默认，长期记忆）或 daily（当天工作日志）' }
+      },
+      required: ['text']
+    }
   }
 ];
 
 class ToolRegistry {
-  constructor({ workspace, guard, shell, files, logger, permission = 'read-write' }) {
+  constructor({ workspace, guard, shell, files, logger, permission = 'read-write', memory = null }) {
     if (!workspace) throw new Error('缺少 workspace');
     this.workspace = workspace;
     this.guard = guard || new CommandGuard({ permission });
@@ -110,6 +125,14 @@ class ToolRegistry {
     this.shell = shell || new ShellRunner({ workspace, guard: this.guard, logger: this.logger });
     this.files = files || new FileTools({ workspace, logger: this.logger });
     this.permission = permission;
+    // 记忆存储由 session-manager 在装配 runtime 时注入（MemoryStore 依赖工作区）。
+    this.memory = memory;
+  }
+
+  /** 工作区切换后重新绑定记忆存储——否则 remember 会写进上一个工作区。 */
+  setMemory(store) {
+    this.memory = store;
+    return this.memory;
   }
 
   setPermission(level) {
@@ -190,8 +213,26 @@ class ToolRegistry {
       case 'find_files': return this.files.findFiles(input);
       case 'search_content': return this.files.searchContent(input);
       case 'system_info': return this.files.systemInfo();
+      case 'remember': return this.remember(input);
       default: throw new Error(`未知工具: ${name}`);
     }
+  }
+
+  /**
+   * 写记忆。模型自己沉淀事实的唯一入口——没有它，模型只能读记忆、永远写不进去，
+   * 记忆区永远是空的（这正是之前"记忆功能形同虚设"的根因）。
+   */
+  remember({ text, scope, kind } = {}) {
+    if (!this.memory) return { ok: false, error: '记忆存储尚未就绪（工作区未初始化）' };
+    const line = String(text || '').trim();
+    if (!line) return { ok: false, error: '记忆内容为空' };
+    const where = scope === 'global' ? 'global' : 'project';
+    if (kind === 'daily') {
+      const file = this.memory.appendDaily(line, where);
+      return { ok: true, scope: where, kind: 'daily', file, saved: line };
+    }
+    const result = rememberLine(this.memory, line, where);
+    return { ok: result.ok !== false, scope: where, kind: 'long', saved: line, chars: result.chars };
   }
 }
 
@@ -218,6 +259,12 @@ function renderResult(name, result) {
     if (result.stderr && result.stderr.trim()) parts.push(`--- 错误输出 ---\n${result.stderr.trim()}`);
     if (!result.stdout && !result.stderr && !noMatchesExit1) parts.push('（命令没有产生任何输出）');
     return parts.join('\n');
+  }
+  if (name === 'remember') {
+    if (!result || result.ok === false) return `失败: ${(result && result.error) || '未知错误'}`;
+    const where = result.scope === 'global' ? '全局记忆' : '项目记忆';
+    const what = result.kind === 'daily' ? '已记入当天工作日志' : '已写入长期记忆，后续对话会自动带上';
+    return `已记住（${where}）：${result.saved}\n${what}。`;
   }
   try { return JSON.stringify(result, null, 2); } catch (_) { return String(result); }
 }

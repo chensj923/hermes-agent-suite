@@ -30,7 +30,7 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
  * 1.3：user_message 支持多模态 content（OpenAI content 数组），图片/文件/音视频
  *       预处理后的派生内容都归一成 content 发过来，取代原先的纯 text。
  */
-const REQUIRED_CHANNEL_VERSION = '1.3';
+const REQUIRED_CHANNEL_VERSION = '1.4';
 
 /** 解析 "1.1" / "1" / "v2.0.3" 这类版本号，取 major.minor 比较。 */
 function parseVersion(value) {
@@ -430,6 +430,10 @@ class ChannelClient {
         // 仍带 text 字段：方便服务端日志/老版本识别（多模态时就是拼出的纯文本）
         text: contentToPlainText(payload),
         history: history || [],
+        // 1.4：把本机的记忆/项目约定/技能等上下文带给服务端。
+        // 之前服务端只有自己硬编码的 SYSTEM_PROMPT，客户端记忆再丰富模型也看不到——
+        // 这是「记忆功能形同虚设」的根因。纯增量字段，老服务端忽略它。
+        ...(opts && opts.systemExtra ? { system_extra: String(opts.systemExtra) } : {}),
         ...(opts && opts.model ? { model: String(opts.model) } : {}),
       });
     });
