@@ -90,6 +90,7 @@ const el = {
   btnRecord: $('btn-record'),
   recordTip: $('record-tip'),
   fileInput: $('file-input'),
+  attachLimit: $('attach-limit'),
 
   // 右侧上下文面板（集成设置）
   contextPanel: $('context-panel'),
@@ -969,7 +970,29 @@ const MAX_FILE_TEXT = 200 * 1024;   // 单个文本文件内联上限，避免�
 // 图片发送前先压缩：原图动辄好几 MB，base64 之后还要再涨 1/3，
 // 直接发会让上游因请求体过大而断开（表现为"上游不可达"）。
 const MAX_IMAGE_EDGE = 1600;        // 长边上限像素
-const TARGET_IMAGE_BYTES = 1024 * 1024;  // 压缩目标：base64 后不超过 1 MB
+const TARGET_IMAGE_BYTES = 1024 * 1024;  // 单图压缩目标：不超过 1 MB
+const MAX_SINGLE_FILE = 50 * 1024 * 1024;   // 单个附件原始上限，超过直接拒收（读进内存也没意义）
+const MAX_TOTAL_SEND = 3 * 1024 * 1024;     // 本次发送总量预算；超了会被上游掐断，所以在本地就拦下
+
+/** 附件限额说明（composer 常驻显示，让用户发送前就知道边界）。 */
+function attachLimitText() {
+  return `图片在本机压缩至 ≤${formatSize(TARGET_IMAGE_BYTES)} 后发送 · 文本 ≤${formatSize(MAX_FILE_TEXT)} · 单文件 ≤${formatSize(MAX_SINGLE_FILE)}`;
+}
+
+const _encoder = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
+
+/** 本次实际会发出去的字节数（图片算压缩后，文本算 UTF-8 字节；音视频本地转写后不算）。 */
+function outgoingBytes(atts) {
+  let n = 0;
+  for (const a of (atts || [])) {
+    if (a.kind === 'image') {
+      n += Number(a.compressedSize || 0) || base64Bytes(a.data || '');
+    } else if (a.text) {
+      n += _encoder ? _encoder.encode(String(a.text)).length : String(a.text).length;
+    }
+  }
+  return n;
+}
 
 function kindOfFile(file) {
   const mime = (file.type || '').toLowerCase();
@@ -1007,10 +1030,15 @@ function readWith(file, how) {
 /** 图片芯片副标题：压缩过就把"发出去多大"也标出来，方便判断是不是体积惹的祸。 */
 function imageSub(att) {
   const before = formatSize(att.size);
+  const d = att.dims;
+  const dim = (d && d.outWidth && (d.outWidth !== d.srcWidth || d.outHeight !== d.srcHeight))
+    ? ` · ${d.srcWidth}×${d.srcHeight} → ${d.outWidth}×${d.outHeight}`
+    : '';
   if (att.compressedSize && att.compressedSize < att.size) {
-    return `图片 · ${before}（已压缩至 ${formatSize(att.compressedSize)}）`;
+    // 说清楚是本机压的、原图不上传——和语音/视频一个口径
+    return `图片 · 本机处理 ${before} → ${formatSize(att.compressedSize)}${dim}（仅发送处理后的图，原图不出本机）`;
   }
-  return `图片 · ${before}`;
+  return `图片 · ${before}${dim}（本机处理后发送）`;
 }
 
 /** data URL 里的 base64 折算成字节数。 */
@@ -1048,49 +1076,77 @@ function drawToJpeg(img, maxEdge, quality) {
  * 压缩图片到 1MB 以内（先降质量，再缩尺寸）。
  * 失败就原样返回——宁可发大图，也绝不因为压缩出错让用户发不出东西。
  */
-async function shrinkImage(dataUrl) {
+async function shrinkImage(dataUrl, info) {
+  const setInfo = (sw, sh, ow, oh) => {
+    if (!info) return;
+    info.srcWidth = sw; info.srcHeight = sh; info.outWidth = ow; info.outHeight = oh;
+  };
   try {
-    if (base64Bytes(dataUrl) <= TARGET_IMAGE_BYTES) return dataUrl;
+    const before = base64Bytes(dataUrl);
     const img = await loadImage(dataUrl);
+    const sw = img.naturalWidth || img.width || 0;
+    const sh = img.naturalHeight || img.height || 0;
+    const dimsFor = (edge) => {
+      const s = Math.min(1, edge / Math.max(sw, sh || 1));
+      return [Math.round(sw * s), Math.round(sh * s)];
+    };
+    const tooBig = before > TARGET_IMAGE_BYTES;
+    const tooWide = Math.max(sw, sh) > MAX_IMAGE_EDGE;
+    if (!tooBig && !tooWide) { setInfo(sw, sh, sw, sh); return dataUrl; }
+    // 体积达标但尺寸过大（比如 6000px 长图）：只降采样保质量，压完反而更大就别动
+    if (!tooBig) {
+      const cand = drawToJpeg(img, MAX_IMAGE_EDGE, 0.9);
+      if (base64Bytes(cand) < before) { setInfo(sw, sh, ...dimsFor(MAX_IMAGE_EDGE)); return cand; }
+      setInfo(sw, sh, sw, sh);
+      return dataUrl;
+    }
     let quality = 0.82;
-    let edge = MAX_IMAGE_EDGE;
+    let edge = Math.min(MAX_IMAGE_EDGE, Math.max(sw, sh) || MAX_IMAGE_EDGE);
     let best = dataUrl;
     for (let i = 0; i < 6; i++) {
       best = drawToJpeg(img, edge, quality);
-      if (base64Bytes(best) <= TARGET_IMAGE_BYTES) return best;
+      if (base64Bytes(best) <= TARGET_IMAGE_BYTES) { setInfo(sw, sh, ...dimsFor(edge)); return best; }
       if (quality > 0.55) quality -= 0.12;
       else edge = Math.round(edge * 0.7);
     }
+    setInfo(sw, sh, ...dimsFor(edge));
     return best;
   } catch (_) {
-    return dataUrl;
+    return dataUrl;      // 压缩失败就发原图，绝不因为压缩出错而阻断发送
   }
 }
 
 async function addFiles(fileList) {
   const files = Array.from(fileList || []);
   for (const file of files) {
+    const size = Number(file.size || 0);
+    if (size > MAX_SINGLE_FILE) {
+      addMessage('error', `附件「${file.name || '未命名'}」${formatSize(size)} 超过单文件上限 ${formatSize(MAX_SINGLE_FILE)}，已跳过。`);
+      continue;
+    }
     const kind = kindOfFile(file);
     const att = {
       id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       kind,
       name: file.name || '未命名',
       mime: file.type || '',
-      size: file.size || 0,
+      size,
       previewUrl: '',
       text: '',
       data: null
     };
     try {
       if (kind === 'image') {
-        // dataURL 既能预览（CSP 允许 data:），也直接作为多模态内容发给模型。
-        // 先压缩：原图直接发会因为请求体过大被上游掐断。
+        // 全流程在本机：FileReader 读字节 → canvas 解码 → 缩放重编码 → 只把产物发走。
+        // 原图字节不出本机，所以原始照片/截图不会被上传到任何地方。
         const raw = String(await readWith(file, 'dataurl') || '');
-        const url = await shrinkImage(raw);
+        const info = {};
+        const url = await shrinkImage(raw, info);
         att.previewUrl = url;
         att.mime = url.indexOf('data:image/png') === 0 ? 'image/png' : 'image/jpeg';
         att.data = url.includes(',') ? url.slice(url.indexOf(',') + 1) : url;   // 纯 base64
         att.compressedSize = base64Bytes(url);   // 实际会发出去的体积，UI 上要让用户看见
+        if (info.srcWidth) att.dims = info;      // 处理前后尺寸，芯片上展示
       } else if (kind === 'audio' || kind === 'video') {
         att.data = await readWith(file, 'buffer');
       } else if (isTextFile(file)) {
@@ -1144,10 +1200,11 @@ function buildAttachmentChip(att, removable) {
   title.textContent = att.name;
   const sub = document.createElement('div');
   sub.className = 'attach-sub';
-  sub.textContent = att.kind === 'audio' ? '语音 · 本机转写后发送'
-    : att.kind === 'video' ? '视频 · 本机转写 + 关键帧后发送'
+  sub.textContent = att.kind === 'audio' ? `语音 · ${formatSize(att.size)} · 本机转写后只发文字`
+    : att.kind === 'video' ? `视频 · ${formatSize(att.size)} · 本机转写 + 抽帧后发送`
       : att.kind === 'image' ? imageSub(att)
         : (att.text ? `文本 · ${formatSize(att.size)}` : `文件 · ${formatSize(att.size)}（无法直接读取，仅附文件名）`);
+  sub.title = sub.textContent;   // 芯片窄，截断时悬停看完整说明
   meta.appendChild(title);
   meta.appendChild(sub);
   chip.appendChild(meta);
@@ -1170,6 +1227,23 @@ function renderAttachments() {
   if (!state.attachments.length) { strip.hidden = true; return; }
   strip.hidden = false;
   for (const att of state.attachments) strip.appendChild(buildAttachmentChip(att, true));
+
+  // 汇总行：说清楚本次实际会发出去多少、超没超预算
+  const out = outgoingBytes(state.attachments);
+  // 音视频本地转写后只发文字，原始文件不上传，所以不算进"原始体积"对比
+  const raw = state.attachments.reduce(
+    (n, a) => n + ((a.kind === 'image' || a.text) ? (Number(a.size) || 0) : 0), 0);
+  const sum = document.createElement('div');
+  const saved = raw > out ? `（原始 ${formatSize(raw)}，已在本机精简）` : '';
+  if (out > MAX_TOTAL_SEND) {
+    sum.className = 'attach-total over';
+    sum.textContent = `本次将发送 ${formatSize(out)}${saved}，超过 ${formatSize(MAX_TOTAL_SEND)} 上限——` +
+      '请移除部分附件或分批发送，否则上游可能因请求体过大断开。';
+  } else {
+    sum.className = 'attach-total';
+    sum.textContent = `本次将发送 ${formatSize(out)}${saved}`;
+  }
+  strip.appendChild(sum);
 }
 
 /** 把附件转成要发给主进程的 parts（不含文本，文本由 sendMessage 单独加）。 */
@@ -1298,6 +1372,13 @@ async function sendMessage() {
   if (state.recording) await stopRecording();
   const atts = state.attachments.slice();
   if (!text && !atts.length) return;          // 没有文本也没有附件就别发
+  // 总量兜底：超过预算基本必被上游掐断，与其发过去失败，不如在本地拦下并说明
+  const outBytes = outgoingBytes(atts);
+  if (outBytes > MAX_TOTAL_SEND) {
+    addMessage('error', `本次附件合计 ${formatSize(outBytes)}，超过单次上限 ${formatSize(MAX_TOTAL_SEND)}。` +
+      '请移除部分附件或分批发送——超量发送会让上游因请求体过大直接断开。');
+    return;
+  }
   const parts = [];
   if (text) parts.push({ type: 'text', text });
   for (const part of attachmentParts(atts)) parts.push(part);
@@ -1490,6 +1571,11 @@ el.input.addEventListener('keydown', (event) => {
 });
 
 // ---- 多模态：附件选择 / 录音 / 拖拽 ----
+// 常驻限额说明：让用户点发送前就看到边界，而不是等发出去被上游拒了才知道
+if (el.attachLimit) {
+  el.attachLimit.textContent = attachLimitText();
+  el.btnAttach.title = `添加图片 / 文件 / 视频 · ${attachLimitText()}`;
+}
 el.btnAttach.addEventListener('click', () => el.fileInput.click());
 el.fileInput.addEventListener('change', () => {
   addFiles(el.fileInput.files);
