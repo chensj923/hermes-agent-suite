@@ -274,14 +274,22 @@ install_hermes() {
   local idx_args=""
   [[ -n "$HERMES_INDEX_URL" ]] && idx_args="$idx_args --index-url $HERMES_INDEX_URL"
   [[ -n "$HERMES_EXTRA_INDEX_URL" ]] && idx_args="$idx_args --extra-index-url $HERMES_EXTRA_INDEX_URL"
+  # 内部/私有镜像常为 HTTP 或自签证书：pip 用 --trusted-host，uv 用 --allow-insecure
+  local trust_pip="" trust_uv=""
+  for u in "$HERMES_INDEX_URL" "$HERMES_EXTRA_INDEX_URL"; do
+    [[ -n "$u" ]] || continue
+    local h="${u#*://}"; h="${h%%/*}"; h="${h%:*}"   # 取 host（去 scheme/path/port）
+    trust_pip="$trust_pip --trusted-host $h"
+    trust_uv="$trust_uv --allow-insecure $h"
+  done
   echo "[deploy] 在隔离 venv 安装 $HERMES_PKG（索引: ${HERMES_INDEX_URL:-PyPI}）…"
   if [[ -n "$UV_BIN" ]]; then
-    if ! "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" $idx_args -U pip "$HERMES_PKG" 2>&1 | sed 's/^/  /'; then
+    if ! "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" $idx_args $trust_uv -U pip "$HERMES_PKG" 2>&1 | sed 's/^/  /'; then
       echo "[deploy][FAIL] uv 安装 $HERMES_PKG 失败（检查索引/网络/代理证书）"
       return 1
     fi
   else
-    if ! "$HERMES_VENV/bin/python" -m pip install $idx_args -U pip "$HERMES_PKG" 2>&1 | sed 's/^/  /'; then
+    if ! "$HERMES_VENV/bin/python" -m pip install $idx_args $trust_pip -U pip "$HERMES_PKG" 2>&1 | sed 's/^/  /'; then
       echo "[deploy][FAIL] pip 安装 $HERMES_PKG 失败（检查索引/网络/代理证书）"
       return 1
     fi
