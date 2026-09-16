@@ -347,10 +347,10 @@ install_hermes() {
   echo "[deploy] 确保 api_server 适配器依赖 aiohttp 已安装…"
   if [[ -n "$UV_BIN" ]]; then
     "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" $idx_args $trust_uv aiohttp==3.14.1 2>&1 | sed 's/^/  /' || \
-      "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" aiohttp 2>&1 | sed 's/^/  /'
+      "$UV_BIN" pip install --python "$HERMES_VENV/bin/python" $idx_args $trust_uv aiohttp 2>&1 | sed 's/^/  /'
   else
     "$HERMES_VENV/bin/python" -m pip install $idx_args $trust_pip aiohttp==3.14.1 2>&1 | sed 's/^/  /' || \
-      "$HERMES_VENV/bin/python" -m pip install aiohttp 2>&1 | sed 's/^/  /'
+      "$HERMES_VENV/bin/python" -m pip install $idx_args $trust_pip aiohttp 2>&1 | sed 's/^/  /'
   fi
   # 安装后必须验证 Hermes 真的可用，否则视为失败（防止空 venv 被误判成功）
   if [[ ! -x "$HERMES_VENV/bin/hermes" ]] && ! "$HERMES_VENV/bin/python" -c "import hermes_agent" >/dev/null 2>&1; then
