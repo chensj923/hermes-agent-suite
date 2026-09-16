@@ -115,6 +115,30 @@ function generateBootstrapScript(input = {}) {
   lines.push('fi');
   lines.push('');
 
+  // 0. Hermes 服务端本体安装状态（完整部署后应有 hermes 命令 + 22122 监听）
+  lines.push('# ---- 0. Hermes 服务端本体安装状态 ----');
+  lines.push('echo "[buddy-bootstrap] Hermes 本体检查:"');
+  lines.push('if command -v hermes >/dev/null 2>&1; then');
+  lines.push('  echo "  hermes 命令: $(command -v hermes)"');
+  lines.push('  hermes --version 2>/dev/null | head -1 | sed "s/^/  /" || true');
+  lines.push('elif [[ -x "$HERMES_HOME/venv/bin/hermes" ]]; then');
+  lines.push('  echo "  hermes 命令: $HERMES_HOME/venv/bin/hermes（隔离 venv 安装）"');
+  lines.push('  "$HERMES_HOME/venv/bin/hermes" --version 2>/dev/null | head -1 | sed "s/^/  /" || true');
+  lines.push('else');
+  lines.push('  echo "  WARN: 未找到 hermes 命令 —— 若走完整部署，请确认 INSTALL_HERMES=1 已传递且 venv 安装成功"');
+  lines.push('fi');
+  lines.push('if [[ -f "$HERMES_HOME/config.yaml" ]]; then');
+  lines.push('  echo "  config.yaml: 存在"');
+  lines.push('else');
+  lines.push('  echo "  WARN: $HERMES_HOME/config.yaml 不存在 —— Gateway 无法启动"');
+  lines.push('fi');
+  lines.push('if ss -tln 2>/dev/null | grep -qE ":22122\\b" || netstat -tln 2>/dev/null | grep -qE ":22122\\b"; then');
+  lines.push('  echo "  Gateway 端口 22122: 监听中"');
+  lines.push('else');
+  lines.push('  echo "  WARN: Gateway 端口 22122 未监听（完整部署应已拉起 hermes-gateway.service）"');
+  lines.push('fi');
+  lines.push('');
+
   // 2. 当前监听清单
   lines.push('# ---- 2. 当前监听端口（打全表，方便一眼看出还有没有别的推理端点） ----');
   lines.push('echo "[buddy-bootstrap] 全部 TCP 监听:"');

@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 const { generateBootstrapScript, clampPort } = require('../src/server-bootstrap');
 
 test('clampPort: defaults on garbage', () => {
@@ -61,4 +63,24 @@ test('generateBootstrapScript: sanitizes host', () => {
   const out = generateBootstrapScript({ host: "evil;rm -rf /" });
   assert.ok(!out.includes('rm -rf'));
   assert.ok(out.includes('evilrm-rf'));
+});
+
+test('generateBootstrapScript: includes Hermes 本体安装状态检查', () => {
+  const out = generateBootstrapScript({ host: 'h', llmPort: 8800 });
+  assert.ok(out.includes('Hermes 本体检查'), '应包含 Hermes 本体检查段落');
+  assert.ok(out.includes('config.yaml'), '应检查 config.yaml 是否存在');
+  assert.ok(out.includes(':22122'), '应检查 Gateway 22122 端口监听');
+  assert.ok(out.includes('HERMES_HOME/venv/bin/hermes'), '应识别隔离 venv 安装的 hermes');
+});
+
+test('deploy.sh: 完整部署会安装 Hermes 本体（隔离 venv，不污染系统 Python）', () => {
+  const sh = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'deploy.sh'), 'utf-8');
+  assert.ok(sh.includes('install_hermes'), '应有 install_hermes 函数');
+  assert.ok(sh.includes('INSTALL_HERMES'), '应由 INSTALL_HERMES 门控（仅完整部署触发）');
+  assert.ok(sh.includes('ensure_python_uv'), '应引导 Python/uv 环境（针对干净 Ubuntu）');
+  assert.ok(sh.includes('hermes-agent'), '应安装 hermes-agent 包');
+  assert.ok(sh.includes('hermes-gateway.service'), '应注册 hermes-gateway 服务');
+  assert.ok(sh.includes('HERMES_VENV="$HERMES_HOME/venv"'), '应使用隔离 venv');
+  // 推理机（CUDA/PyTorch）不能被动系统 Python，禁止 --break-system-packages
+  assert.ok(!sh.includes('--break-system-packages'), '不应使用 --break-system-packages');
 });

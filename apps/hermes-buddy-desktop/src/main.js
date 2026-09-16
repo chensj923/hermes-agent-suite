@@ -399,6 +399,10 @@ function registerIpc() {
       const upstreamBase = String(opts.upstreamBase || '').trim();
       const upstreamKey = String(opts.upstreamKey || '').trim();
       const upstreamModel = String(opts.upstreamModel || '').trim();
+      const installHermes = !!opts.installHermes;
+      const hermesIndexUrl = String(opts.hermesIndexUrl || '').trim();
+      const hermesExtraIndexUrl = String(opts.hermesExtraIndexUrl || '').trim();
+      const hermesPkg = String(opts.hermesPkg || 'hermes-agent').trim();
 
       if (!host) { send('ERROR: 请先填 Hermes 主机地址。\n'); return resolve({ ok: false, error: 'no host' }); }
       if (!keyPath && !password) { send('ERROR: 请填 SSH 私钥路径或 SSH 密码（二选一）。\n'); return resolve({ ok: false, error: 'no auth' }); }
@@ -412,6 +416,10 @@ function registerIpc() {
         upstreamBase ? `BUDDY_UPSTREAM_BASE=${JSON.stringify(upstreamBase)}` : '',
         upstreamKey ? `BUDDY_UPSTREAM_KEY=${JSON.stringify(upstreamKey)}` : '',
         upstreamModel ? `BUDDY_UPSTREAM_MODEL=${JSON.stringify(upstreamModel)}` : '',
+        installHermes ? 'INSTALL_HERMES=1' : '',
+        hermesIndexUrl ? `HERMES_INDEX_URL=${JSON.stringify(hermesIndexUrl)}` : '',
+        hermesExtraIndexUrl ? `HERMES_EXTRA_INDEX_URL=${JSON.stringify(hermesExtraIndexUrl)}` : '',
+        hermesPkg ? `HERMES_PKG=${JSON.stringify(hermesPkg)}` : '',
       ].filter(Boolean).join(' ');
       const deployCmd = envVars ? `env ${envVars} bash deploy.sh` : 'bash deploy.sh';
       // 有 sudo 时用 sudo -E env ...（-E 保留环境 + env 显式传递）；

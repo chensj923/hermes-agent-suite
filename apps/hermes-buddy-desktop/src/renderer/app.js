@@ -43,6 +43,8 @@ const el = {
   fieldUpstreamBase: $('field-upstream-base'),
   fieldUpstreamKey: $('field-upstream-key'),
   fieldUpstreamModel: $('field-upstream-model'),
+  fieldHermesIndex: $('field-hermes-index'),
+  fieldHermesExtraIndex: $('field-hermes-extra-index'),
   btnWizardAction: $('btn-wizard-action'),
   btnPickKey: $('btn-pick-key'),
   btnPickWorkspace: $('btn-pick-workspace'),
@@ -291,9 +293,9 @@ el.btnChoiceExisting.addEventListener('click', () => {
 
 el.btnChoiceNew.addEventListener('click', () => {
   state.wizardMode = 'new';
-  el.step1Title.textContent = '部署 Hermes 外挂组件';
-  el.step1Sub.textContent = '填入 SSH 信息和上游模型供应商，一键部署';
-  el.btnWizardAction.textContent = '部署并连接';
+  el.step1Title.textContent = '完整部署 Hermes（含服务端本体）';
+  el.step1Sub.textContent = '填入 SSH 信息和上游模型供应商，一键安装 Hermes 服务端本体 + 部署 WS 通道';
+  el.btnWizardAction.textContent = '完整部署并连接';
   if (el.manualDeployPanel) el.manualDeployPanel.hidden = true;
   if (el.upstreamForm) el.upstreamForm.hidden = false;
   showWizardStep(1);
@@ -374,6 +376,9 @@ el.btnWizardAction.addEventListener('click', async () => {
   const upstreamBase = el.fieldUpstreamBase ? el.fieldUpstreamBase.value.trim() : '';
   const upstreamKey = el.fieldUpstreamKey ? el.fieldUpstreamKey.value.trim() : '';
   const upstreamModel = el.fieldUpstreamModel ? el.fieldUpstreamModel.value.trim() : '';
+  // 完整部署：Hermes 安装源（可选，默认 PyPI）
+  const hermesIndexUrl = el.fieldHermesIndex ? el.fieldHermesIndex.value.trim() : '';
+  const hermesExtraIndexUrl = el.fieldHermesExtraIndex ? el.fieldHermesExtraIndex.value.trim() : '';
   if (!host) { setWizardLog('请填写服务器地址\n'); return; }
   if (!keyPath && !password) { setWizardLog('请填 SSH 密码或私钥路径\n'); return; }
   // 全新部署时验证上游参数
@@ -428,7 +433,7 @@ el.btnWizardAction.addEventListener('click', async () => {
       const initResult = await api.deployInit({});
       if (!initResult.ok) { setWizardLog('初始化失败: ' + initResult.error + '\n'); return; }
       setWizardLog('正在通过 SSH 推送并部署…\n');
-      const deployResult = await api.deployToServer({ host, user, keyPath, password, sshPort, upstreamBase, upstreamKey, upstreamModel });
+      const deployResult = await api.deployToServer({ host, user, keyPath, password, sshPort, upstreamBase, upstreamKey, upstreamModel, installHermes: true, hermesIndexUrl, hermesExtraIndexUrl });
       if (!deployResult.ok) { setWizardLog('\n部署失败（退出码 ' + deployResult.code + '）。请检查上方日志。\n'); return; }
       setWizardLog('\n部署完成，正在检查服务状态并获取 API Key…\n');
       const checkResult = await api.sshCheck({ host, user, keyPath, password, sshPort });
