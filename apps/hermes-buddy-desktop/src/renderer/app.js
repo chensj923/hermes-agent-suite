@@ -83,6 +83,7 @@ const el = {
   statusDot: $('status-dot'),
   modelSelect: $('model-select'),
   btnReconnect: $('btn-reconnect'),
+  btnClearChat: $('btn-clear-chat'),
   chatLog: $('chat-log'),
   toolLog: $('tool-log'),
   toolEmpty: $('tool-empty'),
@@ -232,6 +233,7 @@ function showView(name) {
   el.contextPanel.hidden = !isSettings;
   el.btnDisconnect.hidden = isConnect;
   el.btnReconnect.hidden = isConnect;
+  el.btnClearChat.hidden = isConnect;
   el.btnSettings.classList.toggle('active', isSettings);
   el.modelSelect.disabled = isConnect;
   if (isSettings) renderSettings();
@@ -1728,6 +1730,14 @@ el.btnReconnect.addEventListener('click', async () => {
     setStatusDot('error');
     showBanner(result.message || '重连失败', 'error');
   }
+});
+
+el.btnClearChat.addEventListener('click', async () => {
+  if (!confirm('清空当前智能体的对话历史？\n\n该操作不可撤销，已保存的记忆和日志不受影响。')) return;
+  await api.clearHistory();
+  el.chatLog.textContent = '';
+  clearToolLog();
+  showPlaceholder('对话已清空。');
 });
 
 el.btnDisconnect.addEventListener('click', async () => {

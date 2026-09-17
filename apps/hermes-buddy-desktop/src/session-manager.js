@@ -80,6 +80,7 @@ class SessionManager {
       this.agentStore = null;
     }
     this.agentMessages = new Map(); // agentId -> OpenAI 消息数组
+    this.agentTranscripts = new Map(); // agentId -> UI 转写数组（按智能体隔离，同时落盘）
     this._lastCrystallize = { at: null, scopes: [], error: null }; // 1.5 结晶同步状态
   }
 
@@ -111,6 +112,18 @@ class SessionManager {
   set messages(value) {
     const id = this.activeAgent ? this.activeAgent.id : 'default';
     this.agentMessages.set(id, Array.isArray(value) ? value : []);
+  }
+
+  /** UI 转写（对话记录）按智能体隔离：切换智能体即切换历史视图。 */
+  get transcript() {
+    const id = this.activeAgent ? this.activeAgent.id : 'default';
+    if (!this.agentTranscripts.has(id)) this.agentTranscripts.set(id, []);
+    return this.agentTranscripts.get(id);
+  }
+
+  set transcript(value) {
+    const id = this.activeAgent ? this.activeAgent.id : 'default';
+    this.agentTranscripts.set(id, Array.isArray(value) ? value : []);
   }
 
   // ---------------------------------------------------------------- 状态
@@ -162,6 +175,7 @@ class SessionManager {
       this.logger.info('workspace-ready', { workspace: this.workspace.dir, agent: agent && agent.name });
       // 工作区就绪后恢复该智能体的历史记录（之前只存在内存里，重开 Buddy 就丢了）
       this.loadHistory();
+      this.loadTranscript();
     }
     if (!this.brain && connection && connection.mode !== 'channel') {
       // 通道模式：决策在 Hermes 服务端外挂通道，本机不建 Brain/本地 ReAct 循环。
@@ -347,6 +361,7 @@ class SessionManager {
     this.gateway = health ? this.provisioning.createGateway({ baseUrl: normalized.baseUrl, apiKey: normalized.apiKey }) : null;
     this.session = session;
     this.loadHistory();
+    this.loadTranscript();
     this.loop = new AgentLoop({ brain, tools: this.tools, workspace: this.workspace, logger: this.logger });
     this.logger.info('connected', {
       baseUrl: normalized.baseUrl,
@@ -404,6 +419,7 @@ class SessionManager {
     const saved = this.store.save(normalized);
     this.connection = saved;
     this.loadHistory();
+    this.loadTranscript();
     this.logger.info('connected-channel', { channelUrl: normalized.channelUrl, history: this.messages.length });
     return {
       connection: publicView(saved),
@@ -447,6 +463,7 @@ class SessionManager {
     const saved = this.store.save(normalized);
     this.connection = saved;
     this.loadHistory();
+    this.loadTranscript();
     this.logger.info('connected-dashboard', { dashboardUrl: normalized.dashboardUrl, history: this.messages.length });
     return {
       connection: publicView(saved),
@@ -573,6 +590,7 @@ class SessionManager {
     // 之前每次重连/重开都把历史清零 -> 模型"转个头就忘"。
     // 现在从落盘恢复：保证连续对话体验。
     this.loadHistory();
+    this.loadTranscript();
     this.logger.info('resumed-channel', { channelUrl: stored.channelUrl, history: this.messages.length });
     return { ok: true, connection: publicView(stored), workspace: this.describeWorkspace() };
   }
@@ -699,7 +717,9 @@ class SessionManager {
       if (result.text) this.messages.push({ role: 'assistant', content: result.text });
       this.trimHistory();
       this.saveHistory();
-      this.remember({ role: 'user', text: contentToPlainText(content), at: Date.now() });
+      const now = Date.now();
+      this.remember({ role: 'user', text: contentToPlainText(content), at: now });
+      if (result.text) this.remember({ role: 'assistant', text: result.text, at: now + 1 });
       this.maybeJournal(result);
       return { requestId: id, text: result.text, turns: result.turns, toolCalls: result.toolCalls.length, stopped: result.stopped };
     } catch (error) {
@@ -798,7 +818,9 @@ class SessionManager {
     if (result && result.text) this.messages.push({ role: 'assistant', content: result.text });
     this.trimHistory();
     this.saveHistory();
-    this.remember({ role: 'user', text: contentToPlainText(content), at: Date.now() });
+    const now = Date.now();
+    this.remember({ role: 'user', text: contentToPlainText(content), at: now });
+    if (result && result.text) this.remember({ role: 'assistant', text: result.text, at: now + 1 });
     return { requestId: id, text: result.text, turns: result.turns || 0, toolCalls: 0, stopped: result.stopped };
   }
 
@@ -956,21 +978,67 @@ class SessionManager {
 
   clearHistory() {
     this.messages = [];
+    this.transcript = [];
     // 同步删掉落盘文件：重开 Buddy 也不把已清的历史恢复回来
     try {
       const file = this._historyFile(this.activeAgent ? this.activeAgent.id : null);
       if (fs.existsSync(file)) fs.unlinkSync(file);
     } catch (_) {}
+    try {
+      const tfile = this._transcriptFile(this.activeAgent ? this.activeAgent.id : null);
+      if (fs.existsSync(tfile)) fs.unlinkSync(tfile);
+    } catch (_) {}
     return { cleared: true };
   }
 
   remember(entry) {
-    if (!this.transcript) this.transcript = [];
+    // transcript 是 getter，按 agentId 自动找到正确的数组
     this.transcript.push(entry);
     if (this.transcript.length > 200) this.transcript.splice(0, this.transcript.length - 200);
+    this.saveTranscript();
   }
 
   history() { return (this.transcript || []).slice(); }
+
+  // ---------------------------------------------------------------- UI 转写落盘
+  // 与 messages 落盘分开：messages 是发给服务端的 OpenAI 格式（脱图、截断），
+  // transcript 是给用户看的对话记录（含 user + assistant，纯文本），两者各落各的文件。
+
+  _transcriptFile(agentId) {
+    const id = String(agentId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const dir = path.join(this.appDir, 'transcripts');
+    return path.join(dir, `${id}.json`);
+  }
+
+  saveTranscript() {
+    try {
+      const file = this._transcriptFile(this.activeAgent ? this.activeAgent.id : null);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const payload = {
+        agentId: this.activeAgent ? this.activeAgent.id : 'default',
+        savedAt: new Date().toISOString(),
+        entries: this.transcript.slice(),
+      };
+      fs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8');
+    } catch (error) {
+      this.logger.warn('transcript-save-failed', { error: error.message });
+    }
+  }
+
+  loadTranscript() {
+    try {
+      const file = this._transcriptFile(this.activeAgent ? this.activeAgent.id : null);
+      const json = fs.readFileSync(file, 'utf8');
+      const payload = JSON.parse(json);
+      const entries = Array.isArray(payload.entries) ? payload.entries : [];
+      if (entries.length) {
+        this.transcript = entries;
+        this.logger.info('transcript-loaded', { agentId: payload.agentId, entries: entries.length });
+      }
+    } catch (_) {
+      // 文件不存在/损坏：静默跳过
+    }
+  }
 
   /**
    * 发给服务端补在 system 提示词后面的"本机上下文"。
@@ -1055,6 +1123,7 @@ class SessionManager {
           if (this.tools && agent.permission) this.tools.setPermission(agent.permission);
           // 切换智能体后 getter 已指向新 agentId 的数组，但那是空的--加载该智能体的落盘历史
           this.loadHistory();
+          this.loadTranscript();
         }
       }
       if (this.connection && this.brain && this.tools) {
@@ -1346,7 +1415,7 @@ class SessionManager {
     const appData = this.store.dir || app.getPath('userData');
     const fs = require('fs');
     const path = require('path');
-    const dirs = ['gateway-cache', 'logs', 'memory', 'persona', 'skills', 'history'];
+    const dirs = ['gateway-cache', 'logs', 'memory', 'persona', 'skills', 'history', 'transcripts'];
     dirs.forEach((subDir) => {
       const dirPath = path.join(appData, subDir);
       try { fs.rmSync(dirPath, { recursive: true, force: true }); } catch (_) {}
@@ -1359,6 +1428,7 @@ class SessionManager {
     this.session = null;
     this.messages = [];
     this.agentMessages.clear();
+    this.agentTranscripts.clear();
     this.lastGatewayError = null;
     this.workspace = null;
     this.tools = null;
