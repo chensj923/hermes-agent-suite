@@ -882,13 +882,17 @@ class Session:
             # 之前只在 len<=1 时拼一次，导致 resume/session 恢复后 system_extra 不再更新，
             # 模型看不到最新记忆。现在每轮都刷新 system 消息的客户端上下文部分。
             if system_extra:
-                base = SYSTEM_PROMPT
                 extra = str(system_extra)
                 # 如果当前 system 消息已经包含过 system_extra，先剥掉旧的那段，避免无限累积。
                 marker = "\n\n【本机上下文 - 由客户端提供】\n"
                 current = self.messages[0].get("content", "")
+                # 保留初始化时注入的「服务端结晶记忆」(GLOBAL/AGENTS/PROJECT.md)：
+                # 只替换客户端本机上下文那段，绝不能退回裸 SYSTEM_PROMPT，否则换 Buddy /
+                # 清本地记忆后连上来就继承不到之前结晶的知识（v3.6.8 之前的写法有此 bug）。
                 if marker in current:
                     base = current.split(marker, 1)[0]
+                else:
+                    base = current
                 self.messages[0]["content"] = base + marker + extra
             # 客户端历史只在会话刚开始时采用一次。
             # 之前每轮都 append 一遍 history，服务端自己的 self.messages 里
