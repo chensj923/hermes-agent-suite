@@ -196,6 +196,7 @@ function registerIpc() {
     return { ...result, status: manager.status(), gatewayWarning: manager.lastGatewayError ? describeGatewayError(manager.lastGatewayError) : null };
   });
   handle('buddy:profile:remove', (_event, id) => manager.removeProfile(String(id)));
+  handle('buddy:profile:probe', async (_event, profile) => manager.probeProfileVersion(profile));
 
   handle('buddy:models', () => manager.models());
   handle('buddy:history', () => manager.history());
@@ -793,6 +794,7 @@ function registerIpc() {
   handle('buddy:memory', (_event, scope = 'project') => ({ scope, content: manager.getMemory(scope) }));
   handle('buddy:memory:save', (_event, { scope = 'project', content } = {}) => manager.saveMemory(content, scope));
   handle('buddy:memory:remember', (_event, { scope = 'project', line } = {}) => manager.rememberLine(line, scope));
+  handle('buddy:memory:diagnostics', () => manager.memoryDiagnostics());
   handle('buddy:skills', () => ({ skills: manager.listSkills() }));
   handle('buddy:skills:read', (_event, name) => ({ skill: manager.readSkill(name) }));
   handle('buddy:skills:save', (_event, { name, content, description } = {}) => ({ skill: manager.saveSkill(name, content, description) }));

@@ -517,8 +517,15 @@ SYSTEM_PROMPT = (
     "危险命令（格式化磁盘、关机、删系统目录等）会被客户端的安全规则拦截，"
     "被拦截时请换一种安全的方式完成任务，或向用户说明无法执行。"
     "优先用 find_files/search_content 而非递归遍历整盘。"
-    "用户确认过的事实、工具安装位置、项目约定，请用 remember 工具记下来，"
-    "这样下次对话开头就能直接看到，不用用户重复交代。"
+    "\n\n【记忆规则 - 必须遵守】"
+    "1. 只要用户明确说过一次的事实、偏好、项目约定、工具路径、踩过的坑，"
+    "   你必须在本次回复前调用 remember 工具把它记下来，不要等用户催。"
+    "2. 同一个主题如果已经记过，不要重复记；但不同的事实要分别记。"
+    "3. scope 选择：只和当前工作区相关的事实选 project；跨工作区通用的习惯选 global。"
+    "4. 如果用户让你'记住'、'记着'、'别忘了'，你必须立即调用 remember。"
+    "5. 每次开始新任务前，先检查系统提示词里已经给你的【用户长期记忆】和【本项目记忆】，"
+    "   据此推断用户偏好，不要重复询问。"
+    "6. 只有流水账、临时状态、无关闲聊不需要记；其他一律要记。"
 )
 
 
@@ -871,10 +878,18 @@ class Session:
         if model:
             self.model = str(model)
         try:
-            # 1.4：把客户端带来的上下文拼到 system 消息里（只在会话首条消息时拼一次）。
-            # system 消息始终是 self.messages[0]，首条用户消息进来时 len<=1 说明还没拼过。
-            if system_extra and len(self.messages) <= 1:
-                self.messages[0]["content"] = SYSTEM_PROMPT + "\n\n" + str(system_extra)
+            # 1.4/1.5：把客户端带来的上下文（记忆/项目约定/技能/工作目录）拼到 system 消息里。
+            # 之前只在 len<=1 时拼一次，导致 resume/session 恢复后 system_extra 不再更新，
+            # 模型看不到最新记忆。现在每轮都刷新 system 消息的客户端上下文部分。
+            if system_extra:
+                base = SYSTEM_PROMPT
+                extra = str(system_extra)
+                # 如果当前 system 消息已经包含过 system_extra，先剥掉旧的那段，避免无限累积。
+                marker = "\n\n【本机上下文 - 由客户端提供】\n"
+                current = self.messages[0].get("content", "")
+                if marker in current:
+                    base = current.split(marker, 1)[0]
+                self.messages[0]["content"] = base + marker + extra
             # 客户端历史只在会话刚开始时采用一次。
             # 之前每轮都 append 一遍 history，服务端自己的 self.messages 里
             # 已经保留了这些消息，等于每轮重复一份——文字时代只是浪费 token，

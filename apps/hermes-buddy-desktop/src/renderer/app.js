@@ -9,6 +9,16 @@
 const api = window.buddyApi || window.hermesBuddy;
 const $ = (id) => document.getElementById(id);
 
+function escapeHtml(text) {
+  if (text == null) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 const el = {
   // 连接向导
   viewConnect: $('view-connect'),
@@ -1954,13 +1964,26 @@ async function renderPersonaTab() {
 }
 
 async function renderMemoryTab() {
-  const [globalResult, projectResult] = await Promise.all([
+  const [globalResult, projectResult, diag] = await Promise.all([
     api.memory('global').catch(() => ({ content: '' })),
-    api.memory('project').catch(() => ({ content: '' }))
+    api.memory('project').catch(() => ({ content: '' })),
+    api.memoryDiagnostics().catch(() => ({ ready: false }))
   ]);
+  const fmtTime = (ts) => {
+    if (!ts) return '从未';
+    const d = new Date(ts);
+    return Number.isNaN(d.getTime()) ? '未知' : d.toLocaleString('zh-CN', { hour12: false });
+  };
+  const crystallizeStatus = (() => {
+    if (!diag.ready) return '工作区未就绪，无法同步。';
+    const { lastCrystallize } = diag;
+    if (!lastCrystallize || !lastCrystallize.at) return '尚未同步到服务端（连接后会自动同步）。';
+    if (lastCrystallize.error) return `上次同步失败：${lastCrystallize.error}`;
+    return `上次同步成功（${fmtTime(lastCrystallize.at)}），范围：${lastCrystallize.scopes.join(' / ') || '无内容'}。`;
+  })();
   el.contextBody.innerHTML = `
     <h2>记忆</h2>
-    <p class="hint">Buddy 会自动把每天的工作摘要写进日志。这里集中管理"长期记忆"和"当前项目记忆"。</p>
+    <p class="hint">Buddy 会自动把每天的工作摘要写进日志。这里集中管理"长期记忆"和"当前项目记忆"。模型也会在对话中自动调用 remember 工具记录重要事实。</p>
     <section>
       <h3>项目记忆（仅本工作区可见）</h3>
       <textarea id="memory-project" rows="8"></textarea>
@@ -1974,6 +1997,18 @@ async function renderMemoryTab() {
       <button class="ghost" id="save-memory-global">保存全局记忆</button>
     </div>
     <div class="settings-status" id="memory-status" role="status"></div>
+    <details class="memory-diagnostics">
+      <summary>记忆诊断信息</summary>
+      <dl>
+        <dt>工作区</dt><dd>${diag.ready ? escapeHtml(diag.workspace) : '未就绪'}</dd>
+        <dt>项目记忆文件</dt><dd>${diag.ready ? escapeHtml(diag.projectPath) : '-'}</dd>
+        <dt>全局记忆文件</dt><dd>${diag.ready ? escapeHtml(diag.globalPath) : '-'}</dd>
+        <dt>项目记忆字符数</dt><dd>${diag.projectChars || 0}</dd>
+        <dt>全局记忆字符数</dt><dd>${diag.globalChars || 0}</dd>
+        <dt>服务端结晶同步</dt><dd>${escapeHtml(crystallizeStatus)}</dd>
+      </dl>
+      <p class="hint">如果这里长期为空，但对话里已经让模型"记住"过东西，说明模型没有调用 remember 工具。可以提醒它："请用 remember 工具记下来"。</p>
+    </details>
   `;
   $('memory-project').value = projectResult.content || '';
   $('memory-global').value = globalResult.content || '';
@@ -2439,6 +2474,7 @@ async function renderProfiles() {
       <div class="profile-main">
         <div class="profile-host"></div>
         <div class="profile-sub"></div>
+        <div class="profile-version" data-state="probing">正在探测服务端版本…</div>
       </div>
       <div class="profile-actions">
         <button class="ghost profile-use" type="button">连接</button>
@@ -2456,6 +2492,27 @@ async function renderProfiles() {
     card.querySelector('.profile-use').addEventListener('click', () => activateProfileFlow(p.id));
     card.querySelector('.profile-del').addEventListener('click', () => removeProfileFlow(p.id, host));
     list.appendChild(card);
+    // 异步嗅探服务端版本，不阻塞列表渲染
+    api.probeProfile(p).then((probe) => {
+      const verEl = card.querySelector('.profile-version');
+      if (!verEl) return;
+      if (probe.error) {
+        verEl.dataset.state = 'unknown';
+        verEl.textContent = '版本探测失败：' + probe.error;
+      } else if (probe.needsRedeploy) {
+        verEl.dataset.state = 'outdated';
+        verEl.textContent = `服务端版本 ${probe.version} 过旧，需重新部署（要求 ${probe.required}+）`;
+      } else if (probe.ok) {
+        verEl.dataset.state = 'ok';
+        verEl.textContent = `服务端版本 ${probe.version} ✓`;
+      } else {
+        verEl.dataset.state = 'unknown';
+        verEl.textContent = '版本状态未知';
+      }
+    }).catch(() => {
+      const verEl = card.querySelector('.profile-version');
+      if (verEl) { verEl.dataset.state = 'unknown'; verEl.textContent = '版本探测失败'; }
+    });
   }
   return true;
 }

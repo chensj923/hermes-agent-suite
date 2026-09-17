@@ -116,3 +116,41 @@ test('客户端 ChannelClient 有 pendingResume 属性', () => {
   assert.equal(client.pendingResume, null, 'pendingResume 初始应为 null');
   assert.equal(client._supportsResume, false, 'supportsResume 初始应为 false');
 });
+
+test('Session resume 后 run_task 仍能注入 system_extra', () => {
+  const code = `
+import sys, os, json
+with open(r"${CHANNEL_PY}", encoding='utf-8') as f:
+    source = f.read()
+ns = {'__name__': 'buddy_channel', '__file__': r"${CHANNEL_PY}"}
+exec(source, ns)
+Session = ns['Session']
+SYSTEM_PROMPT = ns['SYSTEM_PROMPT']
+
+# mock LLM：直接返回无 tool_calls，避免走工具执行流程
+ns['call_llm'] = lambda messages, tools, signal_broken, model=None: {"content": "ack", "tool_calls": []}
+
+class FakeConn:
+    def __init__(self):
+        self.sent = []
+    def send_json(self, obj): self.sent.append(obj)
+
+# 模拟一个已经 resume 过的 session：messages 长度 > 1
+s = Session(FakeConn(), "sess-resume-extra")
+s.messages = [
+    {"role": "system", "content": SYSTEM_PROMPT},
+    {"role": "user", "content": "你好"},
+    {"role": "assistant", "content": "你好啊"}
+]
+
+extra = "【用户长期记忆】\\n用户喜欢暗色主题"
+s.run_task("继续", [], system_extra=extra)
+
+content = s.messages[0]["content"]
+assert "【本机上下文 - 由客户端提供】" in content, "system 消息应包含本机上下文标记"
+assert "用户喜欢暗色主题" in content, "system 消息应包含最新的 system_extra"
+print(json.dumps({"ok": True, "has_marker": True, "has_extra": True}))
+`;
+  const result = runPy(code);
+  assert.ok(result.out.includes('"ok": true'), 'resume 后应能注入 system_extra: ' + result.out + (result.err || ''));
+});

@@ -8,7 +8,7 @@ const { Workspace } = require('./workspace');
 const { ToolRegistry } = require('./tools');
 const { Brain, describeBrainError, BUDDY_PROXY_PORT } = require('./agent/brain');
 const { AgentLoop } = require('./agent/loop');
-const { ChannelClient } = require('./agent/channel');
+const { ChannelClient, versionAtLeast, REQUIRED_CHANNEL_VERSION } = require('./agent/channel');
 const { partsToContent, textToContent, contentToPlainText, stripImagesFromHistory } = require('./agent/parts');
 const { DashboardClient } = require('./agent/dashboard-client');
 const { buildSystemPrompt, DEFAULT_PERSONA } = require('./agent/prompts');
@@ -16,6 +16,8 @@ const { MemoryStore, rememberLine } = require('./memory');
 const { SkillStore } = require('./skills');
 const { detectTooling, renderToolchainForPrompt } = require('./toolchain');
 const { AgentStore } = require('./agent-store');
+const http = require('http');
+const https = require('https');
 
 const MAX_HISTORY_MESSAGES = 30;
 const PERSONA_FILE = 'persona.md';
@@ -78,6 +80,7 @@ class SessionManager {
       this.agentStore = null;
     }
     this.agentMessages = new Map(); // agentId -> OpenAI 消息数组
+    this._lastCrystallize = { at: null, scopes: [], error: null }; // 1.5 结晶同步状态
   }
 
   get activeAgent() {
@@ -735,7 +738,7 @@ class SessionManager {
     this.channel = channel;
     // 1.5「结晶」：连上服务端后自动把本机记忆同步上去，让服务端形成跨会话持久知识。
     // 这是"结晶系统"的核心--本机记忆不只在当前会话生效，而是沉淀到服务端、跨连接/跨 Buddy 持续。
-    this._crystallizeInBackground();
+    this._crystallizeInBackground().catch(() => {});
     return channel;
   }
 
@@ -743,23 +746,42 @@ class SessionManager {
    * 1.5「结晶」：把本机记忆和项目约定异步同步到服务端。
    * 不阻塞发送流程，失败了也不影响聊天--结晶是"尽力做"不是"必须做"。
    */
-  _crystallizeInBackground() {
-    if (!this.channel || !this.channel._supportsResume) return;  // 老服务端不支持 sync_memory
+  async _crystallizeInBackground() {
+    if (!this.channel || !this.channel._supportsResume) {
+      this._lastCrystallize = { at: Date.now(), scopes: [], error: '服务端不支持结晶同步（需 1.5+）' };
+      return;
+    }
     const globalMem = this.memory ? this.memory.globalMemory().trim() : '';
     const projectMem = this.memory ? this.memory.projectMemory().trim() : '';
     const agentsDoc = this.workspace ? String(this.workspace.readAgents() || '').trim() : '';
+    const scopes = [];
+    const errors = [];
     // 全局记忆 -> 服务端 GLOBAL.md
     if (globalMem) {
-      this.channel.syncMemory(globalMem, 'global').catch(() => {});
+      try {
+        await this.channel.syncMemory(globalMem, 'global');
+        scopes.push('global');
+      } catch (e) { errors.push(`global: ${e.message || '失败'}`); }
     }
     // 项目记忆 -> 服务端 PROJECT.md
     if (projectMem) {
-      this.channel.syncMemory(projectMem, 'project').catch(() => {});
+      try {
+        await this.channel.syncMemory(projectMem, 'project');
+        scopes.push('project');
+      } catch (e) { errors.push(`project: ${e.message || '失败'}`); }
     }
     // AGENTS.md -> 服务端 AGENTS.md
     if (agentsDoc) {
-      this.channel.syncMemory(agentsDoc, 'agents').catch(() => {});
+      try {
+        await this.channel.syncMemory(agentsDoc, 'agents');
+        scopes.push('agents');
+      } catch (e) { errors.push(`agents: ${e.message || '失败'}`); }
     }
+    this._lastCrystallize = {
+      at: Date.now(),
+      scopes,
+      error: errors.length ? errors.join('; ') : null
+    };
   }
 
   /** 通过 WS 通道发一条消息并等待 task_done，顺带维护本地历史。 */
@@ -1059,11 +1081,12 @@ class SessionManager {
     this.memory = new MemoryStore({ workspace: next, appDir: this.appDir, logger: this.logger });
     this.memory.ensure();
     this.skills = new SkillStore({ builtinDir: this.builtinSkillsDir, workspace: next, logger: this.logger });
-    this.tools = new ToolRegistry({
-      workspace: next,
-      logger: this.logger,
-      permission: (this.connection && this.connection.permission) || 'read-write'
-    });
+      this.tools = new ToolRegistry({
+        workspace: next,
+        logger: this.logger,
+        permission: (this.connection && this.connection.permission) || 'read-write',
+        memory: this.memory
+      });
     if (this.brain) this.loop = new AgentLoop({ brain: this.brain, tools: this.tools, workspace: next, logger: this.logger });
     if (this.connection) {
       const updated = { ...this.connection, workspace: next.dir };
@@ -1148,6 +1171,33 @@ class SessionManager {
     return rememberLine(this.memory, line, scope);
   }
 
+  /**
+   * 记忆诊断：给 UI 展示当前记忆文件位置、字符数、最近结晶同步状态。
+   * 方便用户排查"记忆为什么还是空的"。
+   */
+  memoryDiagnostics() {
+    if (!this.memory || !this.workspace) {
+      return {
+        ready: false,
+        workspace: null,
+        projectPath: null,
+        globalPath: null,
+        projectChars: 0,
+        globalChars: 0,
+        lastCrystallize: this._lastCrystallize
+      };
+    }
+    return {
+      ready: true,
+      workspace: this.workspace.dir,
+      projectPath: path.join(this.workspace.memoryDir, 'MEMORY.md'),
+      globalPath: path.join(this.appDir, 'memory', 'MEMORY.md'),
+      projectChars: this.memory.projectMemory().length,
+      globalChars: this.memory.globalMemory().length,
+      lastCrystallize: this._lastCrystallize
+    };
+  }
+
   listSkills() { return this.skills ? this.skills.list().map(stripContent) : []; }
   readSkill(name) { return this.skills ? this.skills.read(name) : null; }
   saveSkill(name, content, description) {
@@ -1198,6 +1248,57 @@ class SessionManager {
     const currentId = this.connection ? this.store._idFor(this.connection) : result.activeId;
     result.profiles = result.profiles.map((p) => ({ ...p, active: p.id === currentId || p.active }));
     return result;
+  }
+
+  /**
+   * 探测某个已保存连接的服务端通道版本。
+   * 渲染层在连接列表里用它做"是否需要重新部署"的引导。
+   */
+  probeProfileVersion(profile) {
+    return new Promise((resolve) => {
+      if (!profile) return resolve({ version: null, required: REQUIRED_CHANNEL_VERSION, ok: false, needsRedeploy: false, error: '无连接信息' });
+      // 优先用通道地址；没有就用 Gateway 地址推导。
+      let raw = profile.channelUrl || profile.baseUrl || '';
+      if (!raw) return resolve({ version: null, required: REQUIRED_CHANNEL_VERSION, ok: false, needsRedeploy: false, error: '无地址' });
+      try {
+        const isWs = /^wss?:\/\//i.test(raw);
+        const url = new URL(isWs ? raw : (raw.includes('://') ? raw : `http://${raw}`));
+        const hostname = url.hostname;
+        const port = url.port || (isWs && url.protocol === 'wss:' ? 443 : isWs ? 80 : 8822);
+        const mod = (url.protocol === 'wss:' || url.protocol === 'https:') ? https : http;
+        const req = mod.request({
+          hostname,
+          port,
+          path: '/health',
+          method: 'GET',
+          timeout: 5000,
+        }, (res) => {
+          let body = '';
+          res.on('data', (c) => { body += String(c); });
+          res.on('end', () => {
+            try {
+              const info = JSON.parse(body);
+              const version = info.channel_version || info.version || null;
+              const ok = Boolean(version && versionAtLeast(version, REQUIRED_CHANNEL_VERSION));
+              resolve({
+                version,
+                required: REQUIRED_CHANNEL_VERSION,
+                ok,
+                needsRedeploy: Boolean(version && !ok),
+                error: null
+              });
+            } catch (e) {
+              resolve({ version: null, required: REQUIRED_CHANNEL_VERSION, ok: false, needsRedeploy: false, error: '返回不是 JSON' });
+            }
+          });
+        });
+        req.on('error', (e) => resolve({ version: null, required: REQUIRED_CHANNEL_VERSION, ok: false, needsRedeploy: false, error: e.message || '请求失败' }));
+        req.on('timeout', () => { try { req.destroy(); } catch (_) {} resolve({ version: null, required: REQUIRED_CHANNEL_VERSION, ok: false, needsRedeploy: false, error: '探测超时' }); });
+        req.end();
+      } catch (e) {
+        resolve({ version: null, required: REQUIRED_CHANNEL_VERSION, ok: false, needsRedeploy: false, error: e.message || '地址解析失败' });
+      }
+    });
   }
 
   /** 切换激活连接，并预载到 this.connection，随后 resume 即可直连。 */

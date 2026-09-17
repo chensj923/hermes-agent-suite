@@ -90,6 +90,23 @@ test('renderResult(remember) 输出"已记住"', async () => {
   } finally { fix.cleanup(); }
 });
 
+test('setMemory 能热切换 remember 工具的写入目标', async () => {
+  const fix1 = makeFixture();
+  const fix2 = makeFixture();
+  try {
+    const tools = fix1.tools;
+    await tools_remember(tools, { text: '第一条进 fix1' });
+    assert.ok(fix1.memory.projectMemory().includes('第一条进 fix1'));
+    assert.equal(fix2.memory.projectMemory().includes('第一条进 fix1'), false);
+
+    // 模拟切换工作区：setMemory 应该让 remember 写到新工作区
+    tools.setMemory(fix2.memory);
+    await tools_remember(tools, { text: '第二条进 fix2' });
+    assert.ok(fix2.memory.projectMemory().includes('第二条进 fix2'));
+    assert.equal(fix1.memory.projectMemory().includes('第二条进 fix2'), false);
+  } finally { fix1.cleanup(); fix2.cleanup(); }
+});
+
 // ---- 辅助：直接调 execute 并包成 invoke 风格，避免 CommandGuard 依赖 ----
 async function tools_remember(tools, input) {
   return await tools.execute('remember', input || {}, {});

@@ -14,14 +14,30 @@ function tmpDir(prefix) {
 
 test('getStatus 返回完整结构，缺引擎时 ok 为 false', () => {
   const appDir = tmpDir('hermes-eng-empty-');
-  const s = getStatus(appDir);
-  assert.equal(typeof s.dir, 'string');
-  for (const key of ['whisper', 'model', 'ffmpeg']) {
-    assert.equal(typeof s[key].ok, 'boolean', `${key}.ok 应是布尔`);
-    assert.equal(typeof s[key].path, 'string', `${key}.path 应是字符串`);
+  // 清掉环境变量和 PATH，避免本机已安装 whisper/ffmpeg 导致测试误判
+  const oldPath = process.env.PATH;
+  const oldWhisperBin = process.env.BUDDY_WHISPER_BIN;
+  const oldFfmpegBin = process.env.BUDDY_FFMPEG_BIN;
+  const oldWhisperModel = process.env.BUDDY_WHISPER_MODEL;
+  delete process.env.PATH;
+  delete process.env.BUDDY_WHISPER_BIN;
+  delete process.env.BUDDY_FFMPEG_BIN;
+  delete process.env.BUDDY_WHISPER_MODEL;
+  try {
+    const s = getStatus(appDir);
+    assert.equal(typeof s.dir, 'string');
+    for (const key of ['whisper', 'model', 'ffmpeg']) {
+      assert.equal(typeof s[key].ok, 'boolean', `${key}.ok 应是布尔`);
+      assert.equal(typeof s[key].path, 'string', `${key}.path 应是字符串`);
+    }
+    assert.equal(s.whisper.ok, false, '空目录里不应找到 whisper');
+    assert.equal(s.model.ok, false, '空目录里不应找到模型');
+  } finally {
+    process.env.PATH = oldPath;
+    if (oldWhisperBin !== undefined) process.env.BUDDY_WHISPER_BIN = oldWhisperBin;
+    if (oldFfmpegBin !== undefined) process.env.BUDDY_FFMPEG_BIN = oldFfmpegBin;
+    if (oldWhisperModel !== undefined) process.env.BUDDY_WHISPER_MODEL = oldWhisperModel;
   }
-  assert.equal(s.whisper.ok, false, '空目录里不应找到 whisper');
-  assert.equal(s.model.ok, false, '空目录里不应找到模型');
 });
 
 test('install 缺少 appDir 时应报错而不是静默失败', async () => {

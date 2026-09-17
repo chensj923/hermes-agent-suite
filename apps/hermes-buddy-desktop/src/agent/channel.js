@@ -600,4 +600,4 @@ class ChannelClient {
   }
 }
 
-module.exports = { ChannelClient, maskFrame, decodeFrames, REQUIRED_CHANNEL_VERSION };
+module.exports = { ChannelClient, maskFrame, decodeFrames, REQUIRED_CHANNEL_VERSION, versionAtLeast };
