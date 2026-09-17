@@ -30,6 +30,12 @@ let updater = null;
 let logger = { info() {}, warn() {}, error() {}, debug() {} };
 const pendingConfirms = new Map();
 
+// GPU 硬件加速在某些 Windows 10 机器上会导致 Electron 启动即崩（GPU 进程 crash），
+// 没有日志、没有 crash dump，表现为 exit code=0 静默退出。先全局禁用 GPU，
+// 确保至少能启动；性能影响对 Buddy 这种工具型应用可忽略。
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('no-sandbox');
+
 // CI / 远程会话里通常没有可用 GPU，冒烟时关掉硬件加速，避免 GPU 进程拖垮启动。
 if (SMOKE_TEST) {
   app.disableHardwareAcceleration();
