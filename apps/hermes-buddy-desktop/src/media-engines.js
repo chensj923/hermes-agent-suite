@@ -16,6 +16,9 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const http = require('http');
+const tls = require('tls');
+const zlib = require('zlib');
 const { spawnSync } = require('child_process');
 
 /** whisper.cpp release 列表（tag 是滚动构建号，必须动态查，不能写死一个版本）。 */
@@ -58,28 +61,158 @@ function getStatus(appDir) {
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * 代理支持（v4.2.1）
+ *
+ * Electron 主进程的 https.get 不会自动走系统代理（Chromium 的代理设置
+ * 只作用于 net.request / 渲染进程）。国内环境直连 api.github.com 会直接
+ * 15s 超时，release 解析永远拿不到结果、只能回落到写死的 tag。
+ * 所以这里读环境变量自建 CONNECT 隧道——零第三方依赖，避免打包遗漏。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 从环境变量解析代理，尊重 NO_PROXY。返回 null 表示直连。
+ * @returns {{host:string,port:number,auth:string}|null}
+ */
+function resolveProxy(targetUrl) {
+  const raw = process.env.HTTPS_PROXY || process.env.https_proxy
+    || process.env.HTTP_PROXY || process.env.http_proxy || '';
+  if (!raw) return null;
+  let host;
+  try { host = new URL(targetUrl).hostname; } catch (_) { return null; }
+  const noProxy = process.env.NO_PROXY || process.env.no_proxy || '';
+  for (const entry of noProxy.split(',').map((s) => s.trim()).filter(Boolean)) {
+    if (entry === '*') return null;
+    const e = entry.replace(/^\./, '');
+    if (host === e || host.endsWith('.' + e)) return null;
+  }
+  try {
+    const p = new URL(raw);
+    if (!p.hostname) return null;
+    let auth = '';
+    if (p.username) {
+      auth = decodeURIComponent(p.username) + ':' + decodeURIComponent(p.password);
+    }
+    return {
+      host: p.hostname,
+      port: Number(p.port) || (p.protocol === 'https:' ? 443 : 80),
+      auth,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+/** 向代理发 CONNECT，打通到目标的裸 TCP 隧道。 */
+function openTunnel(proxy, targetHost, targetPort, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const headers = { Host: `${targetHost}:${targetPort}` };
+    if (proxy.auth) {
+      headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(proxy.auth).toString('base64');
+    }
+    const req = http.request({
+      host: proxy.host,
+      port: proxy.port,
+      method: 'CONNECT',
+      path: `${targetHost}:${targetPort}`,
+      headers,
+      timeout: timeoutMs,
+    });
+    req.once('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        return reject(new Error('代理 CONNECT 失败：HTTP ' + res.statusCode));
+      }
+      resolve(socket);
+    });
+    req.once('error', reject);
+    req.once('timeout', () => { req.destroy(new Error('代理连接超时')); });
+    req.end();
+  });
+}
+
+/**
+ * 为 https 请求造 agent：有代理则走 CONNECT + TLS，否则返回 undefined（默认直连）。
+ * @param {string} targetUrl
+ * @param {number} timeoutMs
+ */
+function makeHttpsAgent(targetUrl, timeoutMs) {
+  const proxy = resolveProxy(targetUrl);
+  if (!proxy) return undefined;
+  const agent = new https.Agent({ keepAlive: false, maxSockets: 2 });
+  agent.createConnection = function createConnection(options, callback) {
+    const host = options.host;
+    const port = Number(options.port) || 443;
+    openTunnel(proxy, host, port, timeoutMs).then((socket) => {
+      const secured = tls.connect({
+        socket,
+        servername: host,
+        rejectUnauthorized: false,
+      }, () => callback(null, secured));
+      secured.once('error', (e) => callback(e));
+    }, (e) => callback(e));
+  };
+  return agent;
+}
+
 /** 匿名调 GitHub API 拿 release 列表，失败返回 null（调用方回落兜底 URL）。 */
-function fetchJson(url) {
-  return new Promise((resolve) => {
+/**
+ * @param {string} url
+ * @param {number} [timeoutMs=30000] 单次超时。走代理时首次 TLS 握手实测接近 10s，
+ *   15s 会稳定超时导致 release 解析永远拿不到结果（v4.2.1 修复）。
+ */
+function fetchJson(url, timeoutMs) {
+  const t = Number(timeoutMs) > 0 ? Number(timeoutMs) : 30000;
+  const doFetch = (useProxy) => new Promise((resolve) => {
     let u;
     try { u = new URL(url); } catch (_) { return resolve(null); }
+    const agent = useProxy ? makeHttpsAgent(url, t) : undefined;
     const req = https.get({
       host: u.host,
       path: u.pathname + u.search,
-      timeout: 15000,
+      timeout: t,
       rejectUnauthorized: false,
-      headers: { 'User-Agent': 'hermes-buddy', Accept: 'application/vnd.github+json' },
+      agent,
+      headers: {
+        'User-Agent': 'hermes-buddy',
+        Accept: 'application/vnd.github+json',
+        // release 列表 JSON 未压缩可达数百 KB，走代理时容易把连接拖到超时
+        'Accept-Encoding': 'gzip, deflate',
+      },
     }, (res) => {
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (c) => { body += c; });
+      const chunks = [];
+      res.on('data', (c) => { chunks.push(c); });
       res.on('end', () => {
         if (res.statusCode !== 200) return resolve(null);
-        try { resolve(JSON.parse(body)); } catch (_) { resolve(null); }
+        let buf = Buffer.concat(chunks);
+        const enc = String(res.headers['content-encoding'] || '').toLowerCase();
+        try {
+          if (enc === 'gzip') buf = zlib.gunzipSync(buf);
+          else if (enc === 'deflate') buf = zlib.inflateSync(buf);
+        } catch (_) {
+          return resolve(null);
+        }
+        try { resolve(JSON.parse(buf.toString('utf8'))); } catch (_) { resolve(null); }
       });
     });
     req.on('error', () => resolve(null));
     req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+  // 代理与直连竞速：代理先发，直连稍后起步做后手。
+  // 串行兜底（代理超时 30s 后再试直连）实测要 50s+，用户会以为卡死。
+  // 谁先拿到有效结果谁赢；两边都失败才放弃（调用方回落兜底 URL）。
+  return new Promise((resolve) => {
+    let won = false;
+    let remaining = 2;
+    const attempt = (useProxy, delay) => setTimeout(() => {
+      doFetch(useProxy).then((r) => {
+        if (r != null && !won) { won = true; return resolve(r); }
+        remaining -= 1;
+        if (remaining <= 0 && !won) resolve(null);
+      });
+    }, delay);
+    attempt(true, 0);
+    attempt(false, 1200);
   });
 }
 
@@ -105,21 +238,30 @@ function withMirrors(url) {
   return GITHUB_MIRRORS.map((f) => f(url));
 }
 
-function downloadTo(url, destFile, onTick) {
+/**
+ * @param {string} url
+ * @param {string} destFile
+ * @param {(p:{received:number,total:number})=>void} [onTick]
+ * @param {number} [timeoutMs] 空闲超时（socket 空闲超过这么久才算超时，持续有数据不会触发）。
+ *   默认 DOWNLOAD_TIMEOUT；GB 级模型建议传更大值（如 5 分钟）。
+ */
+function downloadTo(url, destFile, onTick, timeoutMs) {
+  const idleTimeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : DOWNLOAD_TIMEOUT;
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(url); } catch (_) { return reject(new Error('非法下载地址')); }
     const req = https.get({
       host: u.host,
       path: u.pathname + u.search,
-      timeout: DOWNLOAD_TIMEOUT,
+      timeout: idleTimeout,
       rejectUnauthorized: false,
+      agent: makeHttpsAgent(url, idleTimeout),
       headers: { 'User-Agent': 'hermes-buddy' },
     }, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         res.resume();
         const next = new URL(res.headers.location, url).toString();
-        return downloadTo(next, destFile, onTick).then(resolve, reject);
+        return downloadTo(next, destFile, onTick, idleTimeout).then(resolve, reject);
       }
       if (res.statusCode !== 200) {
         res.resume();
@@ -143,11 +285,11 @@ function downloadTo(url, destFile, onTick) {
 }
 
 /** 依次尝试每个候选源，全失败才抛错（把最后一个错误抛出去）。 */
-async function downloadFirstAvailable(urls, destFile, onTick) {
+async function downloadFirstAvailable(urls, destFile, onTick, timeoutMs) {
   let lastError = null;
   for (const url of urls) {
     try {
-      return await downloadTo(url, destFile, onTick);
+      return await downloadTo(url, destFile, onTick, timeoutMs);
     } catch (error) {
       lastError = error;
       try { fs.unlinkSync(destFile); } catch (_) {}
@@ -322,4 +464,10 @@ module.exports = {
   getStatus, install, openDir, MODELS, resolveWhisperZip,
   // placeFiles 导出是为了能单测"从压缩包里挑出哪些文件"这条关键逻辑
   placeFiles,
+  // v4.2.1：以下为 predict/llama-engine.js（VLM 一键安装）复用的下载骨架。
+  // 之前漏导出导致 llama-engine 拿到 undefined，安装第一步就抛
+  // "fetchJson is not a function"。导出后再补锁死回归测试。
+  fetchJson, withMirrors, downloadTo, downloadFirstAvailable, extractZip, walk,
+  // 导出以便单测"代理解析"这条在国内网络下决定成败的逻辑
+  resolveProxy, makeHttpsAgent,
 };

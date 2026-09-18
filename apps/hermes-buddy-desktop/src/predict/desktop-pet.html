@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: transparent;
+    overflow: hidden;
+    user-select: none;
+    cursor: default;
+  }
+  /* 注意：不再使用 -webkit-app-region: drag —— 它会吞掉所有鼠标事件，
+     导致点击菜单永远弹不出来。拖动改为 mousedown/mousemove 手动实现。 */
+
+  canvas { display: block; }
+
+  /* ---- 回退模式：Live2D 加载失败时退回双帧 PNG ---- */
+  #fallback {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: flex-end;
+    justify-content: center;
+  }
+  #fallback.on { display: flex; }
+  #cat-idle, #cat-wave {
+    position: absolute;
+    bottom: 4px;
+    width: 96%;
+    object-fit: contain;
+    object-position: center bottom;
+    /* v4.5：去掉 drop-shadow 滤镜 —— 透明窗口上每帧全屏重算滤镜是卡顿主因 */
+    transition: opacity 0.06s linear;
+  }
+  #cat-wave { opacity: 0; }
+  #anim {
+    position: absolute;
+    inset: 0;
+    transform-origin: 50% 92%;
+  }
+  #anim.breathe { animation: breathe 3.2s ease-in-out infinite; }
+  #anim.hop { animation: hop 0.5s ease-in-out infinite; }
+  @keyframes breathe {
+    0%, 100% { transform: scale(1, 1); }
+    50% { transform: scale(1.025, 0.975); }
+  }
+  @keyframes hop {
+    0%, 100% { transform: translateY(0) rotate(0deg); }
+    30% { transform: translateY(-6px) rotate(-2deg); }
+    60% { transform: translateY(0) rotate(2deg); }
+  }
+
+  /* 气泡：主进程可发文本让猫「说话」 */
+  #bubble {
+    position: absolute;
+    top: 0; left: 50%;
+    transform: translate(-50%, 6px);
+    max-width: 150px;
+    background: #fff;
+    color: #333;
+    font: 12px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 6px 10px;
+    border-radius: 10px;
+    border: 1px solid #e0d5c8;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    z-index: 2;
+  }
+  #bubble.show { opacity: 1; }
+  #bubble::after {
+    content: '';
+    position: absolute;
+    bottom: -5px; left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: #fff;
+    border-bottom: 0;
+  }
+</style>
+</head>
+<body>
+  <div id="fallback">
+    <div id="anim">
+      <img id="cat-idle" src="./assets/pet-cat.png" draggable="false" alt="">
+      <img id="cat-wave" src="./assets/pet-cat-wave.png" draggable="false" alt="">
+    </div>
+  </div>
+  <div id="bubble"></div>
+  <script src="./assets/live2d/pixi.min.js"></script>
+  <script src="./assets/live2d/live2dcubismcore.min.js"></script>
+  <script src="./assets/live2d/pixi-live2d-cubism4.min.js"></script>
+  <script>
+    'use strict';
+    const bubble = document.getElementById('bubble');
+    const fallback = document.getElementById('fallback');
+    const anim = document.getElementById('anim');
+    const idle = document.getElementById('cat-idle');
+    const waveImg = document.getElementById('cat-wave');
+
+    // ---- 通用：气泡 / 点击-拖动判定（位移 < 5px 视为点击，左/右键都弹菜单）----
+    function say(text) {
+      bubble.textContent = text;
+      bubble.classList.add('show');
+      clearTimeout(bubble._t);
+      bubble._t = setTimeout(() => bubble.classList.remove('show'), 4000);
+    }
+
+    let down = null;          // { x, y, t, btn, dragging }
+    const CLICK_SLOP = 5;
+    let lastMenuAt = 0;       // 防止 click / mouseup / contextmenu 重复弹两次
+
+    function openMenu() {
+      const now = Date.now();
+      if (now - lastMenuAt < 400) return;
+      lastMenuAt = now;
+      tapMotion();
+      window.petApi?.click();
+    }
+
+    // v4.7：窗口默认完全可交互（不再点击穿透），所以整个窗口都能拖动，
+    // 菜单用 click / contextmenu / mouseup 三条路都挂，避免某条路径被系统吞掉。
+    function onMouseDown(e) {
+      down = { x: e.screenX, y: e.screenY, t: Date.now(), btn: e.button, dragging: false };
+      window.petApi?.dragStart?.();
+    }
+    function onMouseMove(e) {
+      if (!down) return;
+      const dx = e.screenX - down.x, dy = e.screenY - down.y;
+      if (!down.dragging && Math.hypot(dx, dy) >= 3) down.dragging = true;
+      if (down.dragging) window.petApi?.dragMove?.(dx, dy);
+    }
+    function onMouseUp(e) {
+      if (!down) return;
+      const moved = Math.hypot(e.screenX - down.x, e.screenY - down.y);
+      const btn = down.btn;
+      down = null;
+      window.petApi?.dragEnd?.();
+      if (moved < CLICK_SLOP && btn === e.button) openMenu();
+    }
+    window.addEventListener('mousedown', onMouseDown, true);
+    window.addEventListener('mousemove', onMouseMove, true);
+    window.addEventListener('mouseup', onMouseUp, true);
+    window.addEventListener('click', (e) => { if (e.button === 0) openMenu(); }, true);
+    window.addEventListener('dblclick', (e) => { e.preventDefault(); openMenu(); }, true);
+    window.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(); });
+
+    // ---- 主进程推送 ----
+    window.petApi?.onSpeak?.(say);
+    window.petApi?.onWave?.(() => tapMotion(2000));
+
+    // ================= Live2D =================
+    let model = null;
+    let paused = false;
+
+    function live2dHit(x, y) {
+      if (!model) return false;
+      const b = model.getBounds();
+      const inset = Math.min(b.width, b.height) * 0.06;
+      return x >= b.left + inset && x <= b.right - inset &&
+             y >= b.top + inset && y <= b.bottom - inset;
+    }
+
+    function applyPause() {
+      if (!window.__pixiApp) return;
+      if (paused || document.hidden) window.__pixiApp.ticker.stop();
+      else window.__pixiApp.ticker.start();
+    }
+
+    // 主进程菜单「暂停动画（省电）」/ 隐藏页面时停渲染，省 GPU/CPU
+    window.petApi?.onPaused?.((v) => { paused = Boolean(v); applyPause(); });
+
+    function tapMotion(ms) {
+      if (model) {
+        try { model.motion(Math.random() < 0.5 ? 'TapBody' : 'Idle'); } catch (_) {}
+      } else {
+        // 回退：双帧挥手
+        anim.classList.add('hop');
+        let showWave = true;
+        const flip = setInterval(() => {
+          waveImg.style.opacity = showWave ? '1' : '0';
+          idle.style.opacity = showWave ? '0' : '1';
+          showWave = !showWave;
+        }, 240);
+        setTimeout(() => {
+          clearInterval(flip);
+          waveImg.style.opacity = '0';
+          idle.style.opacity = '1';
+          anim.classList.remove('hop');
+        }, ms || 1800);
+      }
+    }
+
+    // 隐藏页面时停渲染省 GPU；恢复时继续（Live2D 模式）
+    document.addEventListener('visibilitychange', applyPause);
+
+    (async () => {
+      try {
+        if (!window.PIXI || !window.PIXI.live2d || typeof Live2DCubismCore === 'undefined') {
+          throw new Error('runtime missing');
+        }
+        const { Live2DModel } = window.PIXI.live2d;
+        // v4.7：透明窗口上 MSAA（antialias）代价很高，关掉；限帧 20fps
+        const app = new PIXI.Application({
+          width: 170, height: 190,
+          transparent: true,
+          antialias: false,
+          resolution: 1,
+          autoStart: true,
+        });
+        window.__pixiApp = app;
+        document.body.appendChild(app.view);
+
+        // 给渲染限帧 —— 透明置顶窗口 60fps 全速渲染是「很卡」的主因之一
+        app.ticker.maxFPS = 20;
+
+        // v4.6：模型 URL 由主进程经 query 传入（用户自选 → pet://model/...，内置 → pet://assets/...）
+        const q = new URLSearchParams(location.search);
+        const wanted = q.get('model') || 'pet://assets/live2d/hiyori/Hiyori.model3.json';
+        const BUILTIN = 'pet://assets/live2d/hiyori/Hiyori.model3.json';
+        const loadAt = async (url) => {
+          const m = await Live2DModel.from(url, { autoInteract: false, motionPreload: 'IDLE' });
+          const fit = Math.min(170 / m.width, 190 / m.height) * 1.12;
+          m.scale.set(fit);
+          m.x = 85 - m.width / 2;
+          m.y = 190 - m.height - 2;
+          app.stage.addChild(m);
+          try { m.motion('Idle'); } catch (_) {}
+          return m;
+        };
+        // 自定义模型失败 → 回落内置 Hiyori → 都失败 → 双帧 PNG
+        try { model = await loadAt(wanted); }
+        catch (e1) {
+          if (wanted === BUILTIN) throw e1;
+          model = await loadAt(BUILTIN);
+        }
+      } catch (e) {
+        // Live2D 不可用 → 回退到双帧 PNG（无阴影、限动画的省电版）
+        fallback.classList.add('on');
+        anim.classList.add('breathe');
+        window.petApi?.error?.('live2d-fallback: ' + (e && e.message ? e.message : e));
+      }
+    })();
+  </script>
+</body>
+</html>

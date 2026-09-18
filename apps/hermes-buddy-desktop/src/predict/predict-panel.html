@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <!-- 浮窗极简，且只接收主进程推送的建议、回传决策；无网络、无外部脚本。 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+  <title>预测建议</title>
+  <link rel="stylesheet" href="predict-panel.css">
+</head>
+<body>
+  <div class="bubble" id="bubble">
+    <div class="bubble-head">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="title">Hermes 觉得你可能需要</span>
+    </div>
+    <div class="suggestion" id="suggestion">…</div>
+    <div class="reason" id="reason"></div>
+    <!-- v4.4 思考中：模型分析期间显示转圈，分析完切回建议 -->
+    <div class="thinking" id="thinking" hidden>
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="thinking-text" id="thinking-text">思考中…</span>
+    </div>
+    <div class="actions" id="actions">
+      <button class="primary" id="btn-generate" type="button">生成并插入</button>
+      <button class="ghost" id="btn-later" type="button">稍后</button>
+      <button class="ghost" id="btn-never" type="button">不再提示</button>
+    </div>
+  </div>
+  <script src="predict-panel-ui.js"></script>
+</body>
+</html>

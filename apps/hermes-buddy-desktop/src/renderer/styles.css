@@ -836,14 +836,14 @@ button:disabled { opacity: .5; cursor: default; }
 
 .context-tabs {
   display: flex;
+  flex-wrap: wrap;
   flex-shrink: 0;
   gap: 4px;
   padding: 10px 10px 0;
-  overflow-x: auto;
   border-bottom: 1px solid var(--border);
 }
 .context-tabs button {
-  flex: 1;
+  flex: 0 0 auto;
   white-space: nowrap;
   background: transparent;
   border: 0;
@@ -928,6 +928,37 @@ button:disabled { opacity: .5; cursor: default; }
 .kv { display: grid; grid-template-columns: 90px 1fr; gap: 4px 14px; margin: 12px 0; font-size: 12px; }
 .kv .k { color: var(--muted); }
 .kv .v { font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+
+/* ---- 预测模式（v4.0）设置面板 ---- */
+.predict-state {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 6px 0 10px;
+}
+.predict-state[data-state="on"] { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.predict-state[data-state="off"] { background: var(--surface-2); color: var(--muted); }
+.predict-enable-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px; }
+.predict-enable-row .perm-option { display: flex; align-items: flex-start; gap: 6px; max-width: 520px; font-size: 12px; color: var(--muted); }
+.predict-av .tool-item { margin-top: 8px; }
+
+.predict-crystal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 6px;
+}
+.predict-crystal-table th,
+.predict-crystal-table td {
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  text-align: center;
+}
+.predict-crystal-table th:first-child,
+.predict-crystal-table td:first-child { text-align: left; }
+.predict-crystal-table th { color: var(--muted); font-weight: 600; background: var(--surface-2); }
 .workspace-actions { display: flex; gap: 8px; margin: 10px 0; }
 .tree {
   margin: 6px 0 0;
@@ -1086,3 +1117,13 @@ button:disabled { opacity: .5; cursor: default; }
   border: none;
 }
 .back-link:hover { text-decoration: underline; }
+
+/* v4.8：手动下载直链区块 */
+.predict-link-row { margin: 10px 0 4px; }
+.predict-link-cap {
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+  margin-bottom: 4px;
+}
+.predict-link-row .settings-actions { margin-top: 0; }

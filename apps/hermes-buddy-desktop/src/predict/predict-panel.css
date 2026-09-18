@@ -1,0 +1,128 @@
+:root {
+  --bg: #1c2230;
+  --bg-soft: #242b3d;
+  --text: #e8ecf3;
+  --text-dim: #9aa6bd;
+  --accent: #4cc4a0;
+  --border: #313a52;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bubble {
+  width: 360px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px 12px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+}
+
+.bubble-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+.title {
+  font-size: 12px;
+  color: var(--text-dim);
+  letter-spacing: 0.3px;
+}
+
+.suggestion {
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.reason {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.45;
+  margin-bottom: 12px;
+}
+
+/* v4.4 思考中：转圈 loading + 文案，出现在建议区域同一位置 */
+.thinking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 62px;
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.thinking-text {
+  letter-spacing: 0.3px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06231c;
+  font-weight: 700;
+}
+
+button.primary:hover { filter: brightness(1.08); }
+
+button.ghost {
+  background: var(--bg-soft);
+  color: var(--text);
+}
+
+button.ghost:hover { border-color: var(--accent); }

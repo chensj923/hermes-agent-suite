@@ -16,6 +16,9 @@ const { diagnose } = require('./diagnostics');
 const { generateBootstrapScript } = require('./server-bootstrap');
 const { Updater } = require('./updater');
 const mediaEngines = require('./media-engines');
+// v4.0 预测模式：杀软检测 / Defender 排除区 / VLM 引擎查找（模块级 require 安全，实例化才可能在 bootstrap 失败）。
+const { detectAntivirus, addDefenderExclusion } = require('./predict/behavior-hooks');
+const llamaEngine = require('./predict/llama-engine');
 
 // 打包冒烟：启动 → 加载完成 → 退出，用于 CI 校验主进程与渲染层能起来。
 const SMOKE_TEST = process.argv.includes('--smoke-test');
@@ -27,6 +30,8 @@ const EXTERNAL_ALLOWLIST = [/^https:\/\/github\.com\//i, /^https:\/\/ghfast\.top
 let mainWindow = null;
 let manager = null;
 let updater = null;
+let predictController = null;   // v4.0 预测模式编排器（bootstrap 中惰性创建）
+let pet = null;                 // v4.1 桌宠猫咪（bootstrap 中惰性创建）
 let logger = { info() {}, warn() {}, error() {}, debug() {} };
 const pendingConfirms = new Map();
 
@@ -89,6 +94,61 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   return mainWindow;
+}
+
+/** 恢复并聚焦主窗口（桌宠右键菜单 / IPC 共用）。 */
+function restoreMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  else {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
+/**
+ * v4.2 主动预测：不看规则、不受冷却，「现在就看一眼屏幕」。
+ * 桌宠点击 / 设置页按钮 / 巡检定时器共用。结果通过猫的气泡或浮层反馈。
+ */
+async function runProactivePredict() {
+  if (!predictController) return { error: '预测模式未初始化' };
+  try {
+    if (pet) pet.speak('喵～ 我在想…');
+    const r = await predictController.predictNow();
+    if (r.shown) return r;
+    if (r.busy) { if (pet) pet.speak('我还在想上一件事喵～'); return r; }
+    // 没弹窗：交给猫一句话交代，避免点了没反应
+    if (pet) pet.speak('这会儿好像没什么要帮忙的喵～');
+    return r;
+  } catch (e) {
+    if (pet) pet.speak('要先在设置里启用预测模式喵～');
+    return { error: e.message };
+  }
+}
+
+/** v4.2 桌宠主动巡检：配置 proactivePatrolMinutes>0 且桌宠可见时，定时主动看一次屏幕。 */
+let petPatrolTimer = null;
+function startPetPatrol() {
+  if (petPatrolTimer) return;
+  let lastRun = 0;
+  petPatrolTimer = setInterval(() => {
+    try {
+      if (!predictController || !pet || !pet.isVisible()) return;
+      const cfg = predictController.config;
+      const minutes = Number(cfg.get('proactivePatrolMinutes')) || 0;
+      if (minutes <= 0) return;
+      if (!cfg.get('enabled') || !cfg.get('authorized')) return;
+      // v4.4：三档模式都带模型（local/remote/hybrid），都能从巡检拿到增量信息；
+      // 模型真的不可用时控制器会降级为规则预判，这里不再按模式名跳过。
+      if (!cfg.get('model')) return;
+      const intervalMs = minutes * 60 * 1000;
+      const now = Date.now();
+      if (now - lastRun < intervalMs) return;
+      lastRun = now;
+      runProactivePredict();
+    } catch (_) { /* 巡检失败不影响正常使用 */ }
+  }, 60 * 1000);
+  petPatrolTimer.unref?.();
 }
 
 /**
@@ -639,7 +699,7 @@ function registerIpc() {
             const channelVersion = result.channel_version || 'none';
             const proxyEnv = result.proxy_env || 'no';
             // 与 src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION 保持一致
-            const REQUIRED_CHANNEL_VERSION = '1.5';
+            const REQUIRED_CHANNEL_VERSION = '2.0';
             const verAtLeast = (v, req) => {
               if (!v || v === 'none') return false;
               const a = String(v).split('.').map((n) => parseInt(n, 10) || 0);
@@ -851,6 +911,159 @@ function registerIpc() {
     appDir: app.getPath('userData'),
     encryptionAvailable: manager.store.isEncryptionAvailable()
   }));
+
+  // ---- 预测模式（v4.0）：事件驱动主动预判 ----
+  const getPredict = () => {
+    if (!predictController) throw new Error('预测模式组件未初始化（可能初始化失败，请查看 buddy.log）');
+    return predictController;
+  };
+
+  /** 安装目录（exe 路径），给 Defender 加排除区用。 */
+  function predictAppPath() {
+    try {
+      const p = app.getPath('exe');
+      return p || '';
+    } catch (_) { return ''; }
+  }
+
+  handle('buddy:predict:status', () => getPredict().getStatus());
+  handle('buddy:predict:enable', async () => getPredict().enable());
+  handle('buddy:predict:disable', async () => getPredict().disable());
+  handle('buddy:predict:one-click-off', async () => getPredict().oneClickOff());
+  handle('buddy:predict:set-model', (_event, model) => getPredict().setModel(model));
+  handle('buddy:predict:set-sensitivity', (_event, s) => getPredict().setSensitivity(s));
+  handle('buddy:predict:set-authorized', (_event, v) => getPredict().setAuthorized(v));
+  handle('buddy:predict:crystallization', () => getPredict().getCrystallization());
+  handle('buddy:predict:trigger', (_event, rule) => getPredict().triggerRule(rule || 'word_writing'));
+  // VLM 引擎现状（是否已装 llama-server / 模型 / mmproj），UI 据此提示安装。
+  // v4.7：把用户指定的本地模型/视觉投影路径一起算进去（自定义优先于自动下载的那份）。
+  handle('buddy:predict:engine-status', () => {
+    const cfg = getPredict().config;
+    const modelKey = cfg.get('vlmModel') || 'qwen2.5-vl-3b';
+    const st = llamaEngine.getStatus(app.getPath('userData'), modelKey, {
+      modelPath: cfg.get('vlmModelPath') || '',
+      mmprojPath: cfg.get('vlmMmprojPath') || '',
+    });
+    // v4.8：顺带把手动下载直链给设置页（用户可以自己用下载器先下完再导入）
+    st.links = llamaEngine.downloadLinks(modelKey);
+    return st;
+  });
+  // 杀软检测 + 可选给 Defender 加排除区（火绒/360 引导手动，不自动动）。
+  handle('buddy:predict:av', async (_event, { addExclusion } = {}) => {
+    const list = detectAntivirus();
+    let defenderExcluded = false;
+    if (addExclusion && list.some((a) => a.key === 'defender')) {
+      const r = await addDefenderExclusion(predictAppPath(), {});
+      defenderExcluded = Boolean(r && r.ok);
+    }
+    return { antivirus: list, defenderExcluded };
+  });
+
+  // ---- VLM 引擎一键安装（v4.1）：llama.cpp + GGUF + mmproj，进度实时推给渲染层 ----
+  let engineInstallPromise = null;   // 并发守卫：同一时间只允许一次安装
+  handle('buddy:predict:install-engine', async (_event) => {
+    if (engineInstallPromise) return { error: '已有安装任务在进行中' };
+    // v4.4：model 只表示运行模式，具体本地模型 id 在 vlmModel
+    const vlmModel = (predictController && predictController.config.get('vlmModel')) || 'qwen2.5-vl-3b';
+    // v4.7：已指定本地 GGUF 则跳过 2GB 模型下载，只补 llama-server / mmproj
+    engineInstallPromise = llamaEngine.ensure({
+      appDir: app.getPath('userData'),
+      model: vlmModel,
+      modelPath: (predictController && predictController.config.get('vlmModelPath')) || '',
+      mmprojPath: (predictController && predictController.config.get('vlmMmprojPath')) || '',
+      onProgress: (p) => safeSend(mainWindow && mainWindow.webContents, 'buddy:predict:engine-progress', p || {}),
+    }).then(
+      (status) => { engineInstallPromise = null; return { status }; },
+      (e) => { engineInstallPromise = null; return { error: e.message }; }
+    );
+    return engineInstallPromise;
+  });
+
+  // v4.2：主动预测「现在就看一眼屏幕」（桌宠点击 / 设置页按钮 / 巡检共用）
+  handle('buddy:predict:now', async () => runProactivePredict());
+  // v4.2：桌宠巡检间隔（分钟，0=关闭）
+  handle('buddy:predict:set-patrol', (_event, minutes) => {
+    const m = Math.max(0, Math.min(120, Number(minutes) || 0));
+    getPredict().config.set({ proactivePatrolMinutes: m });
+    return getPredict().getStatus();
+  });
+
+  // ---- 桌宠猫咪（v4.1）：最小化主窗口为桌面小猫，预测浮层弹在猫旁边 ----
+  handle('buddy:pet:minimize', async () => {
+    if (!pet) throw new Error('桌宠未初始化');
+    const bounds = await pet.show();
+    if (mainWindow) { try { mainWindow.hide(); } catch (_) {} }
+    try { pet.speak('喵～ 想我的时候就点点我！'); } catch (_) {}
+    return { ok: true, bounds };
+  });
+  handle('buddy:pet:restore', async () => {
+    restoreMainWindow();
+    return { ok: true };
+  });
+  handle('buddy:pet:hide', async () => {
+    if (pet) pet.hide();
+    return { ok: true };
+  });
+  handle('buddy:pet:status', () => ({
+    available: Boolean(pet && pet.available),
+    visible: pet ? pet.isVisible() : false,
+  }));
+
+  // v4.7：本地推理模型（GGUF）—— 让用户直接指定已下载好的文件，跳过 2GB 下载
+  handle('buddy:predict:model-pick', async () => {
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: '选择本地 GGUF 推理模型',
+      properties: ['openFile'],
+      filters: [{ name: 'llama.cpp GGUF 模型', extensions: ['gguf'] }, { name: '所有文件', extensions: ['*'] }],
+    });
+    if (r.canceled || !r.filePaths.length) return { canceled: true };
+    const file = r.filePaths[0];
+    if (!/\.gguf$/i.test(file)) return { error: '不是 GGUF 模型文件（.gguf）' };
+    getPredict().config.set({ vlmModelPath: file });
+    getPredict().resetRunner();
+    return { ok: true, path: file };
+  });
+  handle('buddy:predict:mmproj-pick', async () => {
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: '选择视觉投影文件（mmproj，通常文件名以 mmproj 开头）',
+      properties: ['openFile'],
+      filters: [{ name: 'mmproj GGUF', extensions: ['gguf'] }, { name: '所有文件', extensions: ['*'] }],
+    });
+    if (r.canceled || !r.filePaths.length) return { canceled: true };
+    const file = r.filePaths[0];
+    getPredict().config.set({ vlmMmprojPath: file });
+    getPredict().resetRunner();
+    return { ok: true, path: file };
+  });
+  handle('buddy:predict:model-reset', () => {
+    getPredict().config.set({ vlmModelPath: '', vlmMmprojPath: '' });
+    getPredict().resetRunner();
+    return { ok: true };
+  });
+
+  // v4.6：桌宠本地模型导入（支持 Cubism 3/4/5 的 *.model3.json 文件夹）
+  handle('buddy:pet:model-pick', async () => {
+    if (!pet) throw new Error('桌宠未初始化');
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: '选择 Live2D 模型文件夹（内含 .model3.json）',
+      properties: ['openDirectory'],
+    });
+    if (r.canceled || !r.filePaths.length) return { canceled: true };
+    const res = pet.setModel(r.filePaths[0]);
+    return { ok: true, file: res.file, dir: r.filePaths[0] };
+  });
+  handle('buddy:pet:model-reset', async () => {
+    if (!pet) throw new Error('桌宠未初始化');
+    return pet.clearModel();
+  });
+  handle('buddy:pet:model-status', () => {
+    const m = pet ? pet.getModel() : null;
+    return {
+      custom: Boolean(m),
+      name: m ? m.file : 'Hiyori.model3.json（内置）',
+      dir: m ? m.dir : '',
+    };
+  });
 }
 
 function builtinSkillsDir() {
@@ -911,6 +1124,79 @@ async function bootstrap() {
     builtinSkillsDir: builtinSkillsDir(),
     fetchImpl: buddyFetchImpl
   });
+
+  // ---- 预测模式（v4.0）：事件驱动主动预判 ----
+  // 所有依赖惰性加载，初始化失败不应拖垮主连接流程。
+  try {
+    const { PredictController } = require('./predict/predict-controller');
+    const { captureActiveWindow } = require('./predict/capture');
+    const { PredictPanel } = require('./predict/predict-panel');
+    const { ActionExecutor } = require('./predict/action-executor');
+    const { LocalModelRunner } = require('./predict/local-model-runner');
+    const llama = require('./predict/llama-engine');
+    const { getForegroundWindowInfo } = require('./predict/win-info');
+    const { addDefenderExclusion } = require('./predict/behavior-hooks');
+
+    const panel = new PredictPanel({
+      logger,
+      // 桌宠可见时，预测浮层优先弹在猫咪旁边（pet 在下方惰性创建）
+      anchorProvider: () => (pet ? pet.panelAnchor() : null),
+    });
+    const actionExecutor = new ActionExecutor({ clipboard: require('electron').clipboard, logger });
+    predictController = new PredictController({
+      appDir: userData,
+      logger,
+      capture: { captureActiveWindow },
+      panel,
+      actionExecutor,
+      resolveWindow: async () => getForegroundWindowInfo(),
+      // 远端预测模式（model='remote'）需要通道客户端。manager.channel 在通道模式连接后才有值，
+      // predict-controller._analyze 在运行时通过 resolveChannel 惰性取最新的，不锁死在构造时刻。
+      resolveChannel: () => (manager && manager.channel ? manager.channel : null),
+      buildRunner: (cfg) => {
+        const server = llama.findLlamaServer(userData);
+        const vlmModel = cfg.get('vlmModel') || 'qwen2.5-vl-3b';
+        // v4.7：用户指定的本地 GGUF / mmproj 优先
+        const modelPath = llama.findVlmModel(userData, vlmModel, cfg.get('vlmModelPath'))
+          || llama.findVlmModel(userData, 'qwen2.5-vl-3b');
+        const mmproj = llama.findMmproj(userData, cfg.get('vlmMmprojPath'));
+        if (!server || !modelPath) return null;
+        return new LocalModelRunner({ llamaServerPath: server, modelPath, mmprojPath: mmproj, logger });
+      },
+    });
+    logger.info('predict-controller-ready');
+
+    // v4.0：读取 NSIS 安装向导写的授权文件，合并到 PredictConfig
+    try {
+      const { mergeInstallAuth } = require('./predict/install-wizard');
+      const authResult = mergeInstallAuth(userData, predictController.config, logger);
+      if (authResult) {
+        logger.info('install-auth-merged', { authorized: authResult.authorized, defenderExcluded: authResult.defenderExcluded });
+      }
+    } catch (e) {
+      logger.warn('install-auth-merge-failed', { error: e.message });
+    }
+
+    // v4.1：桌宠猫咪。v4.2：菜单「立即预测」走主动预测。v4.3：点猫弹菜单 + 自定义文案。
+    try {
+      const { DesktopPet } = require('./predict/desktop-pet');
+      pet = new DesktopPet({
+        logger,
+        dataDir: userData,
+        onPredict: () => runProactivePredict(),
+        onRestore: () => restoreMainWindow(),
+        onHide: () => logger.info('pet-hidden'),
+      });
+      logger.info('desktop-pet-ready');
+      startPetPatrol();
+    } catch (e) {
+      pet = null;
+      logger.warn('desktop-pet-init-failed', { error: e.message });
+    }
+  } catch (e) {
+    logger.error('predict-init-failed', { error: e.message });
+  }
+
   registerIpc();
   createWindow();
   logger.info('started', { version: app.getVersion(), userData, smoke: SMOKE_TEST });
@@ -919,6 +1205,8 @@ async function bootstrap() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  // v4.5：pet:// 特权协议必须在 app ready 之前注册（Live2D 模型 fetch 用）
+  try { require('./predict/desktop-pet').DesktopPet.registerSchemes(); } catch (_) {}
   app.on('second-instance', () => {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();

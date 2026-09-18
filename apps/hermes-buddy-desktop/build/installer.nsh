@@ -1,5 +1,5 @@
 ; =============================================================================
-; Hermes Buddy — NSIS 自定义钩子
+; Hermes Buddy - NSIS 自定义钩子
 ;
 ; 路径说明（重要，别再写错）：
 ;   真实 userData 是 %APPDATA%\@hermes\buddy-desktop
@@ -9,6 +9,10 @@
 ;
 ;   注意：%APPDATA%\Hermes 与 %LOCALAPPDATA%\hermes 是另一个 Hermes 应用，
 ;   本脚本一律不碰。
+;
+; v4.0 预测模式安装向导：
+;   安装完成后用 MessageBox 展示隐私承诺 + 授权询问 + 可选加 Defender 排除区。
+;   纯 NSIS 原生语法（StrCmp + 标签），不依赖 LogicLib / nsDialogs。
 ; =============================================================================
 
 ; -----------------------------------------------------------------------------
@@ -78,6 +82,49 @@
   !insertmacro BUDDY_CLEAR_UPDATER_CACHE
 
   DetailPrint "旧版本缓存已清理"
+
+  ; ---------------------------------------------------------------
+  ; v4.0 预测模式授权向导（安装后弹窗）
+  ;   静默安装跳过；交互安装弹 MessageBox 询问用户是否授权。
+  ;   纯 NSIS 原生语法（MessageBox + IDYES 标签跳转），不依赖 LogicLib。
+  ; ---------------------------------------------------------------
+  ; 检查是否静默安装：IfSilent 跳过向导
+  IfSilent predict_wizard_done
+
+  MessageBox MB_YESNO|MB_ICONQUESTION "Hermes Buddy v4.0 预测模式$\r$\n$\r$\nHermes 可以在你工作时主动递上一步建议。$\r$\n$\r$\n隐私承诺：$\r$\n  - 键盘只记录节奏（打字间隔），不记录按键内容$\r$\n  - 截图仅在内存中处理一帧，绝不落盘$\r$\n  - 行为日志只存模式元数据，不存任何文本$\r$\n  - 所有数据 7 天后自动清理，可随时一键关闭$\r$\n$\r$\n是否授权启用预测模式？（可随时在设置中关闭）" IDYES authorize_predict
+
+  ; 用户选「否」：不授权，继续安装
+  DetailPrint "预测模式未授权（默认关闭，可在设置中授权启用）"
+  Goto predict_wizard_done
+
+  authorize_predict:
+  ; 用户选「是」：写授权文件
+  CreateDirectory "$APPDATA\@hermes\buddy-desktop\predict"
+  FileOpen $0 "$APPDATA\@hermes\buddy-desktop\predict\install-auth.json" w
+  FileWrite $0 '{"authorized":true,"defenderExcluded":false}'
+  FileClose $0
+  DetailPrint "预测模式已授权（可在设置中随时关闭）"
+
+  ; 询问是否加 Defender 排除区
+  MessageBox MB_YESNO|MB_ICONQUESTION "是否将 Hermes Buddy 安装目录加入 Windows Defender 排除区？$\r$\n（推荐：防止全局钩子被 Defender 误拦）" IDYES add_defender_exclusion
+  Goto predict_wizard_done
+
+  add_defender_exclusion:
+  DetailPrint "正在添加 Windows Defender 排除区..."
+  ExecWait 'powershell -NoProfile -NonInteractive -Command "Add-MpPreference -ExclusionPath \"$INSTDIR\""' $0
+  ; $0 == 0 成功（NSIS ExecWait 返回 exit code）
+  StrCmp $0 0 defender_exclusion_ok
+  DetailPrint "Defender 排除区添加失败（可能需要管理员权限），请手动添加"
+  Goto predict_wizard_done
+
+  defender_exclusion_ok:
+  DetailPrint "Defender 排除区已添加: $INSTDIR"
+  ; 更新授权文件中的 defenderExcluded 为 true
+  FileOpen $0 "$APPDATA\@hermes\buddy-desktop\predict\install-auth.json" w
+  FileWrite $0 '{"authorized":true,"defenderExcluded":true}'
+  FileClose $0
+
+  predict_wizard_done:
 !macroend
 
 !macro customUnInstall

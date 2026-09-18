@@ -39,7 +39,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 #   1.2  错误帧带 code/hint、模型清单带 unsupported、上游拒绝模型时自动回退默认模型
 #   1.3  user_message 支持多模态 content（OpenAI content 数组），
 #        图片/文件/音视频（Win 端本地预处理后的派生内容）都能带过来
-CHANNEL_VERSION = "1.5"
+#   1.5  resume_session / sync_memory（结晶）
+#   2.0  预测模式远端推断：predict_request / predict_response（supports_predict）
+CHANNEL_VERSION = "2.0"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -689,6 +691,104 @@ def mock_llm(messages, tools):
     return {"content": "GUARD_PROBE_DONE", "tool_calls": []}
 
 
+# ----------------------------------------------------------------- 预测模式（2.0）：远端意图推断
+
+PREDICT_PROMPT = (
+    "你是 Hermes Buddy 的预测助手。用户在 Windows 电脑上工作，"
+    "我们检测到一类行为（如正在写文档、填表单、收集资料、查接口、阅读思考），"
+    "并可选地附上一张当前活动窗口截图。"
+    "请判断用户此刻最可能需要什么帮助，并用中文返回一个严格 JSON 对象："
+    '{"intent": "最可能的规则名", "confidence": 0到1之间的小数, '
+    '"suggestion": "一句简短的中文建议文案（不超过40字）", '
+    '"reason": "判断依据（一句话）"}。'
+    "intent 只能取以下之一：word_writing / data_entry / collecting_material / "
+    "api_lookup / reading_or_thinking。只输出 JSON，不要输出其它任何文字。"
+)
+
+
+def predict_intent(behavior, image_b64, model=None):
+    """2.0 预测模式：根据行为元数据（可选截图）让 LLM 判定意图并给建议。
+    返回 {intent, confidence, suggestion, reason}。mock 模式走脚本。"""
+    if MOCK_LLM:
+        return mock_predict(behavior)
+    rule = (behavior or {}).get("rule", "") or "word_writing"
+    ctx_lines = []
+    if isinstance(behavior, dict):
+        for k in ("rule", "windowClass", "appType", "exeName", "reason"):
+            v = behavior.get(k)
+            if v:
+                ctx_lines.append("%s: %s" % (k, v))
+    user_parts = [{
+        "type": "text",
+        "text": ("用户当前行为上下文：\n" + ("\n".join(ctx_lines) if ctx_lines else "(无)") +
+                 "\n\n请判断用户此刻最可能需要什么帮助，给出一个简短的建议文案。"),
+    }]
+    if image_b64:
+        # 客户端可能发 data:URL 或裸 base64；统一成 data URL 让 OpenAI 兼容端点识别
+        url = image_b64 if image_b64.startswith("data:") else "data:image/png;base64," + image_b64
+        user_parts.append({"type": "image_url", "image_url": {"url": url}})
+    messages = [
+        {"role": "system", "content": PREDICT_PROMPT},
+        {"role": "user", "content": user_parts},
+    ]
+    try:
+        r = call_llm(messages, [], lambda: False, model)
+    except UpstreamError as exc:
+        # 上游出错时退化为基于 rule 的兜底——客户端 predict-controller 也有兜底，这里双保险
+        return {"intent": rule, "confidence": 0.5,
+                "suggestion": "需要我帮你做点什么吗？",
+                "reason": "远端推断失败（%s），已降级" % exc.code}
+    return _parse_predict(r.get("content") or "", rule)
+
+
+def mock_predict(behavior):
+    rule = (behavior or {}).get("rule", "word_writing")
+    return {"intent": rule, "confidence": 0.85,
+            "suggestion": "（mock）要不要我帮你继续？", "reason": "mock 预测"}
+
+
+def _parse_predict(content, fallback_rule):
+    """从模型返回里剥出预测 JSON；拿不到就退化为基于 rule 的兜底。"""
+    fallback = {"intent": fallback_rule or "word_writing", "confidence": 0.6,
+                "suggestion": "需要我帮你做点什么吗？", "reason": ""}
+    if not content:
+        return fallback
+    try:
+        obj = json.loads(content)
+        if isinstance(obj, dict):
+            return _normalize_predict(obj, fallback_rule)
+    except Exception:  # noqa: BLE001
+        pass
+    # 退化：从文本里抽第一个 {...}
+    m = re.search(r"\{.*\}", content, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict):
+                return _normalize_predict(obj, fallback_rule)
+        except Exception:  # noqa: BLE001
+            pass
+    # 再退化：直接用原文当 suggestion
+    return {"intent": fallback_rule or "word_writing", "confidence": 0.5,
+            "suggestion": content.strip()[:200] or "需要我帮你做点什么吗？", "reason": ""}
+
+
+def _normalize_predict(obj, fallback_rule):
+    intent = str(obj.get("intent") or fallback_rule or "word_writing")
+    try:
+        conf = float(obj.get("confidence", 0.6))
+    except Exception:  # noqa: BLE001
+        conf = 0.6
+    if conf < 0 or conf > 1:
+        conf = max(0.0, min(1.0, conf))
+    return {
+        "intent": intent,
+        "confidence": conf,
+        "suggestion": str(obj.get("suggestion") or "需要我帮你做点什么吗？")[:400],
+        "reason": str(obj.get("reason") or "")[:400],
+    }
+
+
 # ----------------------------------------------------------------- WebSocket 帧编解码
 
 def ws_accept(key):
@@ -1033,7 +1133,9 @@ class WSConnection:
                         # 而不是只看到一句"上游不可达"。纯增量字段，老客户端忽略。
                         "upstream": _public_upstream(),
                         # 1.5：告诉客户端可以用 resume_session_id 恢复旧会话
-                        "supports_resume": True})
+                        "supports_resume": True,
+                        # 2.0：告诉客户端支持预测模式远端推断（predict_request）
+                        "supports_predict": True})
         try:
             while not self.closed:
                 frame = self.read_frame()
@@ -1136,6 +1238,29 @@ class WSConnection:
             # 1.5「结晶」：客户端把本机记忆/约定上传到服务端，归拢成跨会话/跨连接的持久知识。
             # 落盘到 HERMES_HOME/buddy-memory/，下次 Session 初始化时自动注入 system prompt。
             self._handle_sync_memory(msg)
+        elif t == "predict_request":
+            # 2.0 预测模式：行为元数据 + 可选截图 → 远端 LLM 意图推断。
+            # 与 user_message 不同，predict 是「无状态分类」，不碰 s.messages，
+            # 因此即使当前会话正在跑任务也可以并发发起，放进线程避免阻塞读循环。
+            behavior = msg.get("behavior") or {}
+            image = msg.get("image") or None
+            rule = (behavior or {}).get("rule", "word_writing")
+            model = (self.session.model if self.session else None)
+
+            def _run_predict():
+                try:
+                    result = predict_intent(behavior, image, model)
+                except Exception as exc:  # noqa: BLE001
+                    result = {"intent": rule, "confidence": 0.5,
+                              "suggestion": "需要我帮你做点什么吗？", "reason": "预测失败: %s" % exc}
+                sid = self.session.sid if self.session else ""
+                self.send_json({"type": "predict_response", "session": sid,
+                                "intent": result.get("intent"),
+                                "confidence": result.get("confidence", 0.5),
+                                "suggestion": result.get("suggestion", ""),
+                                "reason": result.get("reason", "")})
+
+            threading.Thread(target=_run_predict, daemon=True).start()
         else:
             self.send_json({"type": "error", "code": "unknown_type", "message": "未知消息类型: %s" % t})
 

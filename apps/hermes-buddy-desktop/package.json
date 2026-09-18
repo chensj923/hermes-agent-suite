@@ -1,6 +1,6 @@
 {
   "name": "@hermes/buddy-desktop",
-  "version": "3.7.0",
+  "version": "4.8.1",
   "description": "Windows desktop client and guided provisioning for Hermes Buddy",
   "author": "Hermes Agent Suite",
   "main": "src/main.js",
@@ -15,7 +15,19 @@
     "@hermes/connection": "*",
     "@hermes/provisioning": "*",
     "@hermes/capability-registry": "*",
-    "ssh2": "^1.16.0"
+    "ssh2": "^1.16.0",
+    "@tkomde/iohook": "1.1.7"
+  },
+  "iohook": {
+    "targets": [
+      "electron-133"
+    ],
+    "platforms": [
+      "win32"
+    ],
+    "arches": [
+      "x64"
+    ]
   },
   "devDependencies": {
     "electron": "35.7.5",
@@ -42,7 +54,9 @@
       {
         "from": "server-deploy",
         "to": "server-deploy",
-        "filter": ["**/*.tar.gz"]
+        "filter": [
+          "**/*.tar.gz"
+        ]
       }
     ],
     "win": {

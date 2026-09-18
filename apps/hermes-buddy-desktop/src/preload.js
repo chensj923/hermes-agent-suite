@@ -107,7 +107,36 @@ const api = {
   downloadUpdate: (info) => invoke('buddy:update:download', info || {}),
   installUpdate: () => invoke('buddy:update:install'),
   onUpdateProgress: (handler) => subscribe('buddy:update:progress', handler),
-  openExternal: (url) => invoke('buddy:open-external', url)
+  openExternal: (url) => invoke('buddy:open-external', url),
+
+  // ---- 预测模式（v4.0） ----
+  predictStatus: () => invoke('buddy:predict:status'),
+  predictEnable: () => invoke('buddy:predict:enable'),
+  predictDisable: () => invoke('buddy:predict:disable'),
+  predictOneClickOff: () => invoke('buddy:predict:one-click-off'),
+  predictSetModel: (model) => invoke('buddy:predict:set-model', model),
+  predictSetSensitivity: (s) => invoke('buddy:predict:set-sensitivity', s),
+  predictSetAuthorized: (v) => invoke('buddy:predict:set-authorized', v),
+  predictCrystallization: () => invoke('buddy:predict:crystallization'),
+  predictTrigger: (rule) => invoke('buddy:predict:trigger', rule),
+  predictEngineStatus: () => invoke('buddy:predict:engine-status'),
+  predictAv: (opts) => invoke('buddy:predict:av', opts || {}),
+  predictInstallEngine: () => invoke('buddy:predict:install-engine'),
+  predictModelPick: () => invoke('buddy:predict:model-pick'),
+  predictMmprojPick: () => invoke('buddy:predict:mmproj-pick'),
+  predictModelReset: () => invoke('buddy:predict:model-reset'),
+  onPredictEngineProgress: (handler) => subscribe('buddy:predict:engine-progress', handler),
+  predictNow: () => invoke('buddy:predict:now'),
+  predictSetPatrol: (minutes) => invoke('buddy:predict:set-patrol', minutes),
+
+  // ---- 桌宠猫咪（v4.1） ----
+  petMinimize: () => invoke('buddy:pet:minimize'),
+  petRestore: () => invoke('buddy:pet:restore'),
+  petHide: () => invoke('buddy:pet:hide'),
+  petStatus: () => invoke('buddy:pet:status'),
+  petModelPick: () => invoke('buddy:pet:model-pick'),
+  petModelReset: () => invoke('buddy:pet:model-reset'),
+  petModelStatus: () => invoke('buddy:pet:model-status')
 };
 
 contextBridge.exposeInMainWorld('buddyApi', api);

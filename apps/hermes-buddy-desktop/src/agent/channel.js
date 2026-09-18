@@ -29,8 +29,11 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
  * 加新协议能力（新的消息类型）时记得同步抬这个版本号。
  * 1.3：user_message 支持多模态 content（OpenAI content 数组），图片/文件/音视频
  *       预处理后的派生内容都归一成 content 发过来，取代原先的纯 text。
+ * 2.0：新增预测模式的远端推断——predict_request / predict_response。老服务端（1.5）
+ *       没有 predict 能力，握手时通过 welcome 的 supports_predict 标志区分；客户端
+ *       在远端模式下没有该能力时退化为本地/兜底，不会整条挂掉（见 predict-controller）。
  */
-const REQUIRED_CHANNEL_VERSION = '1.5';
+const REQUIRED_CHANNEL_VERSION = '2.0';
 
 /** 解析 "1.1" / "1" / "v2.0.3" 这类版本号，取 major.minor 比较。 */
 function parseVersion(value) {
@@ -124,10 +127,12 @@ class ChannelClient {
     this.pendingModels = null; // 当前 list_models 的 { resolve, reject }
     this.pendingResume = null;  // 当前 resume_session 的 { resolve, reject }
     this.pendingSync = null;  // 当前 sync_memory 的 { resolve, reject }
+    this.pendingPredict = null; // 当前 predict_request 的 { resolve, reject }
     this.serverVersion = '';   // 服务端 welcome 里声明的通道版本
     this.serverUpstream = '';  // 服务端实际在调的模型地址（出错时才知道该去查哪里）
     this._welcomed = false;    // 是否已收到 welcome（决定断连时该 resolve 还是 reject）
     this._supportsResume = false;  // 服务端是否支持 resume_session（1.5+）
+    this._supportsPredict = false;  // 服务端是否支持预测模式远端推断（2.0+）
     this.outdated = null;      // 版本不满足时置为 { server, required }，此时通道已断开
     this._rejectOpen = null;   // 握手阶段主动失败（如版本过旧）用
     this.fragmentOpcode = null;
@@ -276,6 +281,8 @@ class ChannelClient {
       if (msg.upstream) this.serverUpstream = String(msg.upstream);
       // 1.5：服务端 welcome 里带 supports_resume=true 表示可以 resume_session
       this._supportsResume = Boolean(msg.supports_resume);
+      // 2.0：服务端 welcome 里带 supports_predict=true 表示可以 predict_request
+      this._supportsPredict = Boolean(msg.supports_predict);
       if (!versionAtLeast(serverVersion, REQUIRED_CHANNEL_VERSION)) {
         this.outdated = { server: this.serverVersion || '未知', required: REQUIRED_CHANNEL_VERSION };
         const err = new Error(
@@ -318,6 +325,20 @@ class ChannelClient {
         this.pendingSync = null;
         if (msg.ok) p.resolve({ ok: true, scope: msg.scope, file: msg.file });
         else p.reject(new Error(msg.error || '同步失败'));
+      }
+      return;
+    }
+    if (msg.type === 'predict_response') {
+      // 2.0 预测模式：predict_request 的应答
+      if (this.pendingPredict) {
+        const p = this.pendingPredict;
+        this.pendingPredict = null;
+        p.resolve({
+          intent: msg.intent,
+          confidence: Number(msg.confidence) || 0,
+          suggestion: msg.suggestion,
+          reason: msg.reason,
+        });
       }
       return;
     }
@@ -513,6 +534,42 @@ class ChannelClient {
   }
 
   /**
+   * 2.0 预测模式：把行为上下文（可选截图）发给服务端做多模态意图推断。
+   * 服务端（buddy-channel.py 2.0+）用 LLM 判定意图并回 predict_response。
+   * 服务端不支持时（welcome 没带 supports_predict）抛出 channel_no_predict，
+   * 上层 predict-controller 会据此退化为本地/兜底，不会整条挂掉。
+   * 返回 Promise<{intent,confidence,suggestion,reason}>。
+   */
+  async predict(behaviorContext, imageBase64) {
+    this._assertUsable();
+    await this.connect();
+    if (!this._supportsPredict) {
+      const err = new Error('当前服务端不支持预测模式远端推断（predict_request）。请在服务端重新部署 buddy-channel 2.0+。');
+      err.code = 'channel_no_predict';
+      throw err;
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        this.pendingPredict = null;
+        reject(new Error('预测推断超时（服务端 30 秒无响应）'));
+      }, 30000);
+      this.pendingPredict = {
+        resolve: (r) => { if (settled) return; settled = true; clearTimeout(timer); resolve(r); },
+        reject: (e) => { if (settled) return; settled = true; clearTimeout(timer); reject(e); },
+      };
+      const payload = { type: 'predict_request', session: this.sessionId, behavior: behaviorContext || {} };
+      if (imageBase64) payload.image = imageBase64;
+      this.send(payload);
+    });
+  }
+
+  /** 服务端是否支持预测模式远端推断（2.0+）。 */
+  get supportsPredict() { return this._supportsPredict; }
+
+  /**
    * 向服务端要模型清单。服务端会去上游（buddy-proxy.env / config.yaml 指向的
    * OpenAI 兼容端点）拉 /models，失败则用 config.yaml 里声明的模型名兜底。
    *
@@ -584,6 +641,11 @@ class ChannelClient {
         ? '通道连接已断开（工具执行中中断，请手动重试以避免重复执行）'
         : '通道连接已断开';
       p.reject(new Error(msg));
+    }
+    if (this.pendingPredict) {
+      const p = this.pendingPredict;
+      this.pendingPredict = null;
+      p.reject(new Error('通道连接已断开'));
     }
     // 握手完成前断连必须 reject：之前这里无条件 resolve，导致「连不上」被当成连上了，
     // 后续发消息才暴露问题（表现为莫名其妙的失败）。

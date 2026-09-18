@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: #333;
+    background: #faf8f5;
+    padding: 14px;
+    user-select: none;
+  }
+  h2 { font-size: 14px; margin-bottom: 4px; }
+  p.hint { color: #888; font-size: 12px; margin-bottom: 8px; }
+  textarea {
+    width: 100%;
+    height: 150px;
+    resize: none;
+    border: 1px solid #ddd0c0;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font: 13px/1.7 "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #fff;
+    outline: none;
+  }
+  textarea:focus { border-color: #e8a33d; }
+  .row { margin-top: 10px; display: flex; gap: 8px; justify-content: flex-end; }
+  button {
+    padding: 6px 18px;
+    border-radius: 8px;
+    border: 1px solid #ddd0c0;
+    background: #fff;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button.primary { background: #f5a623; border-color: #f5a623; color: #fff; }
+  button.primary:hover { background: #e29412; }
+  #saved { color: #2e9e5b; font-size: 12px; opacity: 0; transition: opacity .2s; align-self: center; }
+  #saved.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <h2>🐱 桌宠文案</h2>
+  <p class="hint">每行一句，猫咪随机挑一句说给你听。清空全部会恢复默认文案。</p>
+  <textarea id="lines" placeholder="喵～ 有我在！&#10;今天也要加油哦"></textarea>
+  <div class="row">
+    <span id="saved">已保存 ✓</span>
+    <button id="cancel" type="button">取消</button>
+    <button id="save" class="primary" type="button">保存</button>
+  </div>
+  <script>
+    const ta = document.getElementById('lines');
+    const saved = document.getElementById('saved');
+    window.editorApi.getLines().then((lines) => { ta.value = (lines || []).join('\n'); });
+    document.getElementById('save').addEventListener('click', async () => {
+      await window.editorApi.saveLines(ta.value);
+      saved.classList.add('show');
+      setTimeout(() => window.close(), 500);
+    });
+    document.getElementById('cancel').addEventListener('click', () => window.close());
+  </script>
+</body>
+</html>

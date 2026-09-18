@@ -849,6 +849,13 @@ api.onMediaEngineProgress((progress) => {
   scrollToEnd();
 });
 
+// VLM 引擎安装进度（v4.1）：设置页开着时实时刷新进度行
+api.onPredictEngineProgress((progress) => {
+  if (!progress) return;
+  const node = document.getElementById('predict-engine-progress');
+  if (node && progress.message) { node.textContent = progress.message; node.dataset.tone = ''; }
+});
+
 function beginAssistantBubble() {
   state.pendingTools = new Map();
   const bubble = addMessage('assistant pending', '');
@@ -1842,6 +1849,7 @@ async function renderSettings() {
     skills: '技能',
     toolchain: '本机工具',
     media: '本地媒体引擎',
+    predict: '预测模式',
     workspace: '工作区',
     'gateway-diag': 'Gateway 诊断'
   };
@@ -1854,6 +1862,7 @@ async function renderSettings() {
     else if (state.settingsTab === 'skills') await renderSkillsTab();
     else if (state.settingsTab === 'toolchain') await renderToolchainTab();
     else if (state.settingsTab === 'media') await renderMediaTab();
+    else if (state.settingsTab === 'predict') await renderPredictTab();
     else if (state.settingsTab === 'workspace') await renderWorkspaceTab();
     else if (state.settingsTab === 'gateway-diag') await renderGatewayDiagTab();
   } catch (error) {
@@ -2262,6 +2271,483 @@ async function renderMediaTab() {
   });
 
   $('media-engine-opendir').addEventListener('click', () => { api.openMediaEngineDir(); });
+}
+
+// ---- 预测模式（v4.0）：事件驱动主动预判的设置面板 ----
+
+const PREDICT_RULES = ['word_writing', 'data_entry', 'collecting_material', 'api_lookup', 'reading_or_thinking'];
+const PREDICT_RULE_LABEL = {
+  word_writing: '写文档 / 码字',
+  data_entry: '填表单 / 录入',
+  collecting_material: '收集资料 / 复制',
+  api_lookup: '查接口 / 报错排查',
+  reading_or_thinking: '阅读 / 思考停顿'
+};
+const PREDICT_MODEL_OPTIONS = [
+  { value: 'local', label: '本地（本机小模型判断 + 思考，完全离线）' },
+  { value: 'remote', label: '远端（246 服务端大模型思考 + 解答）' },
+  { value: 'hybrid', label: '本地 + 远端（本地小模型判断触发，远端大模型思考解答）' }
+];
+
+async function renderPredictTab() {
+  const status = await api.predictStatus().catch(() => null);
+  const engine = await api.predictEngineStatus().catch(() => null);
+  const av = await api.predictAv({}).catch(() => ({ antivirus: [] }));
+  const crystal = (status && status.crystallization) || {};
+  const on = !!(status && status.enabled);
+  const auth = !!(status && status.authorized);
+
+  el.contextBody.innerHTML = `
+    <h2>预测模式（v4.0）</h2>
+    <p class="hint">Hermes 在本机"看"你做什么，在合适的时机主动递上一步建议——写代码卡住时递上续写、填表时递上字段、复制资料时递上整理。全程本地：键盘只记节奏、截图只在内存里一帧不落盘、行为日志只存"模式"元数据，7 天自动清理，随时一键关闭。</p>
+
+    <div id="predict-state" class="predict-state"></div>
+    <div id="predict-enable-row" class="predict-enable-row"></div>
+
+    <section id="predict-config" hidden>
+      <h3>模型与灵敏度</h3>
+      <label class="settings-field">运行模式
+        <select id="predict-model"></select>
+      </label>
+      <p class="hint">
+        <b>本地</b>：本机小模型既判断触发、也思考解答，全程离线。<br>
+        <b>远端</b>：截图与行为上下文发给 246 服务端大模型，本机不跑模型。<br>
+        <b>本地 + 远端</b>（推荐）：本地小模型只判断「该不该打扰」，判定值得触发后交给远端大模型思考解答 —— 触发判断快、解答质量高。
+      </p>
+      <label class="settings-field">灵敏度（数值越小越容易触发）
+        <input id="predict-sensitivity" type="number" min="0.1" step="0.1">
+      </label>
+      <div class="settings-actions">
+        <button class="ghost" id="predict-test" type="button">测试触发一次</button>
+      </div>
+      <div class="settings-status" id="predict-model-status" role="status"></div>
+
+      <h3>偏好结晶（只存模式，不存内容）</h3>
+      <div id="predict-stats" class="predict-stats"></div>
+    </section>
+
+    <section>
+      <h3>杀软兼容</h3>
+      <div id="predict-av" class="predict-av"></div>
+    </section>
+
+    <section>
+      <h3>隐私与退出</h3>
+      <p class="hint">一键关闭会立即停止钩子、停止本地模型，并把授权和所有行为日志一并清空（不可恢复）。</p>
+      <div class="settings-actions">
+        <button class="ghost danger" id="predict-off" type="button">一键关闭预测模式</button>
+      </div>
+    </section>
+
+    <section>
+      <h3>桌宠猫咪</h3>
+      <p class="hint">把主窗口收成一只常驻桌面的 Live2D 小人（会呼吸、眨眼、自己动，可拖动，角色外不挡桌面点击）。<b>点一下弹出菜单</b>：立即预测、修改文案、唤出主窗口。预测建议会直接弹在它旁边。</p>
+      <div class="settings-actions">
+        <button class="primary" id="pet-minimize" type="button">最小化为桌宠猫咪 🐱</button>
+        <button class="ghost" id="pet-show" type="button" hidden>显示桌宠</button>
+        <button class="ghost" id="predict-now" type="button">现在主动预测一次 🔮</button>
+      </div>
+      <div class="settings-status" id="pet-status" role="status"></div>
+      <p class="hint">当前模型：<b id="pet-model-name">…</b></p>
+      <div class="settings-actions">
+        <button class="ghost" id="pet-model-pick" type="button">导入本地模型…</button>
+        <button class="ghost" id="pet-model-reset" type="button">恢复内置模型</button>
+      </div>
+      <p class="hint">支持的模型：<b>Cubism 3 / 4 / 5 格式</b>的 Live2D 模型文件夹（内含 <code>.model3.json</code> 入口文件），如 Live2D 官方免费示例 <b>Hiyori / Haru / Natori / Mark / Mao</b> 等（live2d.com 官网 Sample 页可下载）。不支持 Cubism 2 旧格式（<code>.model.json</code>）、VRM / Live3D / MMD 模型。内置模型为官方示例 Hiyori，无需下载。</p>
+      <label class="settings-field">桌宠主动巡检（有模型时每隔 N 分钟主动看一次屏幕，有事才打扰）
+        <select id="predict-patrol">
+          <option value="0">关闭（默认）</option>
+          <option value="5">每 5 分钟</option>
+          <option value="10">每 10 分钟</option>
+          <option value="15">每 15 分钟</option>
+          <option value="30">每 30 分钟</option>
+        </select>
+      </label>
+    </section>
+  `;
+
+  // 状态徽标
+  const stateEl = $('predict-state');
+  stateEl.dataset.state = on ? 'on' : 'off';
+  stateEl.textContent = on ? '● 预测模式运行中' : (auth ? '○ 已授权，未启用' : '○ 未授权');
+
+  // 启用 / 授权行
+  const row = $('predict-enable-row');
+  if (on) {
+    const btn = document.createElement('button');
+    btn.className = 'primary';
+    btn.textContent = '停用预测模式';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      await api.predictDisable().catch(() => {});
+      renderPredictTab();
+    });
+    row.appendChild(btn);
+  } else if (auth) {
+    const btn = document.createElement('button');
+    btn.className = 'primary';
+    btn.textContent = '启用预测模式';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const r = await api.predictEnable().catch((e) => ({ error: e.message }));
+      if (r && r.error) { $('predict-model-status').textContent = '启用失败：' + r.error; $('predict-model-status').dataset.tone = 'error'; }
+      renderPredictTab();
+    });
+    row.appendChild(btn);
+  } else {
+    const note = document.createElement('p');
+    note.className = 'hint';
+    note.textContent = '启用前需阅读并同意隐私说明。';
+    const check = document.createElement('label');
+    check.className = 'perm-option';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.id = 'predict-ack';
+    const span = document.createElement('span');
+    span.textContent = '我已阅读并同意：键盘只记节奏、截图仅内存不落盘、行为日志只存模式元数据（7 天 TTL）、可随时一键关闭。';
+    check.append(cb, span);
+    const btn = document.createElement('button');
+    btn.className = 'primary';
+    btn.textContent = '授权并启用';
+    btn.addEventListener('click', async () => {
+      if (!cb.checked) {
+        $('predict-model-status').textContent = '请先勾选同意隐私说明';
+        $('predict-model-status').dataset.tone = 'warn';
+        return;
+      }
+      btn.disabled = true;
+      await api.predictSetAuthorized(true).catch(() => {});
+      const r = await api.predictEnable().catch((e) => ({ error: e.message }));
+      if (r && r.error) { $('predict-model-status').textContent = '启用失败：' + r.error; $('predict-model-status').dataset.tone = 'error'; }
+      renderPredictTab();
+    });
+    row.append(note, check, btn);
+  }
+
+  // 配置区（授权或启用后才展示）
+  const config = $('predict-config');
+  if (on || auth) config.hidden = false;
+
+  // 模型下拉
+  const modelSel = $('predict-model');
+  for (const o of PREDICT_MODEL_OPTIONS) {
+    const opt = document.createElement('option');
+    opt.value = o.value;
+    opt.textContent = o.label;
+    modelSel.appendChild(opt);
+  }
+  if (status && status.model && PREDICT_MODEL_OPTIONS.some((o) => o.value === status.model)) {
+    modelSel.value = status.model;
+  }
+  modelSel.addEventListener('change', async () => {
+    modelSel.disabled = true;
+    const r = await api.predictSetModel(modelSel.value).catch((e) => ({ error: e.message }));
+    if (r && r.error) { $('predict-model-status').textContent = '切换失败：' + r.error; $('predict-model-status').dataset.tone = 'error'; }
+    else { $('predict-model-status').textContent = '模型已切换'; $('predict-model-status').dataset.tone = 'ok'; }
+    modelSel.disabled = false;
+  });
+
+  // 灵敏度
+  const sens = $('predict-sensitivity');
+  sens.value = (status && status.sensitivity) || 1;
+  sens.addEventListener('change', async () => {
+    const r = await api.predictSetSensitivity(Number(sens.value)).catch((e) => ({ error: e.message }));
+    if (r && r.error) { $('predict-model-status').textContent = '灵敏度无效：' + r.error; $('predict-model-status').dataset.tone = 'error'; }
+    else { $('predict-model-status').textContent = '灵敏度已更新'; $('predict-model-status').dataset.tone = 'ok'; }
+  });
+
+  // 测试触发
+  $('predict-test').addEventListener('click', async () => {
+    $('predict-model-status').textContent = '正在模拟一次「写文档」触发…';
+    const r = await api.predictTrigger('word_writing').catch((e) => ({ error: e.message }));
+    if (r && r.error) { $('predict-model-status').textContent = '触发失败：' + r.error; $('predict-model-status').dataset.tone = 'error'; }
+    else { $('predict-model-status').textContent = '已触发（若未弹窗，可能是未达置信度门槛，属正常）'; $('predict-model-status').dataset.tone = 'ok'; }
+  });
+
+  // 引擎现状提示 + 一键安装引导（v4.1）
+  // v4.4：三档模式里 local / hybrid 都需要本地小模型，缺引擎时给安装入口
+  if (engine && status && (status.model === 'local' || status.model === 'hybrid')) {
+    const ready = engine.llamaServer && engine.llamaServer.ok && engine.model && engine.model.ok;
+    if (!ready) {
+      const sec = document.createElement('section');
+      sec.id = 'predict-engine-install';
+      const h = document.createElement('h3');
+      h.textContent = 'VLM 引擎';
+      const tip = document.createElement('p');
+      tip.className = 'hint';
+      const bits = [
+        'llama-server: ' + (engine.llamaServer && engine.llamaServer.ok ? '已安装' : '未安装'),
+        '模型 GGUF: ' + (engine.model && engine.model.ok ? '已安装' : '未安装')
+      ];
+      const need = status.model === 'hybrid'
+        ? '混合模式下本地小模型负责「判断该不该触发」，没装引擎会跳过筛选、直接交给远端思考'
+        : '本地模式下判断与思考都在本机完成，引擎是必需的';
+      tip.textContent = '当前模式需要本地小模型，但引擎未就绪（' + bits.join('，') + '）。' +
+        need + '。引擎约 18MB（llama.cpp）+ 2GB（Qwen2.5-VL-3B GGUF）；' +
+        '也可以先改用「远端」模式（由 246 服务端全权思考）。';
+      const actions = document.createElement('div');
+      actions.className = 'settings-actions';
+      const btn = document.createElement('button');
+      btn.className = 'primary';
+      btn.type = 'button';
+      btn.textContent = '一键安装 VLM 引擎';
+      const prog = document.createElement('div');
+      prog.className = 'settings-status';
+      prog.id = 'predict-engine-progress';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = '安装中…';
+        prog.textContent = '准备下载…';
+        prog.dataset.tone = '';
+        // 先订阅进度再发起，避免首条进度丢失
+        const r = await api.predictInstallEngine().catch((e) => ({ error: e.message }));
+        if (r && r.error) {
+          prog.textContent = '安装失败：' + r.error;
+          prog.dataset.tone = 'error';
+          btn.disabled = false;
+          btn.textContent = '重试安装';
+        } else {
+          prog.textContent = 'VLM 引擎就绪 ✓（回到设置页即可生效）';
+          prog.dataset.tone = 'ok';
+          btn.textContent = '安装完成 ✓';
+        }
+      });
+      actions.appendChild(btn);
+      sec.append(h, tip, actions, prog);
+      config.appendChild(sec);
+    }
+
+    // v4.7：本地推理模型（GGUF）—— 已经下好的就别再下载 2GB
+    const sec2 = document.createElement('section');
+    const h2 = document.createElement('h3');
+    h2.textContent = '本地推理模型（可自己指定）';
+    const modelLine = document.createElement('p');
+    modelLine.className = 'hint';
+    const mmLine = document.createElement('p');
+    mmLine.className = 'hint';
+    const st2 = document.createElement('div');
+    st2.className = 'settings-status';
+    function renderModelLines() {
+      const mp = (engine && engine.model && engine.model.path) || '';
+      const xp = (engine && engine.mmproj && engine.mmproj.path) || '';
+      modelLine.textContent = '主模型 GGUF：' + (mp || '（未指定，一键安装会自动下载约 2GB）');
+      modelLine.title = mp;
+      mmLine.textContent = '视觉投影 mmproj：' + (xp || '（未指定；缺了它模型看不懂截图）');
+      mmLine.title = xp;
+    }
+    renderModelLines();
+    const acts2 = document.createElement('div');
+    acts2.className = 'settings-actions';
+    const bModel = document.createElement('button');
+    bModel.className = 'ghost'; bModel.type = 'button'; bModel.textContent = '指定本地 GGUF 模型…';
+    const bMm = document.createElement('button');
+    bMm.className = 'ghost'; bMm.type = 'button'; bMm.textContent = '指定 mmproj…';
+    const bReset = document.createElement('button');
+    bReset.className = 'ghost'; bReset.type = 'button'; bReset.textContent = '恢复自动下载的模型';
+    bModel.addEventListener('click', async () => {
+      const r = await api.predictModelPick().catch((e) => ({ error: e.message }));
+      if (r && r.canceled) return;
+      if (r && r.error) { st2.textContent = '导入失败：' + r.error; st2.dataset.tone = 'error'; return; }
+      st2.textContent = '已切换到本地模型：' + r.path;
+      st2.dataset.tone = 'ok';
+      renderPredictTab();
+    });
+    bMm.addEventListener('click', async () => {
+      const r = await api.predictMmprojPick().catch((e) => ({ error: e.message }));
+      if (r && r.canceled) return;
+      if (r && r.error) { st2.textContent = '导入失败：' + r.error; st2.dataset.tone = 'error'; return; }
+      st2.textContent = '已指定视觉投影：' + r.path;
+      st2.dataset.tone = 'ok';
+      renderPredictTab();
+    });
+    bReset.addEventListener('click', async () => {
+      await api.predictModelReset().catch(() => {});
+      st2.textContent = '已恢复使用自动下载的模型';
+      st2.dataset.tone = 'ok';
+      renderPredictTab();
+    });
+    acts2.append(bModel, bMm, bReset);
+    const hint2 = document.createElement('p');
+    hint2.className = 'hint';
+    hint2.innerHTML = '支持 llama.cpp 兼容的 <b>GGUF 视觉模型</b>：推荐 <b>Qwen2.5-VL-3B-Instruct</b>（Q4_K_M，1.8GB，中文/截图理解最好），更轻可选 <b>SmolVLM2 2.2B</b>（2.3GB、更快）。' +
+      '手动指定需要两个文件：<b>主模型 GGUF</b> + <b>视觉投影 mmproj GGUF</b>（文件名通常以 mmproj 开头，缺它模型看不懂屏幕）。' +
+      '指定后点「一键安装 VLM 引擎」只会补 llama-server（约 18MB），<b>不再下载模型本体</b>。';
+    sec2.append(h2, modelLine, mmLine, acts2, st2, hint2);
+
+    // v4.8：手动下载直链 —— 内置下载器慢/断线时，用户可以自己用下载器下完再导入
+    const links = (engine && engine.links) || [];
+    if (links.length) {
+      const sec3 = document.createElement('section');
+      const h3 = document.createElement('h3');
+      h3.textContent = '手动下载地址';
+      const tip3 = document.createElement('p');
+      tip3.className = 'hint';
+      tip3.innerHTML = '内置下载器慢或断线时，可以自己用浏览器/下载工具下这两个文件，' +
+        '再用上面的「指定本地 GGUF 模型…」和「指定 mmproj…」导入（<b>两个都要</b>）。' +
+        '点击链接会用默认浏览器打开。';
+      sec3.append(h3, tip3);
+      for (const f of links) {
+        const box = document.createElement('div');
+        box.className = 'predict-link-row';
+        const cap = document.createElement('div');
+        cap.className = 'predict-link-cap';
+        cap.textContent = (f.role === 'mmproj' ? '视觉投影 mmproj' : '主模型') +
+          '：' + f.file + (f.bytes ? `　（${(f.bytes / 1024 / 1024).toFixed(0)} MB）` : '');
+        box.appendChild(cap);
+        const row = document.createElement('div');
+        row.className = 'settings-actions';
+        for (const s of f.sources) {
+          const a = document.createElement('button');
+          a.className = 'ghost'; a.type = 'button'; a.textContent = s.name;
+          a.title = s.url;
+          a.addEventListener('click', () => {
+            api.openExternal(s.url).catch(() => {});
+            // 同时把地址放到剪贴板，方便粘进下载工具
+            try { navigator.clipboard.writeText(s.url); } catch (_) {}
+            st2.textContent = '已打开浏览器，下载链接也已复制到剪贴板：' + s.url;
+            st2.dataset.tone = 'ok';
+          });
+          row.appendChild(a);
+        }
+        box.appendChild(row);
+        sec3.appendChild(box);
+      }
+      config.appendChild(sec3);
+    }
+
+    config.appendChild(sec2);
+  }
+
+  // 偏好结晶统计
+  const statsEl = $('predict-stats');
+  if (Object.keys(crystal).length === 0) {
+    statsEl.textContent = '（暂无数据，触发几次后会自动累积）';
+  } else {
+    const table = document.createElement('table');
+    table.className = 'predict-crystal-table';
+    const head = document.createElement('tr');
+    head.innerHTML = '<th>触发场景</th><th>触发</th><th>接受</th><th>拒绝</th><th>接受率</th><th>状态</th>';
+    table.appendChild(head);
+    for (const rule of PREDICT_RULES) {
+      const s = crystal[rule];
+      const tr = document.createElement('tr');
+      const rate = s ? Math.round((s.acceptRate || 0) * 100) : 0;
+      const statusText = s && s.retired ? '已退休' : (s ? '活跃' : '—');
+      tr.innerHTML = `<td>${PREDICT_RULE_LABEL[rule]}</td><td>${s ? s.triggers : 0}</td><td>${s ? s.accepts : 0}</td><td>${s ? s.rejects : 0}</td><td>${rate}%</td><td>${statusText}</td>`;
+      table.appendChild(tr);
+    }
+    statsEl.appendChild(table);
+  }
+
+  // 杀软
+  const avEl = $('predict-av');
+  const avList = (av && av.antivirus) || [];
+  if (!avList.length) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = '未检测到已知杀软（Windows Defender / 火绒 / 360）。';
+    avEl.appendChild(p);
+  } else {
+    for (const a of avList) {
+      const item = document.createElement('div');
+      item.className = 'tool-item';
+      item.dataset.ok = (a.key === 'defender') ? 'true' : 'false';
+      const name = document.createElement('div');
+      name.className = 'tool-item-name';
+      name.textContent = a.name;
+      item.appendChild(name);
+      if (a.key === 'defender') {
+        const btn = document.createElement('button');
+        btn.className = 'primary';
+        btn.textContent = '添加 Defender 排除区';
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          const r = await api.predictAv({ addExclusion: true }).catch(() => null);
+          if (r && r.defenderExcluded) { btn.textContent = '已添加排除区 ✓'; btn.dataset.done = 'true'; }
+          else { btn.textContent = '添加失败，请手动处理'; btn.disabled = false; }
+        });
+        item.appendChild(btn);
+      } else {
+        const note = document.createElement('p');
+        note.className = 'hint';
+        note.textContent = `检测到 ${a.name}：全局钩子（iohook）可能被拦截。启用后若收不到触发，请在该杀软中将 Hermes Buddy 加入信任 / 白名单。`;
+        item.appendChild(note);
+      }
+      avEl.appendChild(item);
+    }
+  }
+
+  // 一键关闭
+  $('predict-off').addEventListener('click', async () => {
+    if (!confirm('一键关闭预测模式？\n这将停止钩子与本地模型，并清空授权及所有行为日志（不可恢复）。')) return;
+    await api.predictOneClickOff().catch(() => {});
+    renderPredictTab();
+  });
+
+  // 桌宠猫咪（v4.1）：最小化主窗口为桌面小猫
+  const petStatusNode = $('pet-status');
+  const petShowBtn = $('pet-show');
+  try {
+    const ps = await api.petStatus();
+    if (ps && ps.visible) petShowBtn.hidden = false;
+  } catch (_) {}
+  $('pet-minimize').addEventListener('click', async () => {
+    const r = await api.petMinimize().catch((e) => ({ error: e.message }));
+    if (r && r.error) { petStatusNode.textContent = '桌宠启动失败：' + r.error; petStatusNode.dataset.tone = 'error'; return; }
+    petShowBtn.hidden = false;
+  });
+  petShowBtn.addEventListener('click', async () => {
+    await api.petRestore().catch(() => {});
+    petStatusNode.textContent = '主窗口已恢复（桌宠仍在桌面上等你）';
+    petStatusNode.dataset.tone = 'ok';
+  });
+
+  // 主动预测一次（v4.2）：不看规则、不受冷却，立刻看一眼屏幕
+  $('predict-now').addEventListener('click', async () => {
+    petStatusNode.textContent = '正在看一眼屏幕…';
+    petStatusNode.dataset.tone = '';
+    const r = await api.predictNow().catch((e) => ({ error: e.message }));
+    if (r && r.error) { petStatusNode.textContent = '预测失败：' + r.error; petStatusNode.dataset.tone = 'error'; }
+    else if (r && r.busy) { petStatusNode.textContent = '上一次分析还在进行中'; petStatusNode.dataset.tone = 'warn'; }
+    else if (r && r.shown) { petStatusNode.textContent = '已弹出建议：' + (r.suggestion || ''); petStatusNode.dataset.tone = 'ok'; }
+    else { petStatusNode.textContent = '看过了，这会儿好像没什么需要帮忙的'; petStatusNode.dataset.tone = ''; }
+  });
+
+  // 桌宠主动巡检间隔
+  const patrolSel = $('predict-patrol');
+  const patrolNow = status && status.proactivePatrolMinutes;
+  patrolSel.value = String(Number.isFinite(Number(patrolNow)) ? Number(patrolNow) : 0);
+  patrolSel.addEventListener('change', async () => {
+    await api.predictSetPatrol(Number(patrolSel.value)).catch(() => {});
+    petStatusNode.textContent = patrolSel.value === '0' ? '主动巡检已关闭' : `主动巡检：每 ${patrolSel.value} 分钟看一次`;
+    petStatusNode.dataset.tone = 'ok';
+  });
+
+  // 桌宠本地模型（v4.6）：显示当前模型 + 导入本地 Cubism 3/4/5 模型文件夹
+  const modelNameNode = $('pet-model-name');
+  async function refreshModelName() {
+    try {
+      const m = await api.petModelStatus();
+      modelNameNode.textContent = m && m.custom ? (m.name + '（本地）') : (m && m.name) || 'Hiyori.model3.json（内置）';
+      modelNameNode.title = (m && m.dir) || '';
+    } catch (_) { modelNameNode.textContent = 'Hiyori.model3.json（内置）'; }
+  }
+  refreshModelName();
+  $('pet-model-pick').addEventListener('click', async () => {
+    modelNameNode.textContent = '正在验证所选模型…';
+    const r = await api.petModelPick().catch((e) => ({ error: e.message }));
+    if (r && r.canceled) { refreshModelName(); return; }
+    if (r && r.error) { petStatusNode.textContent = '导入失败：' + r.error; petStatusNode.dataset.tone = 'error'; refreshModelName(); return; }
+    modelNameNode.textContent = (r.file || '') + '（本地）';
+    petStatusNode.textContent = '模型已切换，桌宠立即生效';
+    petStatusNode.dataset.tone = 'ok';
+  });
+  $('pet-model-reset').addEventListener('click', async () => {
+    await api.petModelReset().catch(() => {});
+    refreshModelName();
+    petStatusNode.textContent = '已恢复内置模型（Hiyori）';
+    petStatusNode.dataset.tone = 'ok';
+  });
 }
 
 async function renderWorkspaceTab() {

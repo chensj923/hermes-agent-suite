@@ -1,0 +1,183 @@
+'use strict';
+
+/**
+ * 预测浮窗（Electron 主进程专用）。
+ *
+ * 一个 frameless / transparent / alwaysOnTop 的 BrowserWindow，出现在鼠标旁，
+ * 展示「Hermes 觉得你可能需要…」的建议，让用户选：生成并插入 / 稍后 / 不再提示。
+ *
+ * 安全：浮窗只经 IPC 与主进程通信，永远不直连远端、不持有 API Key。
+ * 用户决策通过 predict-panel:decision 回传主进程，由控制器交给 action-executor 执行。
+ *
+ * 浮窗窗口常驻（懒创建），show() 幂等：多次触发复用同一窗口，避免反复创建开销。
+ */
+
+const path = require('path');
+
+let _electron = null;
+try { _electron = require('electron'); } catch (_) { /* node 环境 */ }
+
+const PANEL_WIDTH = 360;
+const PANEL_HEIGHT = 240;
+const SUGGEST_TIMEOUT_MS = 10000;   // 用户 10s 不点 = 视为「稍后」
+const THINKING_TIMEOUT_MS = 45000;  // 思考态最长挂 45s，超时自动收起（防止模型卡死留个转圈窗口）
+
+class PredictPanel {
+  /**
+   * @param {object} opts
+   * @param {object} [opts.logger]
+   * @param {string} [opts.preloadPath]
+   * @param {function} [opts.anchorProvider] ()=>({x,y,width,height})|null
+   *   返回桌宠 bounds 时，浮层优先弹在桌宠旁边（而不是鼠标旁）。
+   */
+  constructor({ logger, preloadPath, anchorProvider } = {}) {
+    this.logger = logger || { info() {}, warn() {}, error() {} };
+    this.preloadPath = preloadPath || path.join(__dirname, 'predict-panel-preload.js');
+    this.anchorProvider = anchorProvider || null;
+    this.win = null;
+    this._ready = false;
+    this._pending = null;     // { resolve }
+    this._timeout = null;
+    this._thinkingTimeout = null;
+    this._setupIpc();
+  }
+
+  _setupIpc() {
+    if (!_electron || this._ipcReady) return;
+    const { ipcMain } = _electron;
+    ipcMain.on('predict-panel:decision', (_event, payload) => {
+      const choice = (payload && payload.choice) || 'later';
+      this._resolve(choice);
+    });
+    this._ipcReady = true;
+  }
+
+  get available() { return !!_electron; }
+
+  _createWindow() {
+    const { BrowserWindow, screen } = _electron;
+    const win = new BrowserWindow({
+      width: PANEL_WIDTH,
+      height: PANEL_HEIGHT,
+      frame: false,
+      transparent: true,
+      alwaysOnTop: true,
+      resizable: false,
+      movable: false,
+      skipTaskbar: true,
+      show: false,
+      webPreferences: {
+        preload: this.preloadPath,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    win.loadFile(path.join(__dirname, 'predict-panel.html'));
+    win.on('closed', () => { this.win = null; this._ready = false; });
+    return win;
+  }
+
+  async _ensureReady() {
+    if (this.win && this._ready) return this.win;
+    if (!this.win) this.win = this._createWindow();
+    if (!this._ready) {
+      await new Promise((resolve) => {
+        this.win.webContents.once('did-finish-load', () => { this._ready = true; resolve(); });
+      });
+    }
+    return this.win;
+  }
+
+  /**
+   * 定位浮窗：桌宠可见时弹在猫咪旁边（优先右侧，放不下换左侧，再放不下贴屏幕边缘）；
+   * 否则跟旧行为一样弹在鼠标旁。两种来源都 clamp 到屏幕可用区内。
+   */
+  _position(win) {
+    const { screen } = _electron;
+    let anchor = null;
+    if (this.anchorProvider) {
+      try { anchor = this.anchorProvider(); } catch (_) { anchor = null; }
+    }
+    if (anchor && Number.isFinite(anchor.x) && Number.isFinite(anchor.y)) {
+      const disp = screen.getDisplayNearestPoint({ x: Math.round(anchor.x), y: Math.round(anchor.y) });
+      const area = disp.workArea;
+      let x = anchor.x + anchor.width + 12;
+      let y = anchor.y + (anchor.height - PANEL_HEIGHT) / 2;
+      if (x + PANEL_WIDTH > area.x + area.width) x = anchor.x - PANEL_WIDTH - 12;
+      if (x < area.x) x = area.x;
+      if (y + PANEL_HEIGHT > area.y + area.height) y = area.y + area.height - PANEL_HEIGHT;
+      if (y < area.y) y = area.y;
+      win.setPosition(Math.round(x), Math.round(y));
+      return;
+    }
+    const cursor = screen.getCursorScreenPoint();
+    const disp = screen.getDisplayNearestPoint(cursor);
+    const area = disp.workArea;
+    let x = cursor.x + 16;
+    let y = cursor.y + 16;
+    if (x + PANEL_WIDTH > area.x + area.width) x = cursor.x - PANEL_WIDTH - 16;
+    if (y + PANEL_HEIGHT > area.y + area.height) y = cursor.y - PANEL_HEIGHT - 16;
+    x = Math.max(area.x, Math.min(x, area.x + area.width - PANEL_WIDTH));
+    y = Math.max(area.y, Math.min(y, area.y + area.height - PANEL_HEIGHT));
+    win.setPosition(Math.round(x), Math.round(y));
+  }
+
+  _resolve(choice) {
+    if (this._timeout) { clearTimeout(this._timeout); this._timeout = null; }
+    const p = this._pending;
+    this._pending = null;
+    if (p) p.resolve(choice);
+    this._hide();
+  }
+
+  /**
+   * v4.4：先弹一个「思考中」的加载态浮窗（转圈 loading，无按钮）。
+   * 模型分析完后由 show() 复用同一窗口换成建议内容。不返回 Promise——不阻塞流水线。
+   */
+  async showThinking(text) {
+    if (!_electron) return;
+    const win = await this._ensureReady();
+    win.webContents.send('predict-panel:thinking', { text: text || '思考中…' });
+    this._position(win);
+    try { win.showInactive(); } catch (_) { win.show(); }
+    // 保险：分析卡死时不要让转圈窗口一直挂着
+    if (this._thinkingTimeout) clearTimeout(this._thinkingTimeout);
+    this._thinkingTimeout = setTimeout(() => {
+      this._thinkingTimeout = null;
+      if (this._pending) return;        // 已经在等用户决策，别误关
+      this._hide();
+      this.logger.warn('predict-panel-thinking-timeout');
+    }, THINKING_TIMEOUT_MS);
+  }
+
+  /**
+   * 展示一条建议，返回用户决策的 Promise。
+   * @param {object} suggestion { intent, suggestion, reason, confidence, action }
+   * @returns {Promise<'generate'|'later'|'never'>}
+   */
+  async show(suggestion) {
+    if (!_electron) return 'later';
+    const win = await this._ensureReady();
+    if (this._thinkingTimeout) { clearTimeout(this._thinkingTimeout); this._thinkingTimeout = null; }
+    return new Promise((resolve) => {
+      this._pending = { resolve };
+      win.webContents.send('predict-panel:suggestion', suggestion);
+      this._position(win);
+      win.show();
+      win.focus();
+      this._timeout = setTimeout(() => this._resolve('later'), SUGGEST_TIMEOUT_MS);
+    });
+  }
+
+  _hide() {
+    if (this.win) { try { this.win.hide(); } catch (_) {} }
+  }
+
+  destroy() {
+    this._resolve('later');
+    if (this.win) { try { this.win.destroy(); } catch (_) {} this.win = null; this._ready = false; }
+  }
+}
+
+module.exports = { PredictPanel, PANEL_WIDTH, PANEL_HEIGHT, SUGGEST_TIMEOUT_MS, THINKING_TIMEOUT_MS };
