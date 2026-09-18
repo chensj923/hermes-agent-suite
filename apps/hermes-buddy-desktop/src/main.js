@@ -19,6 +19,7 @@ const mediaEngines = require('./media-engines');
 // v4.0 预测模式：杀软检测 / Defender 排除区 / VLM 引擎查找（模块级 require 安全，实例化才可能在 bootstrap 失败）。
 const { detectAntivirus, addDefenderExclusion } = require('./predict/behavior-hooks');
 const llamaEngine = require('./predict/llama-engine');
+const { createTray, destroyTray, resolveCloseBehavior } = require('./tray');
 
 // 打包冒烟：启动 → 加载完成 → 退出，用于 CI 校验主进程与渲染层能起来。
 const SMOKE_TEST = process.argv.includes('--smoke-test');
@@ -32,6 +33,8 @@ let manager = null;
 let updater = null;
 let predictController = null;   // v4.0 预测模式编排器（bootstrap 中惰性创建）
 let pet = null;                 // v4.1 桌宠猫咪（bootstrap 中惰性创建）
+let trayInstance = null;        // v4.8.3 常驻系统托盘
+let isQuitting = false;         // 真正退出时置 true，关闭到托盘时保持 false
 let logger = { info() {}, warn() {}, error() {}, debug() {} };
 const pendingConfirms = new Map();
 
@@ -78,6 +81,13 @@ function createWindow() {
     if (EXTERNAL_ALLOWLIST.some((pattern) => pattern.test(url))) shell.openExternal(url);
     else logger.warn('external-blocked', { url });
     return { action: 'deny' };
+  });
+  // v4.8.3：关闭主窗口时隐藏到托盘常驻，不退出进程，保持预测/巡检继续运行。
+  mainWindow.on('close', (event) => {
+    if (resolveCloseBehavior({ isQuitting, hasTray: Boolean(trayInstance), platform: process.platform }) === 'hide-to-tray') {
+      event.preventDefault();
+      mainWindow.hide();
+    }
   });
   mainWindow.on('closed', () => { mainWindow = null; });
 
@@ -149,6 +159,13 @@ function startPetPatrol() {
     } catch (_) { /* 巡检失败不影响正常使用 */ }
   }, 60 * 1000);
   petPatrolTimer.unref?.();
+}
+
+function stopPetPatrol() {
+  if (petPatrolTimer) {
+    clearInterval(petPatrolTimer);
+    petPatrolTimer = null;
+  }
 }
 
 /**
@@ -1199,6 +1216,23 @@ async function bootstrap() {
 
   registerIpc();
   createWindow();
+
+  // v4.8.3：常驻系统托盘。主窗口隐藏/关闭后仍可通过托盘恢复，预测保持运行。
+  try {
+    trayInstance = createTray({
+      logger,
+      handlers: {
+        onShowMainWindow: restoreMainWindow,
+        onShowPet: () => { if (pet) pet.show().catch(() => {}); },
+        onProactivePredict: () => { runProactivePredict().catch(() => {}); },
+        onQuit: () => { isQuitting = true; app.quit(); },
+      },
+      hasPet: Boolean(pet),
+    });
+  } catch (e) {
+    logger.warn('tray-create-failed', { error: e.message });
+  }
+
   logger.info('started', { version: app.getVersion(), userData, smoke: SMOKE_TEST });
 }
 
@@ -1215,7 +1249,17 @@ if (!app.requestSingleInstanceLock()) {
   });
   app.whenReady().then(bootstrap);
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
-  app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+  app.on('before-quit', () => {
+    isQuitting = true;
+    try { predictController && predictController.disable().catch(() => {}); } catch (_) {}
+    try { stopPetPatrol(); } catch (_) {}
+    try { if (pet) pet.destroy(); } catch (_) {}
+    try { destroyTray(); trayInstance = null; } catch (_) {}
+  });
+  app.on('window-all-closed', () => {
+    // v4.8.3：有托盘时隐藏到后台常驻，保持预测/巡检运行；无托盘降级为原来退出行为。
+    if (!trayInstance && process.platform !== 'darwin') app.quit();
+  });
   process.on('uncaughtException', (error) => logger.error('uncaught-exception', { error: error.message }));
   process.on('unhandledRejection', (reason) => logger.error('unhandled-rejection', { error: String(reason) }));
 }
