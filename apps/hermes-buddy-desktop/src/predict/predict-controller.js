@@ -23,6 +23,17 @@ const { BehaviorDB } = require('./behavior-db');
 const { createBehaviorHooks, detectAntivirus } = require('./behavior-hooks');
 const { ActionExecutor } = require('./action-executor');
 
+/** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」，给它 8s 足够；超时/未热启就跳过，不阻塞远端推断。 */
+const LOCAL_SCREEN_TIMEOUT_MS = 8000;
+
+/** Promise 超时包装器。 */
+function _withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ]);
+}
+
 /** 规则 → 无模型时的兜底建议模板（model='none' 时使用）。 */
 const RULE_TEMPLATE = {
   word_writing: '要不要我帮你续写或润色这段文字？',
@@ -95,6 +106,8 @@ class PredictController {
     });
     await this.hooks.start();
     this._enabled = true;
+    // v4.8.2：后台预热本地模型，让 local/hybrid 的下次触发不走冷启动
+    this.warmLocalModel().catch(() => {});
     this.logger.info('predict-enabled');
     return this.getStatus();
   }
@@ -272,18 +285,29 @@ class PredictController {
   }
 
   /**
-   * 混合模式（v4.4）：本地小模型只负责判断「该不该触发」，
+   * 混合模式（v4.4 / v4.8.2）：本地小模型只负责判断「该不该触发」，
    * 判定值得打扰后再把上下文交给远端大模型做真正的思考与解答。
-   * 本地不可用 → 跳过筛选直接问远端；远端不可用 → 退回本地结论（都会弹窗，不静默）。
+   *
+   * v4.8.2 关键修正：本地模型只当「热缓存」用。默认 hybrid 模式下若本地 2GB VLM
+   * 还没启动，冷启动会拖慢首条预测数十秒；因此未热启/推理超时时直接跳过筛选，
+   * 先走远端，同时后台默默预热本地模型供下次触发使用。
    */
   async _hybridAnalyze(behaviorContext, imageBase64) {
     const threshold = Number(this.config.get('confidenceThreshold')) || 0.6;
     let localResult = null;
-    try {
-      localResult = await this._localAnalyze(behaviorContext, imageBase64);
-    } catch (e) {
-      // 本地引擎没装/推理失败：不经筛选，直接交给远端思考
-      this.logger.warn('hybrid-local-screen-skipped', { error: e.message });
+    if (this._isLocalWarm()) {
+      try {
+        localResult = await _withTimeout(
+          this._localAnalyze(behaviorContext, imageBase64),
+          LOCAL_SCREEN_TIMEOUT_MS,
+          '本地筛选模型超时'
+        );
+      } catch (e) {
+        // 本地筛选模型推理失败/超时：不经筛选，直接交给远端思考
+        this.logger.warn('hybrid-local-screen-skipped', { error: e.message });
+      }
+    } else {
+      this.logger.info('hybrid-local-cold, skip to remote');
     }
     if (localResult && Number(localResult.confidence) < threshold) {
       // 本地小模型判断「此刻不该打扰」：到此为止，不再惊动远端
@@ -316,6 +340,13 @@ class PredictController {
     if (!this.buildRunner) return null;
     this.modelRunner = this.buildRunner(this.config);
     return this.modelRunner;
+  }
+
+  /** 本地模型是否已热启（hybrid 模式用它决定是否参与筛选）。 */
+  _isLocalWarm() {
+    // 测试注入 predictFn 时视为「已就绪」，否则看真实 runner 是否已启动
+    if (typeof this._predictFn === 'function') return true;
+    return !!(this.modelRunner && this.modelRunner.started);
   }
 
   /**
@@ -368,7 +399,30 @@ class PredictController {
     this.config.set({ model });
     // 切换模型后释放旧 runner，下次触发重新懒建
     if (this.modelRunner) { try { this.modelRunner.stop(); } catch (_) {} this.modelRunner = null; }
+    // v4.8.2：切到 local/hybrid 时后台预热本地模型，避免首条触发被冷启动拖慢
+    if (model !== 'remote') {
+      this.warmLocalModel().catch(() => {});
+    }
     return this.getStatus();
+  }
+
+  /**
+   * v4.8.2：后台预热本地模型。启用 / 切到 local/hybrid 时调用，不阻塞主流程。
+   * 只有本地模型已安装且未启动时才拉起；remote 模式不预热。
+   */
+  async warmLocalModel() {
+    const mode = this.config.get('model');
+    if (mode === 'remote') return { ok: false, reason: 'remote 模式无需预热本地模型' };
+    const runner = this._runner();
+    if (!runner) return { ok: false, reason: '本地模型未安装' };
+    if (runner.started) return { ok: true, reason: '本地模型已就绪' };
+    try {
+      await runner.start();
+      return { ok: true, reason: '本地模型预热完成' };
+    } catch (e) {
+      this.logger.warn('predict-warm-local-failed', { error: e.message });
+      return { ok: false, reason: e.message };
+    }
   }
 
   setSensitivity(s) {

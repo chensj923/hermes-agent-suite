@@ -31,7 +31,7 @@ function noopLogger() {
  * @param {function} [opts.predictFn]   本地小模型 fake
  * @param {object|null} [opts.channel]  远端通道 fake（null = 通道未连）
  */
-function makeController({ model = 'hybrid', predictFn = null, channel = null } = {}) {
+function makeController({ model = 'hybrid', predictFn = null, channel = null, modelRunner = null } = {}) {
   const captured = { suggestion: null, analyzeCalls: 0, thinking: [] };
   const ctrl = new PredictController({
     appDir: tmpDir(),
@@ -46,6 +46,7 @@ function makeController({ model = 'hybrid', predictFn = null, channel = null } =
     actionExecutor: { execute: async () => ({ ok: true }) },
     predictFn,
     channel,
+    modelRunner,
   });
   ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6 });
   return { ctrl, captured };
@@ -169,4 +170,52 @@ test('走模型分析时先弹「思考中」加载态，再换成建议', async
   await ctrl.triggerRule('word_writing');
   assert.deepStrictEqual(captured.thinking, ['思考中…'], '分析前应先弹思考中');
   assert.ok(captured.suggestion, '分析完应换成建议');
+});
+
+// ---------- 5. v4.8.2 hybrid 冷启动优化 ----------
+
+test('hybrid：本地模型未热启 → 跳过筛选直接问远端', async () => {
+  const calls = [];
+  const channel = {
+    predict: async (ctx) => { calls.push(ctx); return { intent: 'word_writing', confidence: 0.9, suggestion: '帮你续写', reason: 'ok' }; },
+  };
+  const { ctrl, captured } = makeController({
+    model: 'hybrid',
+    channel,
+    predictFn: null,
+    modelRunner: { started: false },
+  });
+  await ctrl.triggerRule('word_writing');
+  assert.strictEqual(calls.length, 1, '本地未热启时应直接走远端');
+  assert.strictEqual(captured.suggestion.suggestion, '帮你续写');
+  assert.ok(!('localJudgment' in calls[0]), '跳过本地筛选时不应带 localJudgment');
+});
+
+test('hybrid：本地模型热启但超时 → 跳过筛选直接问远端', async () => {
+  const calls = [];
+  const channel = {
+    predict: async (ctx) => { calls.push(ctx); return { intent: 'word_writing', confidence: 0.9, suggestion: '帮你续写', reason: 'ok' }; },
+  };
+  const { ctrl, captured } = makeController({
+    model: 'hybrid',
+    channel,
+    predictFn: async () => new Promise(() => {}), // 永远挂起
+    modelRunner: { started: true },
+  });
+  await ctrl.triggerRule('word_writing');
+  assert.strictEqual(calls.length, 1, '本地筛选超时时应直接走远端');
+  assert.strictEqual(captured.suggestion.suggestion, '帮你续写');
+});
+
+test('warmLocalModel：已热启时直接返回，未安装时返回未安装', async () => {
+  const warm = { started: true, stop() {}, analyze() {} };
+  const { ctrl } = makeController({ model: 'hybrid', modelRunner: warm });
+  const r1 = await ctrl.warmLocalModel();
+  assert.strictEqual(r1.ok, true, '已热启应直接返回 ok');
+  assert.ok(/已就绪/.test(r1.reason));
+
+  const { ctrl: ctrl2 } = makeController({ model: 'hybrid', modelRunner: null, buildRunner: null });
+  const r2 = await ctrl2.warmLocalModel();
+  assert.strictEqual(r2.ok, false, '无 runner 且无 buildRunner 应返回未安装');
+  assert.ok(/未安装/.test(r2.reason));
 });
