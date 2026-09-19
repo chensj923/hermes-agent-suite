@@ -235,7 +235,9 @@ function createBehaviorHooks({ config, engine, db, logger, resolveWindow, onTrig
   });
   be.on('window_change', (p) => {
     if (!running) return;
-    const r = engine.handleEvent({ type: 'window_change', windowClass: p.windowClass });
+    // v4.10.1 遗漏修复：exeName 必须随事件进引擎，否则快照里永远是 null，
+    // 远端模型拿不到「前台进程名」这个关键事实。
+    const r = engine.handleEvent({ type: 'window_change', windowClass: p.windowClass, exeName: p.exeName });
     _maybeTrigger(r);
   });
   be.on('mouse_idle', (p) => {

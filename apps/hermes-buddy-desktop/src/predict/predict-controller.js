@@ -118,6 +118,9 @@ class PredictController {
     this.channel = opts.channel || null;
     this._resolveChannel = opts.resolveChannel || null;
     this.resolveWindow = opts.resolveWindow || (async () => null);
+    // v4.10.2：「生成并插入」的内容生成函数（main.js 注入，接远端通道）。
+    // 独立注入而非复用判断通道，测试环境不注入时保持旧兜底行为。
+    this._generateContentFn = opts.generateContentFn || null;
     this.buildRunner = opts.buildRunner || null;
     this._predictFn = opts.predictFn || null;  // 远端/测试用
     // v4.10.0：本机视觉描述函数（测试注入用；真实环境走 LocalModelRunner.describe）
@@ -203,10 +206,20 @@ class PredictController {
       if (r1.state !== 'ANALYZING') return;
 
       // 2) 截图（仅内存 buffer，不落盘）
+      //    v4.10.2：带上前台窗口标题，截图源优先匹配它（避免拿到后台/空白窗口）；
+      //    capture 内部还会隐藏本应用窗口，防止桌宠猫污染画面。
       let imageBase64 = null;
       if (this.capture) {
         try {
-          const shot = await this.capture.captureActiveWindow({ skipName: /hermes buddy|hermes-buddy/i });
+          let fgTitle = '';
+          try {
+            const wi = await this.resolveWindow();
+            fgTitle = (wi && wi.title) || '';
+          } catch (_) {}
+          const shot = await this.capture.captureActiveWindow({
+            skipName: /hermes buddy|hermes-buddy|桌宠|buddy/i,
+            fgTitle,
+          });
           imageBase64 = shot && shot.base64;
         } catch (e) {
           this.logger.warn('predict-capture-failed', { error: e.message });
@@ -330,12 +343,11 @@ class PredictController {
   _applyDecision(choice, rule, suggestion) {
     if (choice === 'generate') {
       this.engine.userDecision(true);
-      if (this.actionExecutor && suggestion && suggestion.action) {
-        this.actionExecutor.execute(suggestion.action).catch((e) => this.logger.warn('action-failed', { error: e.message }));
-      } else if (this.actionExecutor && suggestion && suggestion.suggestion) {
-        // 没有显式 action 时默认把建议文本回填剪贴板
-        this.actionExecutor.execute({ type: 'clipboard', text: suggestion.suggestion }).catch((e) => this.logger.warn('action-failed', { error: e.message }));
-      }
+      // v4.10.2：「生成并插入」不再把建议问句填进剪贴板（旧实现把
+      // "需要我帮你总结吗？"这种话术当成了"内容"，8 秒后还会被恢复机制
+      // 冲掉，用户点了等于没点）。改为真正调远端生成一段可粘贴的内容，
+      // 失败才退回旧的建议文案兜底。
+      this._generateAndDeliver(suggestion).catch((e) => this.logger.warn('generate-deliver-failed', { error: e.message }));
     } else if (choice === 'never') {
       // 不再提示：先按拒绝计入冷却（recordDecision 记一次拒绝），再退休该规则。
       // 注意：不要再次 recordDecision，否则拒绝数会被重复计数。
@@ -351,6 +363,63 @@ class PredictController {
   _buildAction(intent, suggestionText) {
     if (!suggestionText) return { type: 'noop' };
     return { type: 'clipboard', text: suggestionText };
+  }
+
+  /**
+   * v4.10.2：真正执行「生成并插入」——
+   * 走远端通道（stage=generate_content）基于屏幕观察 + 建议意图生成一段
+   * 可粘贴的正文内容，写入剪贴板且不被 8 秒恢复机制冲掉；
+   * 远端不可用/旧服务端无 content 字段时退回建议文案（保持旧兜底）。
+   */
+  async _generateAndDeliver(suggestion) {
+    let content = '';
+    // v4.10.2：内容生成走注入的 generateContentFn（main.js 里接远端通道）。
+    // 不直接复用 this.channel/_resolveChannel——那会跟判断阶段的请求共用
+    // 计数，测试断言「远端只被调一次」；且生成失败也不该影响主流程。
+    if (typeof this._generateContentFn === 'function') {
+      try {
+        const res = await this._generateContentFn({
+          stage: 'generate_content',
+          rule: (suggestion && suggestion.intent) || '',
+          suggestion: (suggestion && suggestion.suggestion) || '',
+          reason: (suggestion && suggestion.reason) || '',
+          screenObservation: this._lastObservation || '',
+        });
+        if (res && typeof res.content === 'string' && res.content.trim()) {
+          content = res.content.trim();
+          this.logger.info('predict-generate-ok', { chars: content.length });
+        } else {
+          this.logger.warn('predict-generate-no-content', { keys: res ? Object.keys(res) : null });
+        }
+      } catch (e) {
+        this.logger.warn('predict-generate-failed', { error: e.message });
+      }
+    } else {
+      this.logger.warn('predict-generate-no-fn');
+    }
+    // 兜底：生成不出真内容时退回建议文案（旧行为）
+    if (!content) content = (suggestion && suggestion.suggestion) || '';
+    if (!content) return;
+    if (this.actionExecutor) {
+      // clipboard-keep：不启动 8 秒恢复，用户粘之前内容一直在
+      await this.actionExecutor.execute({ type: 'clipboard-keep', text: content });
+    }
+    this._notifyGenerated(content.length);
+  }
+
+  /** 生成完成后的系统通知（Electron 主进程；测试/node 环境静默跳过）。 */
+  _notifyGenerated(chars) {
+    try {
+      const { Notification } = require('electron');
+      if (Notification && Notification.isSupported && Notification.isSupported()) {
+        const n = new Notification({
+          title: 'Hermes Buddy',
+          body: '已生成 ' + chars + ' 字并复制到剪贴板，直接粘贴即可使用',
+          silent: true,
+        });
+        try { n.show(); } catch (_) {}
+      }
+    } catch (_) { /* node --test 环境无 electron */ }
   }
 
   /** 本地或远端模型推断。mode: local | remote | hybrid */
@@ -420,6 +489,8 @@ class PredictController {
 
       const ctx = Object.assign({}, behaviorContext);
       if (observation) ctx.screenObservation = observation;
+      // v4.10.2：留一份观察描述，用户点「生成并插入」时作为生成上下文
+      this._lastObservation = observation;
       if (localJudgment) {
         ctx.localJudgment = { intent: localJudgment.intent, confidence: localJudgment.confidence };
         ctx.stage = 'deep_think';
@@ -694,7 +765,15 @@ class PredictController {
       let imageBase64 = null;
       if (this.capture) {
         try {
-          const shot = await this.capture.captureActiveWindow({ skipName: /hermes buddy|hermes-buddy/i });
+          let fgTitle = '';
+          try {
+            const wi = await this.resolveWindow();
+            fgTitle = (wi && wi.title) || '';
+          } catch (_) {}
+          const shot = await this.capture.captureActiveWindow({
+            skipName: /hermes buddy|hermes-buddy|桌宠|buddy/i,
+            fgTitle,
+          });
           imageBase64 = shot && shot.base64;
         } catch (e) {
           this.logger.warn('predict-now-capture-failed', { error: e.message });

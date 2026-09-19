@@ -46,7 +46,9 @@ test('model=none + 用户点「生成并插入」→ 剪贴板动作执行 + 引
   assert.ok(captured.suggestion, '应展示建议');
   assert.strictEqual(captured.suggestion.intent, 'word_writing');
   assert.ok(captured.actionCalls.length >= 1, '应执行至少一个动作');
-  const clip = captured.actionCalls.find((a) => a.type === 'clipboard');
+  // v4.10.2：「生成并插入」走真生成，无生成函数时兜底回填也改为 clipboard-keep
+  //（不被 8 秒恢复机制冲掉）
+  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep');
   assert.ok(clip, '应触发剪贴板回填');
   assert.ok(clip.text && clip.text.length > 0, '回填文本非空');
   // 引擎回到 IDLE，且 word_writing 记了一次接受
@@ -89,7 +91,7 @@ test('predictFn 高置信度 + 用户生成 → 经 capture 截图并回填', as
   });
   await ctrl.triggerRule('api_lookup');
   assert.strictEqual(captured.analyzeCalls, 1, '应调用一次模型');
-  assert.ok(captured.actionCalls.find((a) => a.type === 'clipboard' && /报错/.test(a.text)), '应回填模型生成的建议');
+  assert.ok(captured.actionCalls.find((a) => (a.type === 'clipboard' || a.type === 'clipboard-keep') && /报错/.test(a.text)), '应回填模型生成的建议');
 });
 
 test('本地模型未就绪（无 predictFn/buildRunner）→ 降级规则模板仍弹窗，不静默丢弃', async () => {
@@ -101,7 +103,7 @@ test('本地模型未就绪（无 predictFn/buildRunner）→ 降级规则模板
   assert.strictEqual(captured.suggestion.intent, 'api_lookup');
   assert.ok(/降级/.test(captured.suggestion.reason), 'reason 应注明降级原因');
   assert.ok(/未就绪/.test(captured.suggestion.reason), 'reason 应包含引擎未就绪信息');
-  const clip = captured.actionCalls.find((a) => a.type === 'clipboard');
+  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep');
   assert.ok(clip, '降级模板也应走剪贴板动作');
 });
 

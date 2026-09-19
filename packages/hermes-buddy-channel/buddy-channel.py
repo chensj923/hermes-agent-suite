@@ -712,6 +712,9 @@ PREDICT_PROMPT = (
     "绝不要建议「切换回文档」「回到写作」——用户根本没有离开。"
     "只有 screenObservation 明确说前台是任务视图/开始菜单/桌面等非工作界面时，"
     "才可以建议切回原来的工作。"
+    "信息不足规则：如果 screenObservation 里除了桌宠卡通形象/空白窗口之外"
+    "没有任何用户的工作内容，说明画面信息不可用，confidence 必须低于 0.3"
+    "（宁可不打扰，也不要凭空编一个建议）。"
     "请判断用户此刻最可能需要什么帮助，并用中文返回一个严格 JSON 对象："
     '{"intent": "最可能的规则名", "confidence": 0到1之间的小数, '
     '"suggestion": "一句简短的中文建议文案（不超过40字）", '
@@ -728,9 +731,16 @@ def predict_intent(behavior, image_b64, model=None):
     v4.10.0：截图默认已在客户端本地被 VL 模型转成文字（behavior.screenObservation），
     服务端不再依赖多模态能力——纯文本模型也能给出建议。image_b64 仅当用户显式
     开启 sendImageToServer 时才会有值（部署确实接了视觉模型时才用）。
+    v4.10.2：behavior.stage == 'generate_content' 时走内容生成分支，
+    为客户端「生成并插入」按钮产出真正可粘贴的正文。
     """
     if MOCK_LLM:
+        if isinstance(behavior, dict) and behavior.get("stage") == "generate_content":
+            return {"content": "（mock）这是生成的内容示例：围绕当前场景整理的要点草稿。"}
         return mock_predict(behavior)
+    # v4.10.2：内容生成分支（客户端「生成并插入」）
+    if isinstance(behavior, dict) and behavior.get("stage") == "generate_content":
+        return generate_content(behavior, model)
     rule = (behavior or {}).get("rule", "") or "word_writing"
     ctx_lines = []
     if isinstance(behavior, dict):
@@ -779,6 +789,51 @@ def mock_predict(behavior):
     rule = (behavior or {}).get("rule", "word_writing")
     return {"intent": rule, "confidence": 0.85,
             "suggestion": "（mock）要不要我帮你继续？", "reason": "mock 预测"}
+
+
+# v4.10.2：内容生成提示词——「生成并插入」按钮的真正实现。
+# 产出用户可直接粘贴的正文，而不是复述建议。
+GENERATE_PROMPT = (
+    "你是 Hermes Buddy 的内容生成器。用户刚在预测浮窗接受了建议（如总结要点、"
+    "继续写作、整理笔记），现在需要你直接生成可粘贴使用的正文内容。"
+    "你会收到：行为场景（rule）、当时的建议文案（suggestion）、以及本机视觉模型"
+    "对屏幕的文字描述（screenObservation，可能为空或只有概略信息）。"
+    "要求："
+    "1. 中文，直接给内容本身——不要寒暄、不要复述建议、不要问问题、不要输出 JSON；"
+    "2. 如果 screenObservation 能看出具体主题/标题，围绕它生成具体内容"
+    "（如：正文续写段、要点总结、步骤清单）；"
+    "3. 如果信息不足以生成具体内容，就按 intent 场景生成一个立即可用的提纲/模板，"
+    "并在第一行写【模板】二字；"
+    "4. 长度控制在 100~300 字。只输出正文。"
+)
+
+
+def generate_content(behavior, model=None):
+    """v4.10.2：为「生成并插入」生成真正的内容。返回 {content, intent}。"""
+    rule = (behavior or {}).get("rule", "") or "word_writing"
+    suggestion = (behavior or {}).get("suggestion", "") or ""
+    obs = (behavior or {}).get("screenObservation", "") or ""
+    reason = (behavior or {}).get("reason", "") or ""
+    user_text = (
+        "场景 rule: %s\n建议 suggestion: %s\n判断依据 reason: %s\n"
+        "屏幕观察 screenObservation: %s\n\n请生成用户可直接粘贴使用的内容。" % (
+            rule, suggestion or "(无)", reason or "(无)", obs or "(无)")
+    )
+    messages = [
+        {"role": "system", "content": GENERATE_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
+    try:
+        r = call_llm(messages, [], lambda: False, model, timeout=PREDICT_UPSTREAM_TIMEOUT)
+        content = (r.get("content") or "").strip()
+    except UpstreamError as exc:
+        return {"content": "", "intent": rule, "error": "upstream_%s" % exc.code}
+    if not content:
+        return {"content": "", "intent": rule, "error": "empty"}
+    # 防御：模型若仍输出了 JSON 围栏，剥掉
+    if content.startswith("```"):
+        content = content.strip("`").lstrip("json").strip()
+    return {"content": content, "intent": rule}
 
 
 def _parse_predict(content, fallback_rule):

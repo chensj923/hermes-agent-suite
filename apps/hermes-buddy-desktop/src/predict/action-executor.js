@@ -31,13 +31,18 @@ class ActionExecutor {
 
   /**
    * 执行一个建议动作。
-   * @param {object} action { type:'clipboard', text } 或 { type:'noop' }
+   * @param {object} action { type:'clipboard', text }              写入并在 restoreMs 后恢复旧值
+   *                          { type:'clipboard-keep', text }      写入且不恢复（v4.10.2，生成内容用）
+   *                          { type:'noop' }
    * @returns {Promise<{ok:boolean, type:string, message:string}>}
    */
   async execute(action) {
     const type = (action && action.type) || 'noop';
     if (type === 'clipboard') {
-      return this._fillClipboard(String(action.text || ''));
+      return this._fillClipboard(String(action.text || ''), false);
+    }
+    if (type === 'clipboard-keep') {
+      return this._fillClipboard(String(action.text || ''), true);
     }
     if (type === 'noop' || !action) {
       return { ok: true, type: 'noop', message: '无需执行' };
@@ -47,7 +52,7 @@ class ActionExecutor {
     return { ok: false, type, message: '不支持的动作类型：' + type };
   }
 
-  async _fillClipboard(text) {
+  async _fillClipboard(text, keep) {
     if (!text) return { ok: true, type: 'clipboard', message: '内容为空，跳过' };
     // 先保存旧值（含富文本/文件等类型，一律转字符串尽力保存）
     let previous = '';
@@ -57,6 +62,13 @@ class ActionExecutor {
       this.clipboard.writeText(text);
     } catch (e) {
       return { ok: false, type: 'clipboard', message: '写入剪贴板失败：' + e.message };
+    }
+
+    // keep=true（v4.10.2 生成内容）：不启动恢复定时器——用户点「生成并插入」
+    // 拿到的是真生成的内容，8 秒后被旧值冲掉等于功能白做。
+    if (keep) {
+      this.logger.info('clipboard-filled-keep', { len: text.length });
+      return { ok: true, type: 'clipboard-keep', message: '已将生成内容写入剪贴板（' + text.length + ' 字，不会自动恢复）' };
     }
 
     // 延迟恢复旧值，避免冲掉用户当前内容。恢复失败仅记录，不影响本次插入。
