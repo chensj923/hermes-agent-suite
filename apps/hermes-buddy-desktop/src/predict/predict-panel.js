@@ -20,7 +20,10 @@ try { _electron = require('electron'); } catch (_) { /* node 环境 */ }
 const PANEL_WIDTH = 360;
 const PANEL_HEIGHT = 240;
 const SUGGEST_TIMEOUT_MS = 10000;   // 用户 10s 不点 = 视为「稍后」
-const THINKING_TIMEOUT_MS = 23000;  // 思考态安全网：控制器 20s 超时后应已降级，面板 23s 兜底收尾
+// v4.9.0：hybrid 时间预算 = 本地筛选 18s + 远端推断最长 30s ≈ 48s；
+// 控制器 30s 超时仍会先降级，这里 45s 只是最后兜底（v4.8.9 实测 23s 会在
+// 远端正常推理中途掐断弹窗，造成「思考半天然后超时」）。
+const THINKING_TIMEOUT_MS = 45000;
 
 class PredictPanel {
   /**
