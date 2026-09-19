@@ -699,8 +699,10 @@ def mock_llm(messages, tools):
 
 PREDICT_PROMPT = (
     "你是 Hermes Buddy 的预测助手。用户在 Windows 电脑上工作，"
-    "我们检测到一类行为（如正在写文档、填表单、收集资料、查接口、阅读思考），"
-    "并可选地附上一张当前活动窗口截图。"
+    "我们检测到一类行为（如正在写文档、填表单、收集资料、查接口、阅读思考）。"
+    "重要：你只会收到文字，不会收到图片——用户本机的视觉模型已经把屏幕截图读成"
+    "了一段文字描述（screenObservation），你可能完全没有视觉能力，不要假设自己能看图。"
+    "如果连 screenObservation 都没有，就只依据行为元数据（窗口类型、应用名、触发规则）判断。"
     "请判断用户此刻最可能需要什么帮助，并用中文返回一个严格 JSON 对象："
     '{"intent": "最可能的规则名", "confidence": 0到1之间的小数, '
     '"suggestion": "一句简短的中文建议文案（不超过40字）", '
@@ -711,8 +713,13 @@ PREDICT_PROMPT = (
 
 
 def predict_intent(behavior, image_b64, model=None):
-    """2.0 预测模式：根据行为元数据（可选截图）让 LLM 判定意图并给建议。
-    返回 {intent, confidence, suggestion, reason}。mock 模式走脚本。"""
+    """2.0 预测模式：根据行为元数据（+ 可选截图）让 LLM 判定意图并给建议。
+    返回 {intent, confidence, suggestion, reason}。mock 模式走脚本。
+
+    v4.10.0：截图默认已在客户端本地被 VL 模型转成文字（behavior.screenObservation），
+    服务端不再依赖多模态能力——纯文本模型也能给出建议。image_b64 仅当用户显式
+    开启 sendImageToServer 时才会有值（部署确实接了视觉模型时才用）。
+    """
     if MOCK_LLM:
         return mock_predict(behavior)
     rule = (behavior or {}).get("rule", "") or "word_writing"
@@ -722,6 +729,16 @@ def predict_intent(behavior, image_b64, model=None):
             v = behavior.get(k)
             if v:
                 ctx_lines.append("%s: %s" % (k, v))
+        # 本机视觉模型对截图的文字描述（v4.10.0）——服务端没有视觉能力时这是唯一的画面信息
+        obs = (behavior.get("screenObservation") or "").strip()
+        if obs:
+            ctx_lines.append("screenObservation（本机视觉模型对当前屏幕的文字描述）: %s" % obs)
+        lj = behavior.get("localJudgment")
+        if isinstance(lj, dict) and lj.get("intent"):
+            ctx_lines.append("localJudgment: intent=%s confidence=%s（本机小模型的初判，仅供参考）"
+                             % (lj.get("intent"), lj.get("confidence")))
+        if behavior.get("proactive"):
+            ctx_lines.append("proactive: true（用户主动发起的预测，必须给出可用的建议）")
     user_parts = [{
         "type": "text",
         "text": ("用户当前行为上下文：\n" + ("\n".join(ctx_lines) if ctx_lines else "(无)") +

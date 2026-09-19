@@ -44,7 +44,11 @@ const SYSTEM_PROMPT = [
   '  "intent": "word_writing" | "data_entry" | "collecting_material" | "api_lookup" | "reading_or_thinking" | "none",',
   '  "confidence": 0.0 到 1.0 之间的数字，表示你判断的把握',
   '  "suggestion": "一句给用户的具体可操作建议（中文，≤40 字）；若 none 则为空字符串",',
-  '  "reason": "一句简短的推断依据（中文，≤30 字）"',
+  '  "reason": "一句简短的推断依据（中文，≤30 字）",',
+  '  "observation": "屏幕可见内容的客观文字描述（中文，≤120 字）。这份描述会被发给远端的纯文本模型，',
+  '                 它可能完全没有视觉能力，所以要把「屏幕上正在做什么」写清楚：应用类型、',
+  '                 文档/代码的主题或标题、光标附近的内容类型、是否有报错/空行/未完成的句子。',
+  '                 不要写推测结论，只写看得见的事实。"',
   '}',
   'intent 含义：',
   '  word_writing      在写长文/文档，可能卡在措辞',
@@ -53,6 +57,27 @@ const SYSTEM_PROMPT = [
   '  api_lookup        在 IDE 里反复切窗口查文档/报错，可能在调接口或排错',
   '  reading_or_thinking 长时间停在某编辑区没动，可能在思考或读内容',
   '  none              无明显卡顿，不要打扰',
+].join('\n');
+
+/**
+ * v4.10.0：纯描述提示词。
+ *
+ * 背景：不能假设服务端一定有多模态模型——很多部署（纯文本 LLM、coding 模型）
+ * 收到图片会直接报「Model only support text input」。因此截图一律先由本机的
+ * 视觉模型转成一段文字描述，服务端只做纯文本推理。
+ *
+ * 与 SYSTEM_PROMPT 的区别：这里不要 JSON、不要意图判断，只让模型客观描述
+ * 屏幕上有什么，输出自由度更高、描述更完整。
+ */
+const DESCRIBE_PROMPT = [
+  '你是运行在用户本机上的视觉描述助手。你会看到一张屏幕截图。',
+  '请用中文客观描述「用户此刻正在做什么」，供另一台没有视觉能力的文本模型据此给出建议。',
+  '要求：',
+  '1. 只描述画面上真实可见的信息，不要臆测、不要编造看不见的文字；',
+  '2. 包含：这是什么应用/界面、文档或代码的主题与标题、光标附近正在写的内容到哪一步了、',
+  '   是否出现报错信息/空白/未完成的句子/重复操作痕迹；',
+  '3. 不要输出任何建议，不要输出 JSON，直接输出 2~4 句中文，控制在 120 字以内；',
+  '4. 涉及隐私（密码框、私人聊天内容）时只写类型不写具体内容。',
 ].join('\n');
 
 class LocalModelRunner {
@@ -194,6 +219,62 @@ class LocalModelRunner {
     return this._parseResult(raw, behaviorContext);
   }
 
+  /**
+   * v4.10.0：把一帧截图「翻译」成客观文字描述，交给远端的纯文本模型。
+   *
+   * 为什么需要：服务端部署的模型未必支持多模态（实测 volcengine-coding 直接报
+   * 「Model only support text input」，纯文本 LLM 更不用说）。与其要求每个客户的
+   * 服务端都配视觉模型，不如在本机用 VL 模型把图读成文字——截图不出本机，
+   * 服务端只收到一段话，纯文本模型即可完成推理。
+   *
+   * @returns {string} 描述文本；无图 / 解析失败返回空串（调用方据此决定是否降级）。
+   */
+  async describe({
+    imageBase64, behaviorContext,
+    temperature = 0.2, maxTokens = 320, inferTimeoutMs = INFER_TIMEOUT_MS,
+  } = {}) {
+    if (!imageBase64) return '';
+    if (!this.started) await this.start();
+
+    const hint = behaviorContext && behaviorContext.rule
+      ? '（行为线索：' + behaviorContext.rule + '）' : '';
+    const content = [
+      { type: 'text', text: '请描述这张截图里用户正在做什么。' + hint },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,' + imageBase64 } },
+    ];
+    const body = {
+      model: 'local-vlm',
+      messages: [
+        { role: 'system', content: DESCRIBE_PROMPT },
+        { role: 'user', content },
+      ],
+      temperature,
+      max_tokens: maxTokens,
+    };
+    try {
+      const res = await this._http('POST', '/v1/chat/completions', body, inferTimeoutMs);
+      const payload = (res && res.body) || {};
+      const raw = payload.choices && payload.choices[0] && payload.choices[0].message &&
+        payload.choices[0].message.content;
+      return this._cleanDescription(raw);
+    } catch (e) {
+      (this.logger.warn || this.logger.error || function () {}).call(
+        this.logger, '[runner] 屏幕描述失败: ' + (e && e.message)
+      );
+      return '';
+    }
+  }
+
+  /** 清洗描述文本：剥代码围栏与常见前缀，限长，避免模型把整段 JSON 吐出来。 */
+  _cleanDescription(raw) {
+    if (typeof raw !== 'string') return '';
+    let t = raw.trim();
+    const fence = t.match(/```(?:json|text|md)?\s*([\s\S]*?)```/i);
+    if (fence) t = fence[1].trim();
+    t = t.replace(/^(描述|截图描述|画面描述|屏幕描述)\s*[:：]\s*/, '');
+    return t.slice(0, 500).trim();
+  }
+
   /** 把模型原始文本解析为结构化结果；容忍 ```json 围栏。失败返回 null。 */
   _parseResult(raw, behaviorContext) {
     if (typeof raw !== 'string') return null;
@@ -215,6 +296,8 @@ class LocalModelRunner {
       confidence: Math.max(0, Math.min(1, conf)),
       suggestion: obj.suggestion || obj.action || '',
       reason: obj.reason || '',
+      // v4.10.0：本机视觉模型对屏幕的文字描述，供「没有视觉能力」的远端纯文本模型使用
+      observation: typeof obj.observation === 'string' ? obj.observation : '',
       behaviorContext,
     };
   }
@@ -278,4 +361,4 @@ class LocalModelRunner {
   }
 }
 
-module.exports = { LocalModelRunner, SYSTEM_PROMPT, DEFAULT_PORT };
+module.exports = { LocalModelRunner, SYSTEM_PROMPT, DESCRIBE_PROMPT, DEFAULT_PORT };

@@ -90,7 +90,9 @@ test('remote 模式：真正调用通道 predict（旧实现误判成无模型�
   const { ctrl, captured } = makeController({ model: 'remote', channel });
   await ctrl.triggerRule('api_lookup');
   assert.strictEqual(calls.length, 1, '远端通道应被调用一次');
-  assert.strictEqual(calls[0].img, 'B64', '截图应传给远端');
+  // v4.10.0：截图默认由本机 VL 模型转成文字描述，不再把原图发给服务端
+  // （服务端未必有多模态能力，收到图片会直接报 "Model only support text input"）
+  assert.ok(!calls[0].img, '默认不应把截图原图发给服务端');
   assert.strictEqual(captured.suggestion.intent, 'api_lookup');
   assert.ok(/远端/.test(captured.suggestion.reason), 'reason 应体现远端来源');
 });

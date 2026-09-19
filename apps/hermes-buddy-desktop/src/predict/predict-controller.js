@@ -120,6 +120,8 @@ class PredictController {
     this.resolveWindow = opts.resolveWindow || (async () => null);
     this.buildRunner = opts.buildRunner || null;
     this._predictFn = opts.predictFn || null;  // 远端/测试用
+    // v4.10.0：本机视觉描述函数（测试注入用；真实环境走 LocalModelRunner.describe）
+    this._describeFn = opts.describeFn || null;
 
     this.config = new PredictConfig({ dataDir: path.join(this.appDir, 'predict') });
     this.db = new BehaviorDB({ dataDir: path.join(this.appDir, 'predict') });
@@ -396,14 +398,31 @@ class PredictController {
         this.logger.info('predict-remote-reuse-inflight');
         return this._remotePromise;
       }
-      const ctx = localJudgment
-        ? Object.assign({}, behaviorContext, {
-          localJudgment: { intent: localJudgment.intent, confidence: localJudgment.confidence },
-          stage: 'deep_think',
-        })
-        : behaviorContext;
+      // v4.10.0：截图本地消化。
+      // 不能假设服务端有视觉模型——纯文本 LLM / coding 模型收到图片会直接报错
+      // （实测 volcengine-coding: 「Model only support text input」）。
+      // 因此默认把截图交给本机 VL 模型读成一段文字描述（screenObservation），
+      // 服务端只收到文字。只有用户明确开启 sendImageToServer 才发原图。
+      const allowImage = this.config.get('sendImageToServer') === true;
+      let image = imageBase64;
+      let observation = '';
+      if (imageBase64 && !allowImage) {
+        observation = await this._localVisionToText(behaviorContext, imageBase64, localJudgment);
+        image = null;
+        this.logger.info('predict-vision-local', {
+          observationChars: observation.length,
+          imageSent: false,
+        });
+      }
+
+      const ctx = Object.assign({}, behaviorContext);
+      if (observation) ctx.screenObservation = observation;
+      if (localJudgment) {
+        ctx.localJudgment = { intent: localJudgment.intent, confidence: localJudgment.confidence };
+        ctx.stage = 'deep_think';
+      }
       this._remoteInFlight = true;
-      this._remotePromise = ch.predict(ctx, imageBase64);
+      this._remotePromise = ch.predict(ctx, image);
       try {
         return await this._remotePromise;
       } finally {
@@ -414,6 +433,52 @@ class PredictController {
     // 通道还没连上：抛错交给上层——remote 模式降级为规则预判，hybrid 模式退回本地结论。
     // （早期版本在这里直接返回兜底模板，导致混合模式下本地结论被通用话术覆盖。）
     throw new Error('远端通道未连接');
+  }
+
+  /**
+   * v4.10.0：把截图交给本机 VL 模型，产出一段客观文字描述，供远端纯文本模型使用。
+   *
+   * @returns {string} 描述文本；本机模型不可用/超时/无内容时返回空串（调用方降级为「不带视觉信息」）。
+   */
+  async _localVisionToText(behaviorContext, imageBase64, localResult) {
+    // 本地筛选阶段已经跑过一次 VLM：如果它顺带给出了 observation 就直接用，
+    // 不再为同一张图付第二次 11~15s 的 CPU 推理代价。
+    if (localResult && typeof localResult.observation === 'string' && localResult.observation.trim()) {
+      return localResult.observation.trim();
+    }
+    if (!imageBase64) return '';
+    // 本机模型还没热启时不要为「描述」去冷启动（2.6GB 加载可能 60s+）：
+    // 宁可这一轮不带视觉信息，交给后台 warmLocalModel 预热，下一轮就有。
+    if (!this._isLocalWarm()) {
+      this.logger.info('predict-vision-local-cold, skip description');
+      return '';
+    }
+    try {
+      const text = await _withTimeout(
+        this._describeScreen(behaviorContext, imageBase64),
+        LOCAL_SCREEN_TIMEOUT_MS,
+        '本机视觉描述超时'
+      );
+      return (text || '').trim();
+    } catch (e) {
+      // 描述失败不阻断主流程：服务端至少还有行为元数据可用
+      this.logger.warn('predict-vision-local-failed', { error: e.message });
+      return '';
+    }
+  }
+
+  /** 调本机 runner 的 describe（旧 runner 无 describe 时退回 analyze 的 observation 字段）。 */
+  async _describeScreen(behaviorContext, imageBase64) {
+    if (typeof this._describeFn === 'function') {
+      return this._describeFn(behaviorContext, imageBase64);
+    }
+    const runner = this._runner();
+    if (!runner) return '';
+    if (typeof runner.describe === 'function') {
+      return runner.describe({ imageBase64, behaviorContext });
+    }
+    const r = await runner.analyze({ imageBase64, behaviorContext });
+    return (r && r.observation) || '';
   }
 
   /**

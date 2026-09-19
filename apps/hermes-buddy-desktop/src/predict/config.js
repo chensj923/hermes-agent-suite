@@ -16,7 +16,7 @@ const DEFAULT_CONFIG = {
   enabled: false,
   // 运行模式（v4.4）：
   //   local   = 本地小模型全流程（判断触发 + 思考解答都在本机，隐私最好）
-  //   remote  = 远端全流程（截图 + 行为上下文发给 246 的大模型思考解答）
+  //   remote  = 远端全流程（行为上下文 + 截图的「文字描述」发给服务端大模型思考解答）
   //   hybrid  = 本地 + 远端（本地小模型只负责判断「该不该触发」，触发后交给远端大模型思考解答）
   // 已移除旧的「纯规则兜底」档位：规则仍作为模型不可用时的静默降级，但不再是用户可选模式。
   model: 'hybrid',
@@ -64,6 +64,12 @@ const DEFAULT_CONFIG = {
     behaviorLogTtlMs: 7 * 24 * 60 * 60 * 1000, // 行为日志只留 7 天
     oneClickOff: true // 一键关闭，立即停止所有监听
   },
+  // v4.10.0：是否把截图原图发往服务端做视觉推理。
+  // 默认 false —— 图片一律先由本机 VL 模型转成文字描述（screenObservation），
+  // 服务端只收到文字。这样「客户的部署没有多模态模型」也能正常给出建议：
+  // 实测 volcengine-coding 收到图片会直接报「Model only support text input」，
+  // 纯文本 LLM 更不用说。只有明确知道自己服务端接的是视觉模型时才置 true。
+  sendImageToServer: false,
   // v4.2：通用兜底规则。开启后「任意窗口里打字停顿 + 输入量足够」即触发写作类预判，
   // 不再要求必须是 Word——解决在 WPS / 记事本 / 微信 / 浏览器表单 / IDE 里完全不触发的问题。
   genericWritingFallback: true,
