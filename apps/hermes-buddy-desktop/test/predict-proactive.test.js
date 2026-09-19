@@ -85,6 +85,25 @@ test('predictNow：模型低置信度判「不打扰」时也必须给答案（v
   assert.ok(/场景/.test(captured.suggestion.reason), 'reason 应注明按场景兜底');
 });
 
+test('predictNow：服务端降级泛化话术 → 换成场景规则模板（v4.9.3 router_exhausted 场景）', async () => {
+  // 服务端上游失败时返回 { intent: rule, confidence: 0.5, suggestion: '需要我帮你做点什么吗？' }
+  // 0.5 过不了 0.6 门槛，但 intent 非空且 ≥0.3，v4.9.2 的 weakIntent 兜底不触发，
+  // 会把这句空话原样弹窗——必须替换成针对性模板。
+  const { ctrl, captured } = makeController({
+    model: 'qwen2.5-vl-3b',
+    predictFn: async () => ({
+      intent: 'word_writing', confidence: 0.5,
+      suggestion: '需要我帮你做点什么吗？',
+      reason: '远端推断失败（router_exhausted），已降级',
+    }),
+  });
+  const r = await ctrl.predictNow();
+  assert.strictEqual(r.shown, true);
+  assert.strictEqual(captured.suggestion.suggestion, RULE_TEMPLATE.word_writing,
+    '服务端降级的泛化话术必须换成场景规则模板');
+  assert.ok(/远端推断失败/.test(captured.suggestion.reason), 'reason 应保留真实失败原因');
+});
+
 test('predictNow：不受冷却限制（冷却期内用户主动点也能出）', async () => {
   const { ctrl } = makeController({ model: 'none' });
   // 制造冷却：先拒绝一次

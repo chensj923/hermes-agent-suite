@@ -72,6 +72,26 @@ const RULE_TEMPLATE = {
 /** 主动预测（点桌宠/点按钮）且连窗口类型都推断不出来时的通用话术。 */
 const PROACTIVE_TEMPLATE = '我看了一眼屏幕——需要我帮你做点什么吗？';
 
+/** 服务端上游失败时（buddy-channel.py predict_intent 的 catch 分支）返回的降级话术。 */
+const SERVER_DEGRADE_TEXT = '需要我帮你做点什么吗？';
+
+/**
+ * v4.9.3：服务端上游失败（如 router_exhausted）时会降级返回
+ * { intent: rule, confidence: 0.5, suggestion: '需要我帮你做点什么吗？' }。
+ * 这句空话会以 0.5 置信度绕过 weakIntent 兜底（intent 非空且 ≥0.3）原样弹窗。
+ * 有场景规则时必须换成针对性模板，别让用户等 20 秒换来一句废话。
+ */
+function _ungenericServerDegrade(result) {
+  if (!result || typeof result !== 'object') return result;
+  const generic = !result.suggestion
+    || result.suggestion === SERVER_DEGRADE_TEXT
+    || /远端推断失败/.test(result.reason || '');
+  if (generic && result.intent && RULE_TEMPLATE[result.intent]) {
+    result.suggestion = RULE_TEMPLATE[result.intent];
+  }
+  return result;
+}
+
 class PredictController {
   /**
    * @param {object} opts
@@ -236,6 +256,7 @@ class PredictController {
       }
 
       // 5) 引擎按置信度门槛决定是否弹窗
+      _ungenericServerDegrade(result);   // v4.9.3：服务端降级话术 → 场景规则模板
       const r2 = this.engine.modelResult({
         intent: result.intent,
         confidence: result.confidence,
@@ -630,6 +651,7 @@ class PredictController {
         }
       }
       if (!result) { this.engine.modelTimeout(); return { shown: false, reason: '没有拿到模型结果' }; }
+      _ungenericServerDegrade(result);   // v4.9.3：服务端降级话术 → 场景规则模板
       if (!this._processing) {
         this.logger.info('predict-now-aborted-after-timeout');
         return { shown: false, reason: '分析已超时中断' };
