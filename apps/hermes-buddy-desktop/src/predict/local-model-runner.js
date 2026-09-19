@@ -24,7 +24,9 @@ const net = require('net');
 const { setTimeout: sleep } = require('timers/promises');
 
 const DEFAULT_PORT = 8877;
-const READY_TIMEOUT_MS = 60 * 1000;
+// v4.8.9：Qwen2.5-VL-3B（1.8GB）+ mmproj（0.8GB）冷加载在机械盘/占用高的机器上
+// 可达 60s+，原 60s 窗口会让预热白白失败。放宽到 120s。
+const READY_TIMEOUT_MS = 120 * 1000;
 const INFER_TIMEOUT_MS = 30 * 1000;
 const KILL_GRACE_MS = 3000;
 
@@ -86,7 +88,9 @@ class LocalModelRunner {
       '--host', this.host,
       '--port', String(this.port),
       '--ctx-size', String(ctxSize),
-      '--nobrowser',
+      // v4.8.9：llama-server 没有 --nobrowser 这个参数，传了会
+      //   "error: invalid argument: --nobrowser" 并立刻 exit(1)，
+      // 导致本地 VLM 永远起不来、hybrid 模式每次都 cold 走远端。此处移除。
     ];
     if (this.mmprojPath && require('fs').existsSync(this.mmprojPath)) {
       args.push('--mmproj', this.mmprojPath);

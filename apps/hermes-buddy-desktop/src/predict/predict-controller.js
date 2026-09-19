@@ -38,13 +38,22 @@ let _timeoutTrace = null;
 /** Promise 超时包装器。 */
 function _withTimeout(promise, ms, message) {
   if (_timeoutTrace) { try { _timeoutTrace('timer-set', { ms, message }); } catch (_) {} }
+  let timer = null;
+  // v4.8.9：原实现不清理定时器——主 Promise 早已 settle 后，30s 定时器仍会
+  // 触发并 reject（被 race 吞掉但留下噪声日志、且定时器一直挂着）。
+  // 这里在主 Promise settle 时立刻 clearTimeout。
+  const guarded = Promise.resolve(promise).finally(() => {
+    if (timer) { clearTimeout(timer); timer = null; }
+  });
   return Promise.race([
-    Promise.resolve(promise),
-    new Promise((_, reject) => setTimeout(() => {
-      // v4.8.8 插桩：这个回调若不执行，说明主进程定时器本身没触发
-      if (_timeoutTrace) { try { _timeoutTrace('timer-fired', { ms, message }); } catch (_) {} }
-      reject(new Error(message));
-    }, ms)),
+    guarded,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        // v4.8.8 插桩：这个回调若不执行，说明主进程定时器本身没触发
+        if (_timeoutTrace) { try { _timeoutTrace('timer-fired', { ms, message }); } catch (_) {} }
+        reject(new Error(message));
+      }, ms);
+    }),
   ]);
 }
 
@@ -96,6 +105,9 @@ class PredictController {
     this._processing = false;
     this._enabled = false;
     this._degraded = false;   // v4.8.5：防止 analyze 失败 + 面板安全网并发重复降级
+    this._lastRule = null;    // v4.8.9：最近一次触发规则，供超时降级兜底
+    this._remoteInFlight = false;  // v4.8.9：是否有远端请求在飞（防请求堆积）
+    this._remotePromise = null;
     this._pipelineSeq = 0;    // v4.8.8：流水线所有权序列，防止并发 finally 互清 _processing 锁
     // v4.8.8 插桩：把 _withTimeout 定时器的设置/触发轨迹写进日志
     _timeoutTrace = (ev, info) => {
@@ -179,6 +191,9 @@ class PredictController {
       // 3) 行为上下文（只元数据，绝不带文本/标题内容）
       const ctx = this.engine.pending() ? this.engine.pending().context : this.engine._snapshot();
       const rule = triggerResult.rule;
+      // v4.8.9：记住最近一次触发的规则，供超时降级兜底（engine.pending() 在
+      // 超时回调里常已清空，导致降级弹窗 intent 退化成 unknown、建议泛化）。
+      if (rule) this._lastRule = rule;
       const behaviorContext = Object.assign({ rule }, ctx);
 
       // 4) 模型判断意图（本地 / 远端 / 本地+远端）
@@ -344,13 +359,28 @@ class PredictController {
       try { ch = this._resolveChannel(); } catch (_) { ch = null; }
     }
     if (ch) {
+      // v4.8.9：远端请求去重。日志实测触发可密集到 4~10s 一次，每次都带整屏
+      // 截图打远端；服务端串行处理 → 请求排队，最后一条要等 20s+ 才返回，
+      // 表现就是「思考半天然后超时」。若已有在飞的远端请求，复用它的结果，
+      // 而不是再发一张图把队列排得更长。
+      if (this._remoteInFlight && this._remotePromise) {
+        this.logger.info('predict-remote-reuse-inflight');
+        return this._remotePromise;
+      }
       const ctx = localJudgment
         ? Object.assign({}, behaviorContext, {
           localJudgment: { intent: localJudgment.intent, confidence: localJudgment.confidence },
           stage: 'deep_think',
         })
         : behaviorContext;
-      return ch.predict(ctx, imageBase64);
+      this._remoteInFlight = true;
+      this._remotePromise = ch.predict(ctx, imageBase64);
+      try {
+        return await this._remotePromise;
+      } finally {
+        this._remoteInFlight = false;
+        this._remotePromise = null;
+      }
     }
     // 通道还没连上：抛错交给上层——remote 模式降级为规则预判，hybrid 模式退回本地结论。
     // （早期版本在这里直接返回兜底模板，导致混合模式下本地结论被通用话术覆盖。）
@@ -514,7 +544,8 @@ class PredictController {
     }
     const pending = this.engine.pending();
     const ctx = pending ? pending.context : (this.engine._snapshot ? this.engine._snapshot() : {});
-    const rule = pending ? pending.rule : null;
+    // v4.8.9：pending 已清空时退回最近一次触发规则，避免降级弹窗 intent=unknown
+    const rule = (pending && pending.rule) || this._lastRule || null;
     const behaviorContext = Object.assign({ rule }, ctx);
     // 先重置锁，让 _degradeToRule 弹窗不会被 _onTrigger 的互斥挡住
     this._processing = false;
