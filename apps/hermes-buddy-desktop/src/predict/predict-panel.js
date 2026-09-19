@@ -152,16 +152,23 @@ class PredictPanel {
       this.logger.warn('predict-panel-show-failed', { error: e.message });
       try { win.show(); } catch (_) {}
     }
-    // 保险：分析卡死时不要让转圈窗口一直挂着
+    // 保险：分析卡死时不要让转圈窗口一直挂着。
+    // v4.8.5：不再直接 hide，而是通知控制器降级为规则模板弹窗，确保用户能看到输出。
     if (this._thinkingTimeout) clearTimeout(this._thinkingTimeout);
     this._thinkingTimeout = setTimeout(() => {
       this._thinkingTimeout = null;
       if (this._pending) return;        // 已经在等用户决策，别误关
-      if (typeof this.onThinkingTimeout === 'function') {
-        try { this.onThinkingTimeout(); } catch (_) {}
-      }
-      this._hide();
       this.logger.warn('predict-panel-thinking-timeout');
+      if (typeof this.onThinkingTimeout === 'function') {
+        try {
+          const maybePromise = this.onThinkingTimeout();
+          if (maybePromise && typeof maybePromise.then === 'function') maybePromise.catch(() => {});
+        } catch (_) {}
+      }
+      // 给控制器 2s 时间切换成规则建议；若仍未进入建议态则兜底隐藏
+      setTimeout(() => {
+        if (!this._pending && !this._thinkingTimeout) this._hide();
+      }, 2000);
     }, THINKING_TIMEOUT_MS);
   }
 

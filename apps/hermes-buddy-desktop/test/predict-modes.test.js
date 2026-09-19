@@ -249,11 +249,14 @@ test('remote：远端 20s 未响应 → 降级为规则预判，不永久卡住'
   assert.ok(/远端模型响应超时/.test(captured.suggestion.reason));
 });
 
-test('onThinkingTimeout 重置处理锁并回到 IDLE', () => {
-  const { ctrl } = makeController({ model: 'hybrid' });
+test('onThinkingTimeout：面板安全网触发时降级为规则模板弹窗', async () => {
+  const { ctrl, captured } = makeController({ model: 'hybrid' });
   ctrl.engine.state = 'ANALYZING';
+  ctrl.engine._pending = { rule: 'word_writing', reason: 'generic_pause', context: ctrl.engine._snapshot() };
   ctrl._processing = true;
-  ctrl.onThinkingTimeout();
+  await ctrl.onThinkingTimeout();
   assert.strictEqual(ctrl._processing, false, '_processing 应被重置');
-  assert.strictEqual(ctrl.engine.state, 'IDLE', '引擎应回到 IDLE');
+  assert.ok(captured.suggestion, '面板超时应降级弹窗');
+  assert.strictEqual(captured.suggestion.suggestion, '要不要我帮你续写或润色这段文字？');
+  assert.ok(/模型响应超时/.test(captured.suggestion.reason));
 });

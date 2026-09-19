@@ -87,6 +87,7 @@ class PredictController {
     this.hooks = null;
     this._processing = false;
     this._enabled = false;
+    this._degraded = false;   // v4.8.5：防止 analyze 失败 + 面板安全网并发重复降级
   }
 
   // ---------------- 生命周期 ----------------
@@ -144,6 +145,7 @@ class PredictController {
     if (this._processing) return;           // 已有流水线在跑，丢弃本次触发
     if (!triggerResult || !triggerResult.shouldScreenshot) return;
     this._processing = true;
+    this._degraded = false;                 // v4.8.5：每次新触发重置降级标记
     try {
       // 1) 进入 ANALYZING
       const r1 = this.engine.screenshotTaken();
@@ -182,19 +184,19 @@ class PredictController {
         try {
           result = await this._analyze(behaviorContext, imageBase64);
         } catch (e) {
-          // 模型不可用（如本地引擎未安装/推理超时、远端通道未连）→ 降级为规则模板，仍然弹窗。
-          // 旧行为是 modelTimeout()+return 静默丢弃，导致「一次都不弹」；
-          // 现在与纯规则一致：规则预判 confidence 0.7 过门槛，弹窗但 reason 注明降级原因。
+          // v4.8.5：模型不可用（本地引擎未安装/推理超时、远端通道未连）→ 降级为规则模板弹窗。
+          // 旧行为是 modelTimeout()+return 静默丢弃，导致用户只看到转圈；现在必须给出可见输出。
           this.logger.warn('predict-analyze-failed, degrade to rule template', { error: e.message });
-          result = {
-            intent: rule,
-            confidence: 0.7,
-            suggestion: (RULE_TEMPLATE[rule] || '需要我帮你做点什么吗？'),
-            reason: '模型未就绪，已降级为行为规则预判（' + e.message + '）',
-          };
+          await this._degradeToRule(behaviorContext, '模型未就绪，已降级为行为规则预判：' + e.message);
+          return;
         }
       }
       if (!result) { this.engine.modelTimeout(); return; }
+      // v4.8.5：若 analyze 失败分支已降级弹窗，后续不再重复展示
+      if (this._degraded) {
+        this.logger.info('predict-already-degraded');
+        return;
+      }
       // 面板 thinking 安全网可能已把 _processing 重置，避免超时后再弹窗
       if (!this._processing) {
         this.logger.info('predict-pipeline-aborted-after-timeout');
@@ -230,6 +232,34 @@ class PredictController {
     } finally {
       this._processing = false;
     }
+  }
+
+  /**
+   * v4.8.5：模型 analyze 失败或面板 thinking 安全网触发时，降级为规则模板弹窗。
+   * 避免用户盯着「思考中…」空转却没有任何输出。
+   *
+   * @param {object} behaviorContext 含 rule 的行为上下文
+   * @param {string} reason 降级原因，显示在 reason 行
+   * @returns {Promise<'generate'|'later'|'never'>}
+   */
+  async _degradeToRule(behaviorContext, reason) {
+    if (this._degraded) return 'later';
+    this._degraded = true;
+    const rule = behaviorContext && behaviorContext.rule;
+    const template = RULE_TEMPLATE[rule] || '需要我帮你做点什么吗？';
+    const suggestion = {
+      intent: rule || 'unknown',
+      suggestion: template,
+      reason: (reason || '模型未就绪，已降级为行为规则预判'),
+      confidence: 0.7,
+      action: this._buildAction(rule, template),
+    };
+    // 推进引擎状态到 SUGGESTING，让后续 userDecision 能正确记录接受/拒绝并回到 IDLE
+    this.engine.modelResult({ intent: suggestion.intent, confidence: suggestion.confidence });
+    if (!this.panel) return 'later';
+    const choice = await this.panel.show(suggestion);
+    this._applyDecision(choice, rule, suggestion);
+    return choice;
   }
 
   /** 把用户决策写回引擎 + 执行动作。 */
@@ -451,13 +481,24 @@ class PredictController {
   }
 
   /**
-   * v4.8.4：面板 thinking 安全网触发时由主进程回调。重置处理锁，让后续触发能继续，
-   * 并通知引擎回到 IDLE。底层未完成的模型 Promise 会在后台自行熄灭，不会再次弹窗。
+   * v4.8.5：面板 thinking 安全网触发时由主进程回调。
+   * 如果当前流水线还没出结果，立刻降级为规则模板弹窗，避免用户只看到转圈却没有任何输出。
+   * 底层未完成的模型 Promise 会在后台自行熄灭，不会再次弹窗。
    */
   onThinkingTimeout() {
     this.logger.warn('predict-thinking-timeout-controller');
+    if (this._degraded) {
+      this._processing = false;
+      try { this.engine.modelTimeout(); } catch (_) {}
+      return;
+    }
+    const pending = this.engine.pending();
+    const ctx = pending ? pending.context : (this.engine._snapshot ? this.engine._snapshot() : {});
+    const rule = pending ? pending.rule : null;
+    const behaviorContext = Object.assign({ rule }, ctx);
+    // 先重置锁，让 _degradeToRule 弹窗不会被 _onTrigger 的互斥挡住
     this._processing = false;
-    try { this.engine.modelTimeout(); } catch (_) {}
+    return this._degradeToRule(behaviorContext, '模型响应超时，已切换为本地规则建议');
   }
 
   setSensitivity(s) {
