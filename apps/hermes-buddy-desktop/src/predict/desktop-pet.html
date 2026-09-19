@@ -14,7 +14,10 @@
   /* 注意：不再使用 -webkit-app-region: drag —— 它会吞掉所有鼠标事件，
      导致点击菜单永远弹不出来。拖动改为 mousedown/mousemove 手动实现。 */
 
-  canvas { display: block; }
+  /* pointer-events:none 让 canvas 永不拦截鼠标事件，
+     所有交互由 window 级 capture 监听器处理。
+     这是「无法点击/拖拽」的根因 -- PixiJS canvas 默认会吃掉事件。 */
+  canvas { display: block; pointer-events: none; }
 
   /* ---- 回退模式：Live2D 加载失败时退回双帧 PNG ---- */
   #fallback {
@@ -114,6 +117,9 @@
     let down = null;          // { x, y, t, btn, dragging }
     const CLICK_SLOP = 5;
     let lastMenuAt = 0;       // 防止 click / mouseup / contextmenu 重复弹两次
+    // 拖动节流：不每个 mousemove 都发 IPC（60fps -> 16fps 足够流畅，且 setPosition 是同步阻塞调用）
+    let dragRafQueued = false;
+    let dragLastDx = 0, dragLastDy = 0;
 
     function openMenu() {
       const now = Date.now();
@@ -133,7 +139,16 @@
       if (!down) return;
       const dx = e.screenX - down.x, dy = e.screenY - down.y;
       if (!down.dragging && Math.hypot(dx, dy) >= 3) down.dragging = true;
-      if (down.dragging) window.petApi?.dragMove?.(dx, dy);
+      if (down.dragging) {
+        dragLastDx = dx; dragLastDy = dy;
+        if (!dragRafQueued) {
+          dragRafQueued = true;
+          requestAnimationFrame(() => {
+            dragRafQueued = false;
+            window.petApi?.dragMove?.(dragLastDx, dragLastDy);
+          });
+        }
+      }
     }
     function onMouseUp(e) {
       if (!down) return;
@@ -214,6 +229,8 @@
           autoStart: true,
         });
         window.__pixiApp = app;
+        // canvas 设 pointer-events:none（CSS 已设），确保不拦截鼠标事件
+        app.view.style.pointerEvents = 'none';
         document.body.appendChild(app.view);
 
         // 给渲染限帧 —— 透明置顶窗口 60fps 全速渲染是「很卡」的主因之一

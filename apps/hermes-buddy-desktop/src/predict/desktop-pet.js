@@ -182,11 +182,22 @@ class DesktopPet {
     this._ipcReady = true;
   }
 
-  /** 拖动：以 mousedown 时的窗口位置为基准平移。 */
+  /**
+   * 拖动：以 mousedown 时的窗口位置为基准平移。
+   * 用 setBounds 一次调用代替多次 setPosition + setSize，减少 Win32 同步开销。
+   * 不做额外节流（渲染层已用 rAF 限制到 ~16fps），但 setPosition 本身是
+   * 同步阻塞的 Win32 API -- 之前每个 mousemove 都调一次是卡顿主因。
+   */
   _dragTo(dx, dy) {
     if (!this.win || !this._dragBase) return;
     try {
-      this.win.setPosition(this._dragBase.x + dx, this._dragBase.y + dy);
+      const PET_W = PET_WIDTH, PET_H = PET_HEIGHT;
+      this.win.setBounds({
+        x: this._dragBase.x + dx,
+        y: this._dragBase.y + dy,
+        width: PET_W,
+        height: PET_H,
+      });
     } catch (_) {}
   }
 
