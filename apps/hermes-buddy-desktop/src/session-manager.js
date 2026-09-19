@@ -8,7 +8,7 @@ const { Workspace } = require('./workspace');
 const { ToolRegistry } = require('./tools');
 const { Brain, describeBrainError, BUDDY_PROXY_PORT } = require('./agent/brain');
 const { AgentLoop } = require('./agent/loop');
-const { ChannelClient, versionAtLeast, REQUIRED_CHANNEL_VERSION } = require('./agent/channel');
+const { ChannelClient, versionAtLeast, REQUIRED_CHANNEL_VERSION, REQUIRED_CHANNEL_BUILD } = require('./agent/channel');
 const { partsToContent, textToContent, contentToPlainText, stripImagesFromHistory } = require('./agent/parts');
 const { DashboardClient } = require('./agent/dashboard-client');
 const { buildSystemPrompt, DEFAULT_PERSONA } = require('./agent/prompts');
@@ -398,7 +398,7 @@ class SessionManager {
     } catch (error) {
       // 版本过旧：这不是「连不上」，而是连上了但服务端能力不够。
       // 原样抛出，别包成「连不上 WS 通道」，否则用户会去查网络而不是重新部署。
-      if (error && error.code === 'channel_outdated') {
+      if (error && (error.code === 'channel_outdated' || error.code === 'channel_build_stale')) {
         this._channelOutdated = error.message;
         throw error;
       }
@@ -570,9 +570,9 @@ class SessionManager {
       await channel.connect();
     } catch (error) {
       // 版本过旧是「需要重新部署」，不是网络问题，别混进 channel_error 的连不上文案。
-      if (error && error.code === 'channel_outdated') {
+      if (error && (error.code === 'channel_outdated' || error.code === 'channel_build_stale')) {
         this._channelOutdated = error.message;
-        return { ok: false, reason: 'channel_outdated', message: error.message };
+        return { ok: false, reason: error.code, message: error.message };
       }
       this._channelOutdated = null;
       return { ok: false, reason: 'channel_error', message: `连不上 WS 通道（${stored.channelUrl}）：${error.message}` };
@@ -1349,11 +1349,17 @@ class SessionManager {
               const info = JSON.parse(body);
               const version = info.channel_version || info.version || null;
               const ok = Boolean(version && versionAtLeast(version, REQUIRED_CHANNEL_VERSION));
+              // v4.10.3：脚本内容版本检查
+              const build = parseInt(String(info.channel_build || '0'), 10) || 0;
+              const buildStale = ok && build < REQUIRED_CHANNEL_BUILD;
               resolve({
                 version,
+                build,
                 required: REQUIRED_CHANNEL_VERSION,
+                buildRequired: REQUIRED_CHANNEL_BUILD,
                 ok,
-                needsRedeploy: Boolean(version && !ok),
+                needsRedeploy: Boolean(version && !ok) || buildStale,
+                buildStale,
                 error: null
               });
             } catch (e) {

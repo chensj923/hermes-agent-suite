@@ -43,6 +43,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 #   2.0  预测模式远端推断：predict_request / predict_response（supports_predict）
 CHANNEL_VERSION = "2.0"
 
+# v4.10.3：脚本内容版本（不等于协议版本）。
+# 协议版本（CHANNEL_VERSION）只在新增/删除帧类型时抬；修 prompt 文案、加新函数
+# 不抬协议版本但抬 BUILD，让客户端能检测到"服务端脚本过旧"并提示重新部署。
+#   1 = v4.10.0 视觉本地化（PREDICT_PROMPT 改写）
+#   2 = v4.10.1 防误判规则 + ctx 补字段
+#   3 = v4.10.2 GENERATE_PROMPT + generate_content 分支
+CHANNEL_BUILD = "3"
+
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
 DOTENV = os.path.join(HERMES_HOME, ".env")
@@ -1218,6 +1226,7 @@ class WSConnection:
         self.send_json({"type": "welcome", "session": sid,
                         "model": STATE["model"], "server": "hermes-buddy-channel",
                         "version": "1", "channel_version": CHANNEL_VERSION,
+                        "channel_build": CHANNEL_BUILD,
                         # 把上游地址告诉客户端：连不上时用户才知道该去查哪个地址，
                         # 而不是只看到一句"上游不可达"。纯增量字段，老客户端忽略。
                         "upstream": _public_upstream(),
@@ -1408,6 +1417,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/health", "/healthz", "/"):
             self._send(200, {"ok": True, "service": "hermes-buddy-channel",
                              "version": CHANNEL_VERSION,
+                             "channel_build": CHANNEL_BUILD,
                              "upstream_base": STATE["base"], "upstream_model": STATE["model"],
                              "mock": MOCK_LLM, "sessions": len(SESSIONS)})
             return

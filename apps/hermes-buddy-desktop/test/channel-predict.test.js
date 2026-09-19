@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const { ChannelClient, maskFrame, decodeFrames } = require('../src/agent/channel.js');
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-const { REQUIRED_CHANNEL_VERSION } = require('../src/agent/channel');
+const { REQUIRED_CHANNEL_VERSION, REQUIRED_CHANNEL_BUILD } = require('../src/agent/channel');
 
 /** 发送一个未 mask 的文本帧（服务端->客户端不需要 mask）。 */
 function sendRaw(socket, jsonString) {
@@ -59,6 +59,7 @@ function startMockServer(onMessage) {
             type: 'welcome',
             session: 'sess-predict',
             channel_version: REQUIRED_CHANNEL_VERSION,
+            channel_build: REQUIRED_CHANNEL_BUILD,
             supports_resume: true,
             supports_predict: true,
           }));
@@ -101,6 +102,7 @@ function startLegacyServer() {
             type: 'welcome',
             session: 'sess-legacy',
             channel_version: REQUIRED_CHANNEL_VERSION,
+            channel_build: REQUIRED_CHANNEL_BUILD,
             supports_resume: true,
             // 没有 supports_predict --模拟 1.x 服务端升级了版本号但没加 predict 能力
           }));

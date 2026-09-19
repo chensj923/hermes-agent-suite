@@ -35,6 +35,14 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
  */
 const REQUIRED_CHANNEL_VERSION = '2.0';
 
+/**
+ * v4.10.3：服务端脚本内容版本。协议版本（CHANNEL_VERSION）只在新增/删除帧类型时抬；
+ * 修 prompt 文案、加新函数不抬协议版本但抬 BUILD。客户端据此检测服务端脚本过旧
+ * 并提示重新部署（老用户装新客户端后服务端仍是旧脚本 -> 功能静默缺失）。
+ * 服务端 CHANNEL_BUILD < 此值 -> "服务端脚本过旧，请重新部署"。
+ */
+const REQUIRED_CHANNEL_BUILD = 3;
+
 /** 解析 "1.1" / "1" / "v2.0.3" 这类版本号，取 major.minor 比较。 */
 function parseVersion(value) {
   const m = /^v?(\d+)(?:\.(\d+))?/.exec(String(value || '').trim());
@@ -292,6 +300,21 @@ class ChannelClient {
         err.code = 'channel_outdated';
         // 先 reject 再 close：close() 内部走 _onClose()，那里会调 _resolveOpen()，
         // 顺序反了就会「通道已关但连接被当成成功」。
+        if (this._rejectOpen) this._rejectOpen(err);
+        try { this.close(); } catch (_) {}
+        return;
+      }
+      // v4.10.3：脚本内容版本检查。协议版本相同但服务端脚本内容过旧
+      // （缺少 generate_content 分支、防误判 prompt 等）-> 同样提示重新部署。
+      const serverBuild = parseInt(String(msg.channel_build || '0'), 10) || 0;
+      this.serverBuild = serverBuild;
+      if (serverBuild < REQUIRED_CHANNEL_BUILD) {
+        this.outdated = { server: this.serverVersion, required: REQUIRED_CHANNEL_VERSION, build: serverBuild, buildRequired: REQUIRED_CHANNEL_BUILD };
+        const err = new Error(
+          `服务端通道脚本过旧（build ${serverBuild}），当前客户端需要 build ${REQUIRED_CHANNEL_BUILD} 及以上。` +
+          '请在 Buddy 里对这台服务器重新执行一次部署，再重新连接。'
+        );
+        err.code = 'channel_build_stale';
         if (this._rejectOpen) this._rejectOpen(err);
         try { this.close(); } catch (_) {}
         return;
@@ -666,4 +689,4 @@ class ChannelClient {
   }
 }
 
-module.exports = { ChannelClient, maskFrame, decodeFrames, REQUIRED_CHANNEL_VERSION, versionAtLeast };
+module.exports = { ChannelClient, maskFrame, decodeFrames, REQUIRED_CHANNEL_VERSION, REQUIRED_CHANNEL_BUILD, versionAtLeast };

@@ -751,6 +751,7 @@ if command -v curl >/dev/null 2>&1; then
   if [[ -n "$CHANNEL_HEALTH" ]]; then CHANNEL_UP=1; fi
 fi
 CHANNEL_VERSION_EXPECTED="2.0"
+CHANNEL_BUILD_EXPECTED="3"
 
 if [[ "$PROXY_UP" == "1" ]]; then
   echo "  [OK] 推理直通代理  : http://0.0.0.0:$PROXY_PORT  (用 Gateway API Key 鉴权)"
@@ -760,8 +761,9 @@ else
 fi
 if [[ "$CHANNEL_UP" == "1" ]]; then
   CHANNEL_VERSION_ACTUAL=$(echo "$CHANNEL_HEALTH" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version","unknown"))' 2>/dev/null || echo "unknown")
+  CHANNEL_BUILD_ACTUAL=$(echo "$CHANNEL_HEALTH" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("channel_build","0"))' 2>/dev/null || echo "0")
   if [[ "$CHANNEL_VERSION_ACTUAL" == "$CHANNEL_VERSION_EXPECTED" ]]; then
-    echo "  [OK] WS 工具通道    : ws://0.0.0.0:$CHANNEL_PORT/api/buddy/channel (version $CHANNEL_VERSION_ACTUAL)"
+    echo "  [OK] WS 工具通道    : ws://0.0.0.0:$CHANNEL_PORT/api/buddy/channel (version $CHANNEL_VERSION_ACTUAL, build $CHANNEL_BUILD_ACTUAL)"
   else
     echo "  [WARN] WS 工具通道已启动，但版本 $CHANNEL_VERSION_ACTUAL 与期望 $CHANNEL_VERSION_EXPECTED 不符。"
     echo "         说明旧进程仍在运行，请手动执行：sudo systemctl restart hermes-buddy-channel"

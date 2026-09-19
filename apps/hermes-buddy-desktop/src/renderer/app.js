@@ -2995,6 +2995,9 @@ async function renderProfiles() {
       if (probe.error) {
         verEl.dataset.state = 'unknown';
         verEl.textContent = '版本探测失败：' + probe.error;
+      } else if (probe.buildStale) {
+        verEl.dataset.state = 'outdated';
+        verEl.textContent = `服务端脚本 build ${probe.build} 过旧，需重新部署（要求 build ${probe.buildRequired}+）`;
       } else if (probe.needsRedeploy) {
         verEl.dataset.state = 'outdated';
         verEl.textContent = `服务端版本 ${probe.version} 过旧，需重新部署（要求 ${probe.required}+）`;

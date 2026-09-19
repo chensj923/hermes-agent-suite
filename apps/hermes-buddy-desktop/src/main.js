@@ -682,6 +682,8 @@ function registerIpc() {
           echo "proxy_health=$(curl -s -m 3 http://127.0.0.1:8811/health 2>/dev/null || echo none)"
           CHANNEL_VER=$(grep -oE '^CHANNEL_VERSION *= *"[0-9.]+"' "$HERMES_HOME/buddy-channel.py" 2>/dev/null | grep -oE '[0-9.]+' | head -1)
           echo "channel_version=\${CHANNEL_VER:-none}"
+          CHANNEL_BLD=$(grep -oE '^CHANNEL_BUILD *= *"[0-9]+"' "$HERMES_HOME/buddy-channel.py" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+          echo "channel_build=\${CHANNEL_BLD:-0}"
           echo "proxy_env=$([ -f "$HERMES_HOME/buddy-proxy.env" ] && echo yes || echo no)"
           API_KEY=""
           [ -f "$HERMES_HOME/.api_server_key" ] && API_KEY=$(cat "$HERMES_HOME/.api_server_key" 2>/dev/null | tr -d '\\r\\n')
@@ -714,9 +716,11 @@ function registerIpc() {
             const proxyUp = result.proxy_health && result.proxy_health !== 'none' && result.proxy_health.includes('ok');
             const apiKey = result.api_key || '';
             const channelVersion = result.channel_version || 'none';
+            const channelBuild = parseInt(result.channel_build || '0', 10) || 0;
             const proxyEnv = result.proxy_env || 'no';
             // 与 src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION 保持一致
             const REQUIRED_CHANNEL_VERSION = '2.0';
+            const REQUIRED_CHANNEL_BUILD = 3;
             const verAtLeast = (v, req) => {
               if (!v || v === 'none') return false;
               const a = String(v).split('.').map((n) => parseInt(n, 10) || 0);
@@ -729,6 +733,8 @@ function registerIpc() {
             };
             // 已部署但服务端通道脚本缺失或版本低于客户端要求 → 需要升级部署
             const channelOutdated = deployed && !verAtLeast(channelVersion, REQUIRED_CHANNEL_VERSION);
+            // v4.10.3：协议版本够了但脚本内容版本过旧 -> 也需要升级部署
+            const channelBuildStale = deployed && verAtLeast(channelVersion, REQUIRED_CHANNEL_VERSION) && channelBuild < REQUIRED_CHANNEL_BUILD;
 
             send(`[check] Hermes 目录: ${result.hermes_home_exists || '?'}\n`);
             send(`[check] Hermes CLI: ${result.hermes_cli || 'none'}\n`);
@@ -736,7 +742,7 @@ function registerIpc() {
             send(`[check] WS 通道 8822: ${result.channel_port !== 'none' ? '监听中' : '未监听'}\n`);
             send(`[check] 推理代理 8811: ${result.proxy_port !== 'none' ? '监听中' : '未监听'}\n`);
             send(`[check] 通道健康: ${channelUp ? 'OK' : '不可达'}\n`);
-            send(`[check] 通道版本: ${channelVersion}${channelOutdated ? '（过旧，需要 ' + REQUIRED_CHANNEL_VERSION + '+）' : ''}\n`);
+            send(`[check] 通道版本: ${channelVersion}${channelOutdated ? '（过旧，需要 ' + REQUIRED_CHANNEL_VERSION + '+）' : ''}+ (channelBuildStale ? '(脚本 build '+channelBuild+' 过旧，需要 '+REQUIRED_CHANNEL_BUILD+'+)' : '')\n`);
             send(`[check] 上游配置 buddy-proxy.env: ${proxyEnv === 'yes' ? '存在' : '不存在'}\n`);
             send(`[check] API Key: ${apiKey ? apiKey.slice(0, 4) + '****' + apiKey.slice(-4) : '未找到'}\n`);
 
@@ -746,12 +752,14 @@ function registerIpc() {
               send('[check] 已部署但未找到 API Key，请手动检查服务端配置。\n');
             } else if (channelOutdated) {
               send('[check] 服务端通道版本过旧，需要升级部署。\n');
+            } else if (channelBuildStale) {
+              send('[check] 服务端通道脚本过旧（缺少新功能），请重新部署以更新。\n');
             } else {
               send('[check] 检查完成，可以连接。\n');
             }
 
-            logger.info('ssh-check-complete', { host, deployed, channelUp, proxyUp, apiKeyFound: !!apiKey, channelVersion, channelOutdated, proxyEnv });
-            resolve({ ok: true, deployed, channelUp, proxyUp, apiKey, host, channelVersion, channelOutdated, proxyEnv });
+            logger.info('ssh-check-complete', { host, deployed, channelUp, proxyUp, apiKeyFound: !!apiKey, channelVersion, channelBuild, channelOutdated, channelBuildStale, proxyEnv });
+            resolve({ ok: true, deployed, channelUp, proxyUp, apiKey, host, channelVersion, channelBuild, channelOutdated, channelBuildStale, proxyEnv });
           });
         });
       });
@@ -1171,6 +1179,13 @@ async function bootstrap() {
       panel,
       actionExecutor,
       resolveWindow: async () => getForegroundWindowInfo(),
+      // v4.10.2：「生成并插入」的内容生成——走同一条远端通道，
+      // 服务端按 stage=generate_content 走生成分支返回 {content}
+      generateContentFn: (payload) => {
+        const ch = manager && manager.channel ? manager.channel : null;
+        if (!ch) return Promise.reject(new Error('远端通道未连接'));
+        return ch.predict(payload, null);
+      },
       // 远端预测模式（model='remote'）需要通道客户端。manager.channel 在通道模式连接后才有值，
       // predict-controller._analyze 在运行时通过 resolveChannel 惰性取最新的，不锁死在构造时刻。
       resolveChannel: () => (manager && manager.channel ? manager.channel : null),
