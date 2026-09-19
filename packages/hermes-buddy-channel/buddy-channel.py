@@ -50,6 +50,9 @@ PROXY_ENV = os.path.join(HERMES_HOME, "buddy-proxy.env")
 LISTEN_HOST = os.environ.get("BUDDY_CHANNEL_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("BUDDY_CHANNEL_PORT", "8822"))
 UPSTREAM_TIMEOUT = float(os.environ.get("BUDDY_UPSTREAM_TIMEOUT", "300"))
+# v4.8.6：预测模式（predict_request）专用上游超时，默认 90s；预测是无状态单次分类，
+# 不应复用通用 300s 超长超时，避免上游 hang 时客户端已降级但服务端线程仍空等。
+PREDICT_UPSTREAM_TIMEOUT = float(os.environ.get("BUDDY_PREDICT_UPSTREAM_TIMEOUT", "90"))
 TOOL_TIMEOUT = float(os.environ.get("BUDDY_TOOL_TIMEOUT", "300"))
 MAX_TURNS = int(os.environ.get("BUDDY_CHANNEL_MAX_TURNS", "24"))
 MOCK_LLM = os.environ.get("BUDDY_CHANNEL_MOCK_LLM", "0") == "1"
@@ -570,10 +573,11 @@ def _is_model_unsupported(code, message):
     return ("model" in m and "does not support" in m) or "unsupported model" in m
 
 
-def call_llm(messages, tools, signal_broken, model=None):
+def call_llm(messages, tools, signal_broken, model=None, timeout=None):
     """返回 { content, tool_calls:[{id,name,arguments}] }。mock 模式走脚本。
 
     model：本轮要用的模型（来自客户端 user_message.model）；留空则用全局默认。
+    timeout：urllib 请求超时秒数，默认用 UPSTREAM_TIMEOUT；predict 等场景可传更短值。
     """
     if MOCK_LLM:
         return mock_llm(messages, tools)
@@ -595,7 +599,7 @@ def call_llm(messages, tools, signal_broken, model=None):
         "Accept": "application/json",
     }, method="POST")
     try:
-        resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
+        resp = urllib.request.urlopen(req, timeout=timeout if timeout is not None else UPSTREAM_TIMEOUT)
     except urllib.error.HTTPError as exc:
         raw = ""
         try:
@@ -732,7 +736,7 @@ def predict_intent(behavior, image_b64, model=None):
         {"role": "user", "content": user_parts},
     ]
     try:
-        r = call_llm(messages, [], lambda: False, model)
+        r = call_llm(messages, [], lambda: False, model, timeout=PREDICT_UPSTREAM_TIMEOUT)
     except UpstreamError as exc:
         # 上游出错时退化为基于 rule 的兜底——客户端 predict-controller 也有兜底，这里双保险
         return {"intent": rule, "confidence": 0.5,

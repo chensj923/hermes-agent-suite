@@ -26,8 +26,8 @@ const { ActionExecutor } = require('./action-executor');
 /** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」，给它 8s 足够；超时/未热启就跳过，不阻塞远端推断。 */
 const LOCAL_SCREEN_TIMEOUT_MS = 8000;
 
-/** v4.8.4：控制器级模型推断超时。remote/hybrid 20s 后降级为规则模板，避免用户盯着转圈 30s。 */
-const REMOTE_ANALYZE_TIMEOUT_MS = 20000;
+/** v4.8.6：控制器级模型推断超时。remote/hybrid 与通道层 30s 对齐，避免真实推理 20s+ 时提前降级。 */
+const REMOTE_ANALYZE_TIMEOUT_MS = 30000;
 
 /** v4.8.4：local 模式全在本机跑 2GB VLM，给 45s 更宽松。 */
 const LOCAL_ANALYZE_TIMEOUT_MS = 45000;

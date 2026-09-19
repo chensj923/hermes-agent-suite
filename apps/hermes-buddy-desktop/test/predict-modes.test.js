@@ -222,10 +222,10 @@ test('warmLocalModel：已热启时直接返回，未安装时返回未安装', 
 
 // ---------- 6. v4.8.4 思考超时与弹窗前置 ----------
 
-test('hybrid：远端模型 20s 未响应 → 控制器超时降级为规则模板', async () => {
+test('hybrid：远端模型 30s 未响应 → 控制器超时降级为规则模板', async () => {
   const start = Date.now();
   const channel = {
-    predict: async () => new Promise(() => {}), // 永远挂起，触发控制器 20s 超时
+    predict: async () => new Promise(() => {}), // 永远挂起，触发控制器 30s 超时
   };
   const { ctrl, captured } = makeController({
     model: 'hybrid',
@@ -234,12 +234,12 @@ test('hybrid：远端模型 20s 未响应 → 控制器超时降级为规则模�
   });
   await ctrl.triggerRule('word_writing');
   const elapsed = Date.now() - start;
-  assert.ok(elapsed >= 19000 && elapsed <= 23000, `应在 20s 左右降级，实际 ${elapsed}ms`);
+  assert.ok(elapsed >= 29000 && elapsed <= 34000, `应在 30s 左右降级，实际 ${elapsed}ms`);
   assert.ok(captured.suggestion, '超时后应降级弹窗');
   assert.ok(/模型响应超时/.test(captured.suggestion.reason), 'reason 应注明模型响应超时');
 });
 
-test('remote：远端 20s 未响应 → 降级为规则预判，不永久卡住', async () => {
+test('remote：远端 30s 未响应 → 降级为规则预判，不永久卡住', async () => {
   const channel = {
     predict: async () => new Promise(() => {}),
   };
