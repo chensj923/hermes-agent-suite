@@ -26,6 +26,12 @@ const { ActionExecutor } = require('./action-executor');
 /** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」，给它 8s 足够；超时/未热启就跳过，不阻塞远端推断。 */
 const LOCAL_SCREEN_TIMEOUT_MS = 8000;
 
+/** v4.8.4：控制器级模型推断超时。remote/hybrid 20s 后降级为规则模板，避免用户盯着转圈 30s。 */
+const REMOTE_ANALYZE_TIMEOUT_MS = 20000;
+
+/** v4.8.4：local 模式全在本机跑 2GB VLM，给 45s 更宽松。 */
+const LOCAL_ANALYZE_TIMEOUT_MS = 45000;
+
 /** Promise 超时包装器。 */
 function _withTimeout(promise, ms, message) {
   return Promise.race([
@@ -189,6 +195,11 @@ class PredictController {
         }
       }
       if (!result) { this.engine.modelTimeout(); return; }
+      // 面板 thinking 安全网可能已把 _processing 重置，避免超时后再弹窗
+      if (!this._processing) {
+        this.logger.info('predict-pipeline-aborted-after-timeout');
+        return;
+      }
 
       // 5) 引擎按置信度门槛决定是否弹窗
       const r2 = this.engine.modelResult({
@@ -251,9 +262,23 @@ class PredictController {
   /** 本地或远端模型推断。mode: local | remote | hybrid */
   async _analyze(behaviorContext, imageBase64) {
     const mode = this.config.get('model');
-    if (mode === 'remote') return this._remoteAnalyze(behaviorContext, imageBase64, null);
-    if (mode === 'hybrid') return this._hybridAnalyze(behaviorContext, imageBase64);
-    return this._localAnalyze(behaviorContext, imageBase64);
+    let analyzePromise;
+    let timeoutMs;
+    let timeoutMsg;
+    if (mode === 'remote') {
+      analyzePromise = this._remoteAnalyze(behaviorContext, imageBase64, null);
+      timeoutMs = REMOTE_ANALYZE_TIMEOUT_MS;
+      timeoutMsg = '远端模型响应超时';
+    } else if (mode === 'hybrid') {
+      analyzePromise = this._hybridAnalyze(behaviorContext, imageBase64);
+      timeoutMs = REMOTE_ANALYZE_TIMEOUT_MS;
+      timeoutMsg = '模型响应超时';
+    } else {
+      analyzePromise = this._localAnalyze(behaviorContext, imageBase64);
+      timeoutMs = LOCAL_ANALYZE_TIMEOUT_MS;
+      timeoutMsg = '本地模型推理超时';
+    }
+    return _withTimeout(analyzePromise, timeoutMs, timeoutMsg);
   }
 
   /** 本地小模型推断（判断意图 + 建议）。 */
@@ -425,6 +450,16 @@ class PredictController {
     }
   }
 
+  /**
+   * v4.8.4：面板 thinking 安全网触发时由主进程回调。重置处理锁，让后续触发能继续，
+   * 并通知引擎回到 IDLE。底层未完成的模型 Promise 会在后台自行熄灭，不会再次弹窗。
+   */
+  onThinkingTimeout() {
+    this.logger.warn('predict-thinking-timeout-controller');
+    this._processing = false;
+    try { this.engine.modelTimeout(); } catch (_) {}
+  }
+
   setSensitivity(s) {
     const n = Number(s);
     if (!Number.isFinite(n) || n <= 0) throw new Error('灵敏度必须为正数');
@@ -494,6 +529,10 @@ class PredictController {
         }
       }
       if (!result) { this.engine.modelTimeout(); return { shown: false, reason: '没有拿到模型结果' }; }
+      if (!this._processing) {
+        this.logger.info('predict-now-aborted-after-timeout');
+        return { shown: false, reason: '分析已超时中断' };
+      }
 
       // 主动预测：用户是自己点的，即使置信度没过门槛也给一个交代（由上层决定说话还是弹窗）
       const r2 = this.engine.modelResult({ intent: result.intent, confidence: result.confidence });

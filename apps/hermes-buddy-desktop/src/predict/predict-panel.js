@@ -20,7 +20,7 @@ try { _electron = require('electron'); } catch (_) { /* node 环境 */ }
 const PANEL_WIDTH = 360;
 const PANEL_HEIGHT = 240;
 const SUGGEST_TIMEOUT_MS = 10000;   // 用户 10s 不点 = 视为「稍后」
-const THINKING_TIMEOUT_MS = 45000;  // 思考态最长挂 45s，超时自动收起（防止模型卡死留个转圈窗口）
+const THINKING_TIMEOUT_MS = 23000;  // 思考态安全网：控制器 20s 超时后应已降级，面板 23s 兜底收尾
 
 class PredictPanel {
   /**
@@ -30,10 +30,11 @@ class PredictPanel {
    * @param {function} [opts.anchorProvider] ()=>({x,y,width,height})|null
    *   返回桌宠 bounds 时，浮层优先弹在桌宠旁边（而不是鼠标旁）。
    */
-  constructor({ logger, preloadPath, anchorProvider } = {}) {
+  constructor({ logger, preloadPath, anchorProvider, onThinkingTimeout } = {}) {
     this.logger = logger || { info() {}, warn() {}, error() {} };
     this.preloadPath = preloadPath || path.join(__dirname, 'predict-panel-preload.js');
     this.anchorProvider = anchorProvider || null;
+    this.onThinkingTimeout = onThinkingTimeout || null;
     this.win = null;
     this._ready = false;
     this._pending = null;     // { resolve }
@@ -140,12 +141,25 @@ class PredictPanel {
     const win = await this._ensureReady();
     win.webContents.send('predict-panel:thinking', { text: text || '思考中…' });
     this._position(win);
-    try { win.showInactive(); } catch (_) { win.show(); }
+    // 必须前置 + 聚焦，否则用户当前在其他窗口时看不到「思考中」提示
+    try {
+      win.setAlwaysOnTop(true, 'screen-saver');
+      win.setVisibleOnAllWorkspaces(true);
+      win.show();
+      win.focus();
+      win.moveTop();
+    } catch (e) {
+      this.logger.warn('predict-panel-show-failed', { error: e.message });
+      try { win.show(); } catch (_) {}
+    }
     // 保险：分析卡死时不要让转圈窗口一直挂着
     if (this._thinkingTimeout) clearTimeout(this._thinkingTimeout);
     this._thinkingTimeout = setTimeout(() => {
       this._thinkingTimeout = null;
       if (this._pending) return;        // 已经在等用户决策，别误关
+      if (typeof this.onThinkingTimeout === 'function') {
+        try { this.onThinkingTimeout(); } catch (_) {}
+      }
       this._hide();
       this.logger.warn('predict-panel-thinking-timeout');
     }, THINKING_TIMEOUT_MS);
@@ -164,8 +178,16 @@ class PredictPanel {
       this._pending = { resolve };
       win.webContents.send('predict-panel:suggestion', suggestion);
       this._position(win);
-      win.show();
-      win.focus();
+      try {
+        win.setAlwaysOnTop(true, 'screen-saver');
+        win.setVisibleOnAllWorkspaces(true);
+        win.show();
+        win.focus();
+        win.moveTop();
+      } catch (e) {
+        this.logger.warn('predict-panel-show-failed', { error: e.message });
+        try { win.show(); } catch (_) {}
+      }
       this._timeout = setTimeout(() => this._resolve('later'), SUGGEST_TIMEOUT_MS);
     });
   }

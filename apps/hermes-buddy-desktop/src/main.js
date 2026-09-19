@@ -1158,6 +1158,10 @@ async function bootstrap() {
       logger,
       // 桌宠可见时，预测浮层优先弹在猫咪旁边（pet 在下方惰性创建）
       anchorProvider: () => (pet ? pet.panelAnchor() : null),
+      // v4.8.4：面板「思考中」安全网触发时重置控制器，避免模型卡死后 _processing 永久锁死
+      onThinkingTimeout: () => {
+        if (predictController) predictController.onThinkingTimeout();
+      },
     });
     const actionExecutor = new ActionExecutor({ clipboard: require('electron').clipboard, logger });
     predictController = new PredictController({

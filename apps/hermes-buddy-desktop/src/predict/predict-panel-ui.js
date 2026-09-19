@@ -59,6 +59,6 @@
   btnLater.addEventListener('click', () => decide('later'));
   btnNever.addEventListener('click', () => decide('never'));
 
-  // 首屏占位
-  show({});
+  // 首屏默认进入思考态：窗口刚 show 出来时先显示转圈，避免先闪出空建议 + 按钮
+  setThinking(true, '思考中…');
 })();

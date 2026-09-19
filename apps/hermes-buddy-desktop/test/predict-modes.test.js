@@ -219,3 +219,41 @@ test('warmLocalModel：已热启时直接返回，未安装时返回未安装', 
   assert.strictEqual(r2.ok, false, '无 runner 且无 buildRunner 应返回未安装');
   assert.ok(/未安装/.test(r2.reason));
 });
+
+// ---------- 6. v4.8.4 思考超时与弹窗前置 ----------
+
+test('hybrid：远端模型 20s 未响应 → 控制器超时降级为规则模板', async () => {
+  const start = Date.now();
+  const channel = {
+    predict: async () => new Promise(() => {}), // 永远挂起，触发控制器 20s 超时
+  };
+  const { ctrl, captured } = makeController({
+    model: 'hybrid',
+    channel,
+    predictFn: async () => ({ intent: 'word_writing', confidence: 0.8, suggestion: '本地初判', reason: '切窗' }),
+  });
+  await ctrl.triggerRule('word_writing');
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed >= 19000 && elapsed <= 23000, `应在 20s 左右降级，实际 ${elapsed}ms`);
+  assert.ok(captured.suggestion, '超时后应降级弹窗');
+  assert.ok(/模型响应超时/.test(captured.suggestion.reason), 'reason 应注明模型响应超时');
+});
+
+test('remote：远端 20s 未响应 → 降级为规则预判，不永久卡住', async () => {
+  const channel = {
+    predict: async () => new Promise(() => {}),
+  };
+  const { ctrl, captured } = makeController({ model: 'remote', channel });
+  await ctrl.triggerRule('api_lookup');
+  assert.ok(captured.suggestion, '远端超时应降级弹窗');
+  assert.ok(/远端模型响应超时/.test(captured.suggestion.reason));
+});
+
+test('onThinkingTimeout 重置处理锁并回到 IDLE', () => {
+  const { ctrl } = makeController({ model: 'hybrid' });
+  ctrl.engine.state = 'ANALYZING';
+  ctrl._processing = true;
+  ctrl.onThinkingTimeout();
+  assert.strictEqual(ctrl._processing, false, '_processing 应被重置');
+  assert.strictEqual(ctrl.engine.state, 'IDLE', '引擎应回到 IDLE');
+});
