@@ -93,7 +93,12 @@ class LocalModelRunner {
     }
     args.push(...this.extraArgs);
 
-    this.logger.log('[runner] 启动 llama-server: ' + this.llamaServerPath + ' (port ' + this.port + ')');
+    // v4.8.8：控制器注入的 logger 只有 info/warn/error/debug，没有 log；
+    // 这里曾直接调 this.logger.log 导致 start() 必抛、本地模型永远无法预热（hybrid 永远走远端）。
+    (this.logger.info || this.logger.log || this.logger.warn).call(
+      this.logger,
+      '[runner] 启动 llama-server: ' + this.llamaServerPath + ' (port ' + this.port + ')'
+    );
     this._exiting = false;
     this.proc = spawn(this.llamaServerPath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 

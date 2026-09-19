@@ -554,6 +554,8 @@ class ChannelClient {
         if (settled) return;
         settled = true;
         this.pendingPredict = null;
+        // v4.8.8 插桩：确认通道层 30s 定时器是否真正触发
+        try { this.logger.warn('channel-predict-timeout-fired'); } catch (_) {}
         reject(new Error('预测推断超时（服务端 30 秒无响应）'));
       }, 30000);
       this.pendingPredict = {
@@ -562,6 +564,8 @@ class ChannelClient {
       };
       const payload = { type: 'predict_request', session: this.sessionId, behavior: behaviorContext || {} };
       if (imageBase64) payload.image = imageBase64;
+      // v4.8.8 插桩：记录请求发出（含截图大小），配合 timer-fired 判断服务端是否响应
+      try { this.logger.info('channel-predict-request-sent', { withImage: Boolean(imageBase64) }); } catch (_) {}
       this.send(payload);
     });
   }

@@ -32,11 +32,19 @@ const REMOTE_ANALYZE_TIMEOUT_MS = 30000;
 /** v4.8.4：local 模式全在本机跑 2GB VLM，给 45s 更宽松。 */
 const LOCAL_ANALYZE_TIMEOUT_MS = 45000;
 
+/** v4.8.8：_withTimeout 轨迹回调（由控制器构造时注入 logger），用于定位「30s 定时器未触发」问题。 */
+let _timeoutTrace = null;
+
 /** Promise 超时包装器。 */
 function _withTimeout(promise, ms, message) {
+  if (_timeoutTrace) { try { _timeoutTrace('timer-set', { ms, message }); } catch (_) {} }
   return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+    Promise.resolve(promise),
+    new Promise((_, reject) => setTimeout(() => {
+      // v4.8.8 插桩：这个回调若不执行，说明主进程定时器本身没触发
+      if (_timeoutTrace) { try { _timeoutTrace('timer-fired', { ms, message }); } catch (_) {} }
+      reject(new Error(message));
+    }, ms)),
   ]);
 }
 
@@ -88,6 +96,11 @@ class PredictController {
     this._processing = false;
     this._enabled = false;
     this._degraded = false;   // v4.8.5：防止 analyze 失败 + 面板安全网并发重复降级
+    this._pipelineSeq = 0;    // v4.8.8：流水线所有权序列，防止并发 finally 互清 _processing 锁
+    // v4.8.8 插桩：把 _withTimeout 定时器的设置/触发轨迹写进日志
+    _timeoutTrace = (ev, info) => {
+      try { this.logger.info('predict-timeout-trace', { ev, ...info }); } catch (_) {}
+    };
   }
 
   // ---------------- 生命周期 ----------------
@@ -146,6 +159,7 @@ class PredictController {
     if (!triggerResult || !triggerResult.shouldScreenshot) return;
     this._processing = true;
     this._degraded = false;                 // v4.8.5：每次新触发重置降级标记
+    const mySeq = ++this._pipelineSeq;      // v4.8.8：标记本流水线所有权
     try {
       // 1) 进入 ANALYZING
       const r1 = this.engine.screenshotTaken();
@@ -230,7 +244,9 @@ class PredictController {
       this.logger.error('predict-pipeline-error', { error: e.message });
       try { this.engine.modelTimeout(); } catch (_) {}
     } finally {
-      this._processing = false;
+      // v4.8.8：只有自己仍是当前流水线时才释放锁；否则说明有新流水线/超时回调已接管
+      if (this._pipelineSeq === mySeq) this._processing = false;
+      this.logger.info('predict-pipeline-done', { seq: mySeq, owner: this._pipelineSeq === mySeq });
     }
   }
 
@@ -256,8 +272,10 @@ class PredictController {
     };
     // 推进引擎状态到 SUGGESTING，让后续 userDecision 能正确记录接受/拒绝并回到 IDLE
     this.engine.modelResult({ intent: suggestion.intent, confidence: suggestion.confidence });
-    if (!this.panel) return 'later';
+    if (!this.panel) { this.logger.warn('predict-degrade-no-panel'); return 'later'; }
+    this.logger.info('predict-degrade-show', { intent: suggestion.intent, reason: suggestion.reason });
     const choice = await this.panel.show(suggestion);
+    this.logger.info('predict-degrade-choice', { choice });
     this._applyDecision(choice, rule, suggestion);
     return choice;
   }
@@ -487,6 +505,8 @@ class PredictController {
    */
   onThinkingTimeout() {
     this.logger.warn('predict-thinking-timeout-controller');
+    // v4.8.8：作废在跑的流水线所有权，避免其 finally 把 _processing 又置回 true/误清
+    this._pipelineSeq++;
     if (this._degraded) {
       this._processing = false;
       try { this.engine.modelTimeout(); } catch (_) {}
@@ -528,6 +548,7 @@ class PredictController {
     if (!this.config.get('enabled')) throw new Error('预测模式未启用');
     if (this._processing) return { shown: false, busy: true, reason: '上一次分析还在进行中' };
     this._processing = true;
+    const mySeq = ++this._pipelineSeq;   // v4.8.8：所有权序列
     try {
       // 跳过 TRIGGERED：直接进入 ANALYZING（截图 → 模型）
       this.engine.state = 'ANALYZING';
@@ -597,7 +618,9 @@ class PredictController {
       try { this.engine.modelTimeout(); } catch (_) {}
       throw e;
     } finally {
-      this._processing = false;
+      // v4.8.8：只在自己仍是当前流水线时释放锁，避免与 _onTrigger 并发互清
+      if (this._pipelineSeq === mySeq) this._processing = false;
+      this.logger.info('predict-now-done', { seq: mySeq, owner: this._pipelineSeq === mySeq });
     }
   }
 
