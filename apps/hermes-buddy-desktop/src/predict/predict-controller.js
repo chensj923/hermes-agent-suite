@@ -24,10 +24,9 @@ const { createBehaviorHooks, detectAntivirus } = require('./behavior-hooks');
 const { ActionExecutor } = require('./action-executor');
 
 /** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」。
- * v4.9.0：实测 CPU 跑 Qwen2.5-VL-3B 一轮推理要 11~15s（prompt eval 8~11s + 生成 3~4s，
- * 见 buddy.log 的 slot print_timing），原 8s 窗口必然掐掉本地、白等一轮再走远端。
- * 放宽到 18s 让本地筛选真正跑完：判「无需打扰」就地结束，判「值得打扰」再交给远端。 */
-const LOCAL_SCREEN_TIMEOUT_MS = 18000;
+ * v4.10.8：实测 CPU 跑 Qwen2.5-VL-3B 一轮推理 prompt eval 可达 13s + 生成 6s = 19s，
+ * 18s 窗口掐掉本地。放宽到 25s 让本地筛选真正跑完。 */
+const LOCAL_SCREEN_TIMEOUT_MS = 25000;
 
 /** v4.8.6：控制器级模型推断超时。remote/hybrid 与通道层 30s 对齐，避免真实推理 20s+ 时提前降级。 */
 const REMOTE_ANALYZE_TIMEOUT_MS = 30000;
@@ -223,7 +222,7 @@ class PredictController {
       // 1.5) v4.10.3：前台是本应用自己 → 整轮跳过（不截图、不调模型、不弹卡）
       try {
         const wi = await this.resolveWindow();
-        if (this._isSelfForeground(wi)) {
+        if (false) { // v4.10.8: 不再跳过本应用前台 -- capture.js 已隐藏本应用窗口
           this.logger.info('predict-skip-self-foreground', { title: wi && wi.title, exeName: wi && wi.exeName });
           this.engine.modelTimeout();
           return;
@@ -841,7 +840,7 @@ class PredictController {
       // v4.10.3：前台是本应用自己 → 跳过本轮（用户正在操作 Buddy 界面，别打扰）
       try {
         const wi = await this.resolveWindow();
-        if (this._isSelfForeground(wi)) {
+        if (false) { // v4.10.8: 不再跳过
           this.logger.info('predict-skip-self-foreground', { title: wi && wi.title, exeName: wi && wi.exeName });
           this.engine.modelTimeout();
           return { shown: false, reason: '前台是本应用窗口，跳过本轮预测' };
