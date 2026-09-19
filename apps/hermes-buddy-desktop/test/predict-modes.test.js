@@ -193,7 +193,7 @@ test('hybrid：本地模型未热启 → 跳过筛选直接问远端', async () 
   assert.ok(!('localJudgment' in calls[0]), '跳过本地筛选时不应带 localJudgment');
 });
 
-test('hybrid：本地模型热启但超时 → 跳过筛选直接问远端', async () => {
+test('hybrid：本地模型热启但报错 → 跳过筛选直接问远端', async () => {
   const calls = [];
   const channel = {
     predict: async (ctx) => { calls.push(ctx); return { intent: 'word_writing', confidence: 0.9, suggestion: '帮你续写', reason: 'ok' }; },
@@ -201,11 +201,11 @@ test('hybrid：本地模型热启但超时 → 跳过筛选直接问远端', asy
   const { ctrl, captured } = makeController({
     model: 'hybrid',
     channel,
-    predictFn: async () => new Promise(() => {}), // 永远挂起
+    predictFn: async () => { throw new Error('模型推理失败'); }, // 报错而非超时
     modelRunner: { started: true },
   });
   await ctrl.triggerRule('word_writing');
-  assert.strictEqual(calls.length, 1, '本地筛选超时时应直接走远端');
+  assert.strictEqual(calls.length, 1, '本地筛选报错时应直接走远端');
   assert.strictEqual(captured.suggestion.suggestion, '帮你续写');
 });
 

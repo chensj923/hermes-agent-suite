@@ -24,21 +24,32 @@ const { createBehaviorHooks, detectAntivirus } = require('./behavior-hooks');
 const { ActionExecutor } = require('./action-executor');
 
 /** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」。
- * v4.10.8：实测 CPU 跑 Qwen2.5-VL-3B 一轮推理 prompt eval 可达 13s + 生成 6s = 19s，
- * 18s 窗口掐掉本地。放宽到 25s 让本地筛选真正跑完。 */
-const LOCAL_SCREEN_TIMEOUT_MS = 25000;
+/**
+ * v4.10.9：模型推理时间不确定，不应设固定超时掐掉。
+ * 本地模型（Qwen2.5-VL-3B）在 CPU 上 prompt eval 可达 13~20s+，
+ * 掐掉只是白等一轮再降级，用户什么都没得到。
+ * 改为：本地模型不设短超时，等到有结果或报错（reject/error）；
+ * 只设 5 分钟看门狗防止模型进程假死（永远挂起既不是答复也不是报错）。
+ * 远端模型保留 30s 超时（网络可能挂死，需要保护）。
+ */
+const LOCAL_SCREEN_TIMEOUT_MS = 300000;  // 5 分钟看门狗（模型进程假死保护）
+const LOCAL_ANALYZE_TIMEOUT_MS = 300000; // 5 分钟看门狗
 
 /** v4.8.6：控制器级模型推断超时。remote/hybrid 与通道层 30s 对齐，避免真实推理 20s+ 时提前降级。 */
 const REMOTE_ANALYZE_TIMEOUT_MS = 30000;
 
-/** v4.8.4：local 模式全在本机跑 2GB VLM，给 45s 更宽松。 */
-const LOCAL_ANALYZE_TIMEOUT_MS = 45000;
+// v4.10.9：本地模式全在本机跑 VLM，推理时间不确定，不设超时（已在前面声明为 0）。
+// 远端模型保留超时保护（网络可能挂死）。
 
 /** v4.8.8：_withTimeout 轨迹回调（由控制器构造时注入 logger），用于定位「30s 定时器未触发」问题。 */
 let _timeoutTrace = null;
 
 /** Promise 超时包装器。 */
 function _withTimeout(promise, ms, message) {
+  if (!ms || ms <= 0) {
+    if (_timeoutTrace) { try { _timeoutTrace('no-timeout', { message }); } catch (_) {} }
+    return Promise.resolve(promise);
+  }
   if (_timeoutTrace) { try { _timeoutTrace('timer-set', { ms, message }); } catch (_) {} }
   let timer = null;
   // v4.8.9：原实现不清理定时器——主 Promise 早已 settle 后，30s 定时器仍会
