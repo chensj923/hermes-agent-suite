@@ -635,7 +635,11 @@ class PredictController {
         return { shown: false, reason: '分析已超时中断' };
       }
 
-      // 主动预测：用户是自己点的，即使置信度没过门槛也给一个交代（由上层决定说话还是弹窗）
+      // 主动预测：用户是自己点的 → 必须给答案（v4.9.2）。
+      // v4.9.0 实测：远端对「只写了个标题」这类写作开场会给出低置信度，
+      // 被 0.6 门槛拦下后只回一句「没什么需要帮忙的」，用户观感就是
+      // 「判断草率、思考完就跳掉」。现在置信度不过门槛也弹窗：
+      // 模型给不出明确意图时，退回场景规则推断（Word→word_writing 等）给建议。
       const r2 = this.engine.modelResult({ intent: result.intent, confidence: result.confidence });
       const suggestion = {
         intent: result.intent,
@@ -645,7 +649,14 @@ class PredictController {
         action: this._buildAction(result.intent, result.suggestion),
       };
       if (!r2.suggest) {
-        return { shown: false, reason: result.reason || '这会儿好像没什么需要帮忙的', suggestion };
+        const weakIntent = !result.intent || result.intent === 'none' || Number(result.confidence) < 0.3;
+        if (weakIntent && rule && RULE_TEMPLATE[rule]) {
+          // 模型不确定 → 用场景规则兜底，别让用户白等一场
+          suggestion.intent = rule;
+          suggestion.suggestion = RULE_TEMPLATE[rule];
+          suggestion.reason = (result.reason ? result.reason + '；' : '') + '已按当前场景给出建议';
+        }
+        // 不再 return：用户主动要的预测，哪怕低置信度也把建议摆出来
       }
 
       let choice = 'later';

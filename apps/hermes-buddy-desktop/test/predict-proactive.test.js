@@ -72,6 +72,19 @@ test('predictNow：有模型时走模型，不退化成模板', async () => {
   assert.ok(captured.suggestion.confidence === 0.9);
 });
 
+test('predictNow：模型低置信度判「不打扰」时也必须给答案（v4.9.2 场景规则兜底）', async () => {
+  const { ctrl, captured } = makeController({
+    model: 'qwen2.5-vl-3b',
+    predictFn: async () => ({ intent: 'none', confidence: 0.2, suggestion: '', reason: '无明显卡顿' }),
+  });
+  ctrl.engine.ctx.windowClass = 'OpusApp';  // Word → 推断为 word_writing
+  const r = await ctrl.predictNow();
+  assert.strictEqual(r.shown, true, '用户主动点击的预测必须给出答案，不许沉默');
+  assert.strictEqual(captured.suggestion.intent, 'word_writing', '模型不确定时应退回场景规则');
+  assert.strictEqual(captured.suggestion.suggestion, RULE_TEMPLATE.word_writing);
+  assert.ok(/场景/.test(captured.suggestion.reason), 'reason 应注明按场景兜底');
+});
+
 test('predictNow：不受冷却限制（冷却期内用户主动点也能出）', async () => {
   const { ctrl } = makeController({ model: 'none' });
   // 制造冷却：先拒绝一次
