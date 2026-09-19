@@ -263,7 +263,12 @@ class PredictController {
       try { this.engine.modelTimeout(); } catch (_) {}
     } finally {
       // v4.8.8：只有自己仍是当前流水线时才释放锁；否则说明有新流水线/超时回调已接管
-      if (this._pipelineSeq === mySeq) this._processing = false;
+      if (this._pipelineSeq === mySeq) {
+        this._processing = false;
+        // v4.9.1：所有"结束但不弹窗"的早退路径（置信度没过门槛 / 没拿到结果 /
+        // 已降级 / 超时中断）都要收走 thinking 态，否则 45s 安全网会误降级。
+        if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
+      }
       this.logger.info('predict-pipeline-done', { seq: mySeq, owner: this._pipelineSeq === mySeq });
     }
   }
@@ -653,7 +658,11 @@ class PredictController {
       throw e;
     } finally {
       // v4.8.8：只在自己仍是当前流水线时释放锁，避免与 _onTrigger 并发互清
-      if (this._pipelineSeq === mySeq) this._processing = false;
+      if (this._pipelineSeq === mySeq) {
+        this._processing = false;
+        // v4.9.1：同 _onTrigger——不打扰分支提前 return 时收走 thinking 态
+        if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
+      }
       this.logger.info('predict-now-done', { seq: mySeq, owner: this._pipelineSeq === mySeq });
     }
   }

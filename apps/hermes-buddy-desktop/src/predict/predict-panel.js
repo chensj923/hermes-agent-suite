@@ -202,6 +202,17 @@ class PredictPanel {
     });
   }
 
+  /**
+   * v4.9.1：流水线结束但决定不弹窗时，收走 thinking 态。
+   * v4.9.0 实测 bug：远端结果成功返回但置信度没过门槛 → 不调 show() →
+   * 「思考中」窗口一直挂着，45s 安全网到点误触发降级，把成功的结果
+   * 覆盖成「模型响应超时」。已在建议态（_pending 有值）时只清定时器、不动窗口。
+   */
+  cancelThinking() {
+    if (this._thinkingTimeout) { clearTimeout(this._thinkingTimeout); this._thinkingTimeout = null; }
+    if (!this._pending) this._hide();
+  }
+
   _hide() {
     if (this.win) { try { this.win.hide(); } catch (_) {} }
   }
