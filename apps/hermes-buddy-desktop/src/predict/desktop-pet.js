@@ -207,27 +207,33 @@ class DesktopPet {
    */
   _setClickThrough(on) {
     this._clickThrough = Boolean(on);
-    try {
-      const f = this._ctFile();
-      if (f) fs.writeFileSync(f, JSON.stringify({ clickThrough: this._clickThrough }), 'utf-8');
-    } catch (_) {}
     if (!this.win) return;
     try { this.win.setIgnoreMouseEvents(this._clickThrough, { forward: false }); } catch (_) {}
+    if (this._clickThrough) {
+      this.speak('鼠标穿透已开启，无法点击。再次点菜单可关闭。');
+    }
   }
 
   _ctFile() {
     return this.dataDir ? path.join(this.dataDir, 'pet-clickthrough.json') : '';
   }
 
-  _loadClickThrough() {
+  /** 清除持久化的穿透状态文件（安全策略：防止死锁）。 */
+  _clearClickThroughFile() {
     try {
       const f = this._ctFile();
-      if (f && fs.existsSync(f)) {
-        const o = JSON.parse(fs.readFileSync(f, 'utf-8'));
-        this._clickThrough = Boolean(o && o.clickThrough);
-      }
-    } catch (_) { this._clickThrough = false; }
-    return this._clickThrough;
+      if (f && fs.existsSync(f)) fs.unlinkSync(f);
+    } catch (_) {}
+  }
+
+  _loadClickThrough() {
+    // 安全策略：启动时不再从文件恢复穿透状态。
+    // 穿透开着时窗口不接收任何鼠标事件，用户无法弹菜单关掉它，
+    // 表现为「桌宠卡死、无法点击、无法拖拽」。
+    // 穿透只做运行时临时开关，下次启动自动回到可交互状态。
+    this._clickThrough = false;
+    try { this._clearClickThroughFile(); } catch (_) {}
+    return false;
   }
 
   /** 点猫/右键共用的弹出菜单。 */
@@ -248,7 +254,7 @@ class DesktopPet {
         },
       },
       {
-        label: this._clickThrough ? '关闭鼠标穿透（恢复可点击）' : '鼠标穿透（不挡桌面点击）',
+        label: this._clickThrough ? '关闭鼠标穿透（恢复可点击）' : '鼠标穿透（临时不挡桌面，重启失效）',
         click: () => this._setClickThrough(!this._clickThrough),
       },
       { type: 'separator' },
@@ -460,8 +466,16 @@ class DesktopPet {
       const y = area.y + area.height - PET_HEIGHT - 8;
       win.setPosition(Math.round(x), Math.round(y));
       win.showInactive();
-      // 若用户之前开过「鼠标穿透」，重新出现时保持（默认 false）
-      if (this._clickThrough) { try { win.setIgnoreMouseEvents(true, { forward: false }); } catch (_) {} }
+      // 安全策略：每次显示都先确保窗口完全可交互。
+      // 不再从 pet-clickthrough.json 恢复穿透状态 -- 穿透开着时
+      // 用户无法点击/拖拽/弹菜单，会变成「桌宠卡死」的死锁。
+      // 穿透改为仅运行时开关，不持久化。
+      if (this._clickThrough) {
+        this._clickThrough = false;
+        try { this._clearClickThroughFile(); } catch (_) {}
+        try { win.setIgnoreMouseEvents(false); } catch (_) {}
+        this.logger.info('pet-clickthrough-reset-on-show', { reason: 'safety: prevent dead state' });
+      }
       setTimeout(() => this.speak(this.randomLine()), 800);
     }
     return this.getBounds();
