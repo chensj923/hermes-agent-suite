@@ -61,6 +61,9 @@ class BehaviorEngine {
   _resetContext() {
     this.ctx = {
       windowClass: null,
+      // v4.10.1：前台进程名（win-info 解析出 exe 名，如 wps / chrome / explorer）。
+      // 只进快照给远端模型做事实参考，不参与本地规则匹配。
+      exeName: null,
       typedSincePause: 0,
       lastKeyMs: 0,
       clipboard: null, // { type, length } 仅类型与长度
@@ -111,6 +114,9 @@ class BehaviorEngine {
     switch (e.type) {
       case 'window_change': {
         this.ctx.windowClass = e.windowClass || null;
+        // v4.10.1：exe 名跟着窗口切换一起更新（window_change 事件由 hook 的
+        // 800ms 前台窗口轮询产生，天然带 exeName）。
+        if (e.exeName) this.ctx.exeName = e.exeName;
         this.ctx.typedSincePause = 0;
         this.ctx.recentWindows.push({ t: now, windowClass: e.windowClass || null });
         if (this.ctx.recentWindows.length > MAX_RECENT_WINDOWS) this.ctx.recentWindows.shift();
@@ -231,6 +237,10 @@ class BehaviorEngine {
   _snapshot() {
     return {
       windowClass: this.ctx.windowClass,
+      // v4.10.1：把前台进程名带给远端模型——windowClass 是 Win32 类名
+      // （如 Windows.UI.Core.CoreWindow），远端模型看不懂；exe 名
+      // （wps / winword / explorer）才是它能直接理解的事实。
+      exeName: this.ctx.exeName,
       typedSincePause: this.ctx.typedSincePause,
       typingPauseMs: this._typingPauseMs(this._now()),
       clipboard: this.ctx.clipboard,

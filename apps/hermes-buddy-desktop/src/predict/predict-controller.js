@@ -409,8 +409,11 @@ class PredictController {
       if (imageBase64 && !allowImage) {
         observation = await this._localVisionToText(behaviorContext, imageBase64, localJudgment);
         image = null;
+        // v4.10.1：把描述内容截断进日志——出了「建议驴唇不对马嘴」的问题时
+        // 能直接看出是 VL 描述错了还是远端模型想岔了。
         this.logger.info('predict-vision-local', {
           observationChars: observation.length,
+          observationPreview: observation.slice(0, 120),
           imageSent: false,
         });
       }
@@ -424,7 +427,17 @@ class PredictController {
       this._remoteInFlight = true;
       this._remotePromise = ch.predict(ctx, image);
       try {
-        return await this._remotePromise;
+        const result = await this._remotePromise;
+        // v4.10.1：远端结论落日志——suggestion/reason 是排查「提示不对」的第一现场。
+        this.logger.info('predict-remote-result', {
+          windowClass: ctx.windowClass || null,
+          exeName: ctx.exeName || null,
+          intent: result && result.intent,
+          confidence: result && result.confidence,
+          suggestion: result && result.suggestion ? String(result.suggestion).slice(0, 80) : '',
+          reason: result && result.reason ? String(result.reason).slice(0, 80) : '',
+        });
+        return result;
       } finally {
         this._remoteInFlight = false;
         this._remotePromise = null;

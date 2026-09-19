@@ -703,6 +703,15 @@ PREDICT_PROMPT = (
     "重要：你只会收到文字，不会收到图片——用户本机的视觉模型已经把屏幕截图读成"
     "了一段文字描述（screenObservation），你可能完全没有视觉能力，不要假设自己能看图。"
     "如果连 screenObservation 都没有，就只依据行为元数据（窗口类型、应用名、触发规则）判断。"
+    "判事实优先：exeName 是前台进程名（wps/winword/notepad/chrome/explorer 等），"
+    "windowClass 是 Win32 窗口类名，screenObservation 第一句会点名前台应用——"
+    "三者一致表明用户正在某个应用里工作。"
+    "防误判规则：当事实显示前台是文档编辑器或 IDE（WPS/Word/记事本/VSCode 等）"
+    "且用户刚停笔（typingPauseMs 较大），这是「写作中的停顿」，"
+    "建议必须围绕当前写作本身（如续写、润色、扩写标题、检查格式），"
+    "绝不要建议「切换回文档」「回到写作」——用户根本没有离开。"
+    "只有 screenObservation 明确说前台是任务视图/开始菜单/桌面等非工作界面时，"
+    "才可以建议切回原来的工作。"
     "请判断用户此刻最可能需要什么帮助，并用中文返回一个严格 JSON 对象："
     '{"intent": "最可能的规则名", "confidence": 0到1之间的小数, '
     '"suggestion": "一句简短的中文建议文案（不超过40字）", '
@@ -725,9 +734,13 @@ def predict_intent(behavior, image_b64, model=None):
     rule = (behavior or {}).get("rule", "") or "word_writing"
     ctx_lines = []
     if isinstance(behavior, dict):
-        for k in ("rule", "windowClass", "appType", "exeName", "reason"):
+        # v4.10.1：补充打字节奏与前台进程名等事实字段——
+        # 远端模型需要「用户在哪个 exe 里、停笔多久」才能分清
+        # 「写作中的停顿」和「切去了别的窗口」。
+        for k in ("rule", "windowClass", "appType", "exeName", "reason",
+                  "typingPauseMs", "typedSincePause", "mouseIdleMs", "inEditArea"):
             v = behavior.get(k)
-            if v:
+            if v is not None and v != "":
                 ctx_lines.append("%s: %s" % (k, v))
         # 本机视觉模型对截图的文字描述（v4.10.0）——服务端没有视觉能力时这是唯一的画面信息
         obs = (behavior.get("screenObservation") or "").strip()
