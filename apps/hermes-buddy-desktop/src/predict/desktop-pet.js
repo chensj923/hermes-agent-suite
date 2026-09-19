@@ -260,7 +260,8 @@ class DesktopPet {
       { type: 'separator' },
       { label: '收起桌宠', click: () => this.hide() },
     ]);
-    try { this.win.focus(); } catch (_) {}
+    // v4.10.10：不调 win.focus() -- 透明置顶窗口 focus 后会闪烁/消失。
+    // menu.popup 会自己处理窗口关联。
     const anchor = this._menuAnchor();
     try {
       menu.popup({ window: this.win, x: anchor.x, y: anchor.y });

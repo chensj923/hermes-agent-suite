@@ -443,8 +443,8 @@ class PredictController {
     if (!content) content = (suggestion && suggestion.suggestion) || '';
     if (!content) return;
     if (this.actionExecutor) {
-      // clipboard-keep：不启动 8 秒恢复，用户粘之前内容一直在
-      await this.actionExecutor.execute({ type: 'clipboard-keep', text: content });
+      // v4.10.10：clipboard-paste = 写入剪贴板 + 模拟 Ctrl+V 自动粘贴到前台窗口
+      await this.actionExecutor.execute({ type: 'clipboard-paste', text: content });
     }
     this._notifyGenerated(content.length);
   }

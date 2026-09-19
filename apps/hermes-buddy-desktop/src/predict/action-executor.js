@@ -9,10 +9,27 @@
  * 当前支持的动作：
  *   - clipboard: 把建议文本写入剪贴板，并先把旧值存起来，延迟一段时间再恢复，
  *     避免「建议一插就把用户正在用的内容冲掉」的竞态；恢复失败也无妨（旧值已尽力保留）。
- *   - 其余动作类型（SendInput 直接键入、打开链接等）在本版留作扩展点。
+ *   - clipboard-keep: 写入且不恢复（v4.10.2，生成内容用）
+ *   - clipboard-paste: 写入剪贴板 + 模拟 Ctrl+V 自动粘贴到前台窗口（v4.10.10）
+ *   - noop
  */
 
 const DEFAULT_RESTORE_MS = 8000;
+
+/**
+ * v4.10.10：模拟 Ctrl+V 粘贴（Windows）。
+ * 调用同目录下的 paste.ps1（PowerShell + Win32 SendInput）。
+ * 失败不阻断主流程（已写入剪贴板，用户手动 Ctrl+V 即可）。
+ */
+function simulatePaste(logger) {
+  const { exec } = require('child_process');
+  const path = require('path');
+  const script = path.join(__dirname, 'paste.ps1');
+  exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${script}"`, { timeout: 3000 }, (e) => {
+    if (e && logger) logger.warn('paste-simulate-failed', { error: e.message });
+    else if (logger) logger.info('paste-simulated');
+  });
+}
 
 class ActionExecutor {
   /**
@@ -43,6 +60,15 @@ class ActionExecutor {
     }
     if (type === 'clipboard-keep') {
       return this._fillClipboard(String(action.text || ''), true);
+    }
+    if (type === 'clipboard-paste') {
+      // v4.10.10：写入剪贴板 + 模拟 Ctrl+V 自动粘贴
+      const r = await this._fillClipboard(String(action.text || ''), true);
+      if (r.ok) {
+        // 延迟 200ms 让剪贴板写入生效，再模拟粘贴
+        setTimeout(() => simulatePaste(this.logger), 200);
+      }
+      return r;
     }
     if (type === 'noop' || !action) {
       return { ok: true, type: 'noop', message: '无需执行' };
