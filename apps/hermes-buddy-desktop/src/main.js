@@ -719,7 +719,7 @@ function registerIpc() {
             const channelBuild = parseInt(result.channel_build || '0', 10) || 0;
             const proxyEnv = result.proxy_env || 'no';
             // 与 src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION 保持一致
-            const REQUIRED_CHANNEL_VERSION = '2.0';
+            const REQUIRED_CHANNEL_VERSION = '2.1';
             const REQUIRED_CHANNEL_BUILD = 3;
             const verAtLeast = (v, req) => {
               if (!v || v === 'none') return false;
@@ -742,7 +742,7 @@ function registerIpc() {
             send(`[check] WS 通道 8822: ${result.channel_port !== 'none' ? '监听中' : '未监听'}\n`);
             send(`[check] 推理代理 8811: ${result.proxy_port !== 'none' ? '监听中' : '未监听'}\n`);
             send(`[check] 通道健康: ${channelUp ? 'OK' : '不可达'}\n`);
-            send(`[check] 通道版本: ${channelVersion}${channelOutdated ? '（过旧，需要 ' + REQUIRED_CHANNEL_VERSION + '+）' : ''}+ (channelBuildStale ? '(脚本 build '+channelBuild+' 过旧，需要 '+REQUIRED_CHANNEL_BUILD+'+)' : '')\n`);
+            send(`[check] 通道版本: ${channelVersion} (build ${channelBuild})${channelOutdated ? '（版本过旧，需要 ' + REQUIRED_CHANNEL_VERSION + '+）' : ''}${channelBuildStale ? '（脚本过旧，需要 build ' + REQUIRED_CHANNEL_BUILD + '+）' : ''}\n`);
             send(`[check] 上游配置 buddy-proxy.env: ${proxyEnv === 'yes' ? '存在' : '不存在'}\n`);
             send(`[check] API Key: ${apiKey ? apiKey.slice(0, 4) + '****' + apiKey.slice(-4) : '未找到'}\n`);
 

@@ -41,7 +41,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 #        图片/文件/音视频（Win 端本地预处理后的派生内容）都能带过来
 #   1.5  resume_session / sync_memory（结晶）
 #   2.0  预测模式远端推断：predict_request / predict_response（supports_predict）
-CHANNEL_VERSION = "2.0"
+#   2.1  v4.10.4：generate_content 生成分支 + 防误判 PREDICT_PROMPT +
+#        CHANNEL_BUILD 版本协商。用户要求：以后修复服务端 prompt/逻辑时
+#        CHANNEL_VERSION 必须升级（不只抬 BUILD），让老客户端一眼看出不兼容。
+CHANNEL_VERSION = "2.1"
 
 # v4.10.3：脚本内容版本（不等于协议版本）。
 # 协议版本（CHANNEL_VERSION）只在新增/删除帧类型时抬；修 prompt 文案、加新函数

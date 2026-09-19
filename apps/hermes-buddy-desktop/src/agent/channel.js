@@ -33,7 +33,7 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
  *       没有 predict 能力，握手时通过 welcome 的 supports_predict 标志区分；客户端
  *       在远端模式下没有该能力时退化为本地/兜底，不会整条挂掉（见 predict-controller）。
  */
-const REQUIRED_CHANNEL_VERSION = '2.0';
+const REQUIRED_CHANNEL_VERSION = '2.1';
 
 /**
  * v4.10.3：服务端脚本内容版本。协议版本（CHANNEL_VERSION）只在新增/删除帧类型时抬；
