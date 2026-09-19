@@ -29,6 +29,40 @@ const JPEG_QUALITY = 80;
 function available() { return !!_electron; }
 
 /**
+ * v4.10.3：黑帧/纯色帧检测。
+ * 实测教训：desktopCapturer 对「最小化/刚被隐藏」的窗口返回纯黑 thumbnail，
+ * VL 拿到后只能输出「屏幕全黑」，远端据此瞎猜意图（日志实锤连续 5 轮）。
+ * 采样 bitmap 亮度：平均 < 10 且最大 < 48 判为黑帧。
+ */
+function _isBlankImage(image) {
+  try {
+    const size = image.getSize();
+    if (!size.width || !size.height) return true;
+    const bmp = image.getBitmap(); // BGRA
+    const bytes = bmp.length;
+    if (!bytes) return true;
+    const stride = size.width * 4;
+    let sum = 0, max = 0, n = 0;
+    // 每行采 16 个点，步长对齐 4 字节
+    const rowStep = Math.max(1, Math.floor(size.width / 16)) * 4;
+    for (let y = 0; y < size.height; y += 4) {
+      const row = y * stride;
+      for (let off = 0; off + 2 < stride; off += rowStep) {
+        const b = bmp[row + off], g = bmp[row + off + 1], r = bmp[row + off + 2];
+        const lum = (r * 299 + g * 587 + b * 114) / 1000;
+        sum += lum; n++;
+        if (lum > max) max = lum;
+      }
+    }
+    if (!n) return false;
+    const avg = sum / n;
+    return avg < 10 && max < 48;
+  } catch (_) {
+    return false; // 检测失败不误杀正常截图
+  }
+}
+
+/**
  * 截取「当前前台窗口」或整屏，缩放至 ≤1280×720，返回 JPEG buffer + base64。
  * @param {object} [opts]
  * @param {number} [opts.maxWidth=1280]
@@ -90,6 +124,17 @@ async function captureActiveWindow({ maxWidth = MAX_WIDTH, maxHeight = MAX_HEIGH
     if (!source) throw new Error('未找到截图目标');
 
     let image = source.thumbnail; // nativeImage
+    // v4.10.3：黑帧兜底——选中的窗口源是最小化/被隐藏窗口时 thumbnail 纯黑，
+    // 换整屏重取；整屏也黑（锁屏/显示器关闭）就放弃本帧（调用方无图分析）。
+    if (_isBlankImage(image)) {
+      const screenSource = sources.find((s) => s.id.startsWith('screen:'));
+      if (screenSource && screenSource.id !== source.id && !_isBlankImage(screenSource.thumbnail)) {
+        source = screenSource;
+        image = screenSource.thumbnail;
+      } else {
+        throw new Error('截图为黑帧（目标窗口最小化或屏幕不可见）');
+      }
+    }
     const size = image.getSize();
     const scale = Math.min(1, maxWidth / size.width, maxHeight / size.height);
     if (scale < 1) {

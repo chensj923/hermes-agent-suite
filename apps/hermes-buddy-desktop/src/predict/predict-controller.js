@@ -193,6 +193,21 @@ class PredictController {
 
   // ---------------- 触发流水线 ----------------
 
+  /**
+   * v4.10.3：前台是否为本应用自己的窗口。
+   * 实测教训：用户刚装完包在 Buddy 界面/托盘上操作时触发预测，截图把仅有的
+   * 前台（自己）藏掉 → 黑帧；远端收到 exeName:"Hermes Buddy" + 黑屏描述后
+   * 只能瞎猜（api_lookup 0.9 置信度就是这么来的）。自己在前台时不该打扰用户。
+   */
+  _isSelfForeground(wi) {
+    if (!wi) return false;
+    const exe = String(wi.exeName || '');
+    const title = String(wi.title || '');
+    if (/hermes/i.test(exe)) return true;
+    if (/hermes[\s-]?buddy/i.test(title)) return true;
+    return false;
+  }
+
   /** 钩子命中规则时由 hooks 回调。 */
   async _onTrigger(triggerResult) {
     if (this._processing) return;           // 已有流水线在跑，丢弃本次触发
@@ -204,6 +219,16 @@ class PredictController {
       // 1) 进入 ANALYZING
       const r1 = this.engine.screenshotTaken();
       if (r1.state !== 'ANALYZING') return;
+
+      // 1.5) v4.10.3：前台是本应用自己 → 整轮跳过（不截图、不调模型、不弹卡）
+      try {
+        const wi = await this.resolveWindow();
+        if (this._isSelfForeground(wi)) {
+          this.logger.info('predict-skip-self-foreground', { title: wi && wi.title, exeName: wi && wi.exeName });
+          this.engine.modelTimeout();
+          return;
+        }
+      } catch (_) { /* 前台解析失败不拦截，继续原流程 */ }
 
       // 2) 截图（仅内存 buffer，不落盘）
       //    v4.10.2：带上前台窗口标题，截图源优先匹配它（避免拿到后台/空白窗口）；
@@ -251,6 +276,13 @@ class PredictController {
         try {
           result = await this._analyze(behaviorContext, imageBase64);
         } catch (e) {
+          // v4.10.3：黑屏观察（截图拿不到有效画面）→ 静默放弃本轮，别降级弹卡
+          // 瞎给建议——那正是「在写文档却被推荐查接口」的来源之一。
+          if (/blank-screen/.test(e.message)) {
+            this.logger.warn('predict-skip-blank-observation');
+            this.engine.modelTimeout();
+            return;
+          }
           // v4.8.5：模型不可用（本地引擎未安装/推理超时、远端通道未连）→ 降级为规则模板弹窗。
           // 旧行为是 modelTimeout()+return 静默丢弃，导致用户只看到转圈；现在必须给出可见输出。
           this.logger.warn('predict-analyze-failed, degrade to rule template', { error: e.message });
@@ -444,6 +476,38 @@ class PredictController {
     return _withTimeout(analyzePromise, timeoutMs, timeoutMsg);
   }
 
+  /**
+   * v4.10.3：清洗远端返回——服务端 JSON 解析失败兜底时会把 ```` ```json ```` 围栏
+   * 原文（可能还被截断）塞进 suggestion，UI 会直接显示一坨代码。
+   * 依次尝试：抽完整 JSON 对象 → 正则抽 suggestion 字段 → 剥围栏取首句。
+   */
+  _cleanRemoteResult(result) {
+    if (!result || typeof result !== 'object') return result;
+    const s = result.suggestion;
+    if (typeof s !== 'string' || !/```|\{"/.test(s)) return result;
+    const trimmed = s.trim();
+    const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        const obj = JSON.parse(jsonMatch[0]);
+        if (obj && typeof obj.suggestion === 'string' && obj.suggestion.trim()) {
+          result.suggestion = obj.suggestion.trim();
+          if ((!result.reason || /```/.test(String(result.reason))) && typeof obj.reason === 'string' && obj.reason.trim()) {
+            result.reason = obj.reason.trim();
+          }
+          return result;
+        }
+      } catch (_) { /* JSON 不完整，走字段抽取 */ }
+    }
+    const field = trimmed.match(/"suggestion"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (field) {
+      try { result.suggestion = JSON.parse('"' + field[1] + '"'); } catch (_) { result.suggestion = field[1]; }
+      return result;
+    }
+    result.suggestion = trimmed.replace(/```[a-z]*/gi, '').split('\n').filter(Boolean)[0] || '需要我帮你做点什么吗？';
+    return result;
+  }
+
   /** 本地小模型推断（判断意图 + 建议）。 */
   async _localAnalyze(behaviorContext, imageBase64) {
     if (this._predictFn) return this._predictFn(behaviorContext, imageBase64);
@@ -488,6 +552,14 @@ class PredictController {
       }
 
       const ctx = Object.assign({}, behaviorContext);
+      // v4.10.3：VL 描述说「黑屏/没有可见内容」→ 截图根本没拍到有效画面
+      // （黑帧/锁屏/最小化窗口）。把这种描述发给远端只会诱导它瞎猜
+      // （实测连续 5 轮黑屏描述 → 远端给出 0.9 置信度的 api_lookup），
+      // 直接放弃本轮，上层静默处理，不弹卡。
+      if (observation && /(黑屏|全黑|纯黑|漆黑|没有可见|没有显示任何|black\s*screen|blank)/i.test(observation.slice(0, 100))) {
+        this.logger.warn('predict-vision-blank', { observationPreview: observation.slice(0, 60) });
+        throw new Error('blank-screen-observation');
+      }
       if (observation) ctx.screenObservation = observation;
       // v4.10.2：留一份观察描述，用户点「生成并插入」时作为生成上下文
       this._lastObservation = observation;
@@ -499,6 +571,8 @@ class PredictController {
       this._remotePromise = ch.predict(ctx, image);
       try {
         const result = await this._remotePromise;
+        // v4.10.3：服务端 JSON 解析失败时可能把 ```json 围栏原文塞进 suggestion
+        this._cleanRemoteResult(result);
         // v4.10.1：远端结论落日志——suggestion/reason 是排查「提示不对」的第一现场。
         this.logger.info('predict-remote-result', {
           windowClass: ctx.windowClass || null,
@@ -603,6 +677,8 @@ class PredictController {
         });
       }
     } catch (e) {
+      // v4.10.3：黑屏观察 → 本轮整体放弃（本地结论也是黑屏图的产物，不能退回它弹卡）
+      if (/blank-screen/.test(e.message)) throw e;
       this.logger.warn('hybrid-remote-failed', { error: e.message });
     }
     // 远端不可用：退回本地结论
@@ -762,6 +838,16 @@ class PredictController {
       // 跳过 TRIGGERED：直接进入 ANALYZING（截图 → 模型）
       this.engine.state = 'ANALYZING';
 
+      // v4.10.3：前台是本应用自己 → 跳过本轮（用户正在操作 Buddy 界面，别打扰）
+      try {
+        const wi = await this.resolveWindow();
+        if (this._isSelfForeground(wi)) {
+          this.logger.info('predict-skip-self-foreground', { title: wi && wi.title, exeName: wi && wi.exeName });
+          this.engine.modelTimeout();
+          return { shown: false, reason: '前台是本应用窗口，跳过本轮预测' };
+        }
+      } catch (_) { /* 前台解析失败不拦截 */ }
+
       let imageBase64 = null;
       if (this.capture) {
         try {
@@ -798,6 +884,12 @@ class PredictController {
         try {
           result = await this._analyze(behaviorContext, imageBase64);
         } catch (e) {
+          // v4.10.3：黑屏观察 → 静默放弃（与 _onTrigger 同理，别瞎弹卡）
+          if (/blank-screen/.test(e.message)) {
+            this.logger.warn('predict-skip-blank-observation');
+            this.engine.modelTimeout();
+            return { shown: false, reason: '截图为黑帧，跳过本轮预测' };
+          }
           this.logger.warn('predict-now-analyze-failed, degrade', { error: e.message });
           result = {
             intent: rule || 'none',
