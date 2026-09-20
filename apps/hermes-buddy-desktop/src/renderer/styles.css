@@ -965,6 +965,16 @@ button:disabled { opacity: .5; cursor: default; }
 .predict-log-header h2 { margin: 0; }
 .predict-log-actions { display: flex; gap: 6px; }
 .predict-log-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; max-height: 560px; overflow-y: auto; }
+
+/* v4.10.24 场景规则编辑器 */
+.scene-rules-box { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; }
+.scene-rule-card { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 10px; }
+.scene-rule-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.scene-enable { display: flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 12px; }
+.scene-name { flex: 1; font-weight: 600; }
+.scene-rule-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.scene-rule-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.scene-rule-grid input { width: 100%; box-sizing: border-box; }
 .predict-log-item { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font-size: 12px; }
 .predict-log-item .pl-time { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
 .predict-log-item .pl-phase { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; background: var(--surface-2); color: var(--text); }

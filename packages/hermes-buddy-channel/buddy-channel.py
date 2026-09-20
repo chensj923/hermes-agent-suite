@@ -52,7 +52,7 @@ CHANNEL_VERSION = "2.2"
 #   1 = v4.10.0 视觉本地化（PREDICT_PROMPT 改写）
 #   2 = v4.10.1 防误判规则 + ctx 补字段
 #   3 = v4.10.2 GENERATE_PROMPT + generate_content 分支
-CHANNEL_BUILD = "9"
+CHANNEL_BUILD = "10"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -810,6 +810,7 @@ GENERATE_PROMPT = (
     "你会收到：行为场景（rule）、当时的建议文案（suggestion）、前台窗口标题"
     "（windowTitle，文档编辑器的窗口标题通常就是文档名，是最可靠的主题线索）、"
     "以及本机视觉模型对屏幕的文字描述（screenObservation，可能为空或只有概略信息）。"
+    "若给出用户自定义方向（direction），它是最高优先级：内容必须朝这个方向生成。"
     "要求："
     "1. 中文，直接给内容本身——不要寒暄、不要复述建议、不要问问题、不要输出 JSON；"
     "2. 主题判断优先级：windowTitle（剥掉文件扩展名和「- Word/WPS」等窗口后缀后"
@@ -839,6 +840,8 @@ def generate_content(behavior, model=None):
     suggestion = (behavior or {}).get("suggestion", "") or ""
     obs = (behavior or {}).get("screenObservation", "") or ""
     reason = (behavior or {}).get("reason", "") or ""
+    # v4.10.24：场景规则的自定义提示词方向（用户在设定框里写的推测方向）
+    direction = (behavior or {}).get("direction", "") or ""
     raw_title = (behavior or {}).get("windowTitle", "") or ""
     # 清洗窗口标题：剥掉「 - Word」「 - WPS Office」等窗口后缀与扩展名，留文档名
     window_title = re.sub(
@@ -847,9 +850,10 @@ def generate_content(behavior, model=None):
     window_title = re.sub(r"\.(docx?|xlsx?|pptx?|md|txt)\s*$", "", window_title, flags=re.I).strip()
     user_text = (
         "场景 rule: %s\n建议 suggestion: %s\n判断依据 reason: %s\n"
-        "窗口标题 windowTitle: %s\n屏幕观察 screenObservation: %s\n\n请生成用户可直接粘贴使用的内容。"
+        "窗口标题 windowTitle: %s\n屏幕观察 screenObservation: %s\n"
+        "用户自定义方向 direction: %s\n\n请生成用户可直接粘贴使用的内容。"
         % (rule, suggestion or "(无)", reason or "(无)",
-           window_title or "(无)", obs or "(无)")
+           window_title or "(无)", obs or "(无)", direction or "(无)")
     )
     messages = [
         {"role": "system", "content": GENERATE_PROMPT},

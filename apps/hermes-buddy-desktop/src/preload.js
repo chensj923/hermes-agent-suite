@@ -128,6 +128,12 @@ const api = {
   onPredictEngineProgress: (handler) => subscribe('buddy:predict:engine-progress', handler),
   predictNow: () => invoke('buddy:predict:now'),
   predictSetPatrol: (minutes) => invoke('buddy:predict:set-patrol', minutes),
+  // v4.10.24：场景规则（结晶场景）
+  sceneRulesGet: () => invoke('buddy:predict:scene-rules:get'),
+  sceneRulesSet: (list) => invoke('buddy:predict:scene-rules:set', list),
+  sceneRulesToggle: (on) => invoke('buddy:predict:scene-rules:toggle', on),
+  insertModeGet: () => invoke('buddy:predict:insert-mode:get'),
+  insertModeSet: (mode) => invoke('buddy:predict:insert-mode:set', mode),
   // v4.10.18：推理记录
   predictLog: () => invoke('buddy:predict:log'),
   predictClearLog: () => invoke('buddy:predict:clear-log'),

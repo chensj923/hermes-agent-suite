@@ -23,6 +23,7 @@ const { BehaviorDB } = require('./behavior-db');
 const { createBehaviorHooks, detectAntivirus } = require('./behavior-hooks');
 const { ActionExecutor } = require('./action-executor');
 const { titleToApp } = require('./win-info');
+const { createSceneWatcher, normalizeSceneRules } = require('./scene-rules');
 
 /** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」。
 /**
@@ -187,6 +188,57 @@ class PredictController {
     this._log = [];
     this._logSeq = 0;
     this._onLogEntry = opts.onLogEntry || null;  // 实时推送给渲染层的回调
+    // v4.10.24：场景规则（结晶场景）监视器。规则表存 config.sceneRules，
+    // 未配置时用内置默认（WPS 写作/润色 + 微信/QQ 回复）。
+    this._sceneWatcher = createSceneWatcher(this.config.get('sceneRules'));
+  }
+
+  // ---------------- 场景规则（v4.10.24 结晶场景） ----------------
+
+  /**
+   * 前台窗口变化时由 main.js 的 hooks 接线调用。
+   * 命中已启用的场景规则（且不在流水线中）→ 跳过截图/VL/远端推断，
+   * 直接弹浮窗给建议——「打开 WPS 就问要不要写作」这类即开即问的顺畅体验。
+   * @param {{exeName?:string,title?:string}} wi OS 前台窗口信息
+   */
+  async onWindowChange(wi) {
+    try {
+      if (!this.isEnabled() || this._processing) return;
+      if (this.config.get('sceneRulesEnabled') === false) return;
+      const rule = this._sceneWatcher.feed(wi);
+      if (!rule || !this.panel) return;
+      this.logger.info('scene-rule-hit', { id: rule.id, exeName: wi && wi.exeName, title: wi && wi.title });
+      this._logEntry({
+        phase: 'trigger',
+        rule: 'scene:' + rule.id,
+        reason: '场景规则: ' + rule.name,
+        sceneRule: true,
+      });
+      const suggestion = {
+        intent: rule.intent,
+        suggestion: rule.suggestion || rule.name,
+        reason: '场景规则: ' + rule.name,
+        confidence: 1,
+        sceneRule: rule,   // 生成时作为提示词方向透传给服务端
+      };
+      let choice = 'later';
+      try { choice = await this.panel.show(suggestion); } catch (_) {}
+      this._applyDecision(choice, 'scene:' + rule.id, suggestion);
+    } catch (e) {
+      this.logger.warn('scene-rule-error', { error: e.message });
+    }
+  }
+
+  /** 设置面板保存场景规则后调用：热更新监视器 + 落盘。 */
+  setSceneRules(list) {
+    const normalized = normalizeSceneRules(list);
+    this.config.set({ sceneRules: normalized });
+    this._sceneWatcher.update(normalized);
+    return this.getSceneRules();
+  }
+
+  getSceneRules() {
+    return this._sceneWatcher.getRules();
   }
 
   // ---------------- 推理记录（v4.10.18） ----------------
@@ -240,6 +292,8 @@ class PredictController {
       logger: this.logger,
       resolveWindow: this.resolveWindow,
       onTrigger: (r) => this._onTrigger(r),
+      // v4.10.24：场景规则监视器挂在前台窗口切换事件上
+      onWindowChange: (p) => this.onWindowChange(p),
     });
     await this.hooks.start();
     this._enabled = true;
@@ -595,6 +649,8 @@ class PredictController {
           reason: (suggestion && suggestion.reason) || '',
           screenObservation: this._lastObservation || '',
           windowTitle: this._lastWindowTitle || '',   // v4.10.23：文档名主题锚点
+          // v4.10.24：场景规则自定义提示词方向（用户在设定框里写的推测方向）
+          direction: (suggestion && suggestion.sceneRule && suggestion.sceneRule.prompt) || '',
         });
         if (res && typeof res.content === 'string' && res.content.trim()) {
           content = res.content.trim();
@@ -634,8 +690,11 @@ class PredictController {
     if (!content) content = (suggestion && suggestion.suggestion) || '';
     if (!content) return;
     if (this.actionExecutor) {
-      // v4.10.10：clipboard-paste = 写入剪贴板 + 模拟 Ctrl+V 自动粘贴到前台窗口
-      await this.actionExecutor.execute({ type: 'clipboard-paste', text: content });
+      // v4.10.24：insertMode 配置决定回填方式。
+      //   'type'（默认）= SendInput 逐字敲进当前窗体，不碰剪贴板；
+      //   'paste' = 写剪贴板 + 模拟 Ctrl+V（旧行为，type 失败时也自动回退到它）。
+      const mode = this.config.get('insertMode') || 'type';
+      await this.actionExecutor.execute({ type: mode === 'paste' ? 'clipboard-paste' : 'type-input', text: content });
     }
     this._notifyGenerated(content.length);
   }
@@ -647,7 +706,7 @@ class PredictController {
       if (Notification && Notification.isSupported && Notification.isSupported()) {
         const n = new Notification({
           title: 'Hermes Buddy',
-          body: '已生成 ' + chars + ' 字并复制到剪贴板，直接粘贴即可使用',
+          body: '已生成 ' + chars + ' 字并直接输入到当前窗体',
           silent: true,
         });
         try { n.show(); } catch (_) {}
@@ -1231,4 +1290,4 @@ class PredictController {
   }
 }
 
-module.exports = { PredictController, RULE_TEMPLATE, PROACTIVE_TEMPLATE, hasUsableSourceContent };
+module.exports = { PredictController, RULE_TEMPLATE, PROACTIVE_TEMPLATE, hasUsableSourceContent, normalizeSceneRules };

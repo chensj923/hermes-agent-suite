@@ -11,6 +11,8 @@
  *     避免「建议一插就把用户正在用的内容冲掉」的竞态；恢复失败也无妨（旧值已尽力保留）。
  *   - clipboard-keep: 写入且不恢复（v4.10.2，生成内容用）
  *   - clipboard-paste: 写入剪贴板 + 模拟 Ctrl+V 自动粘贴到前台窗口（v4.10.10）
+ *   - type-input: SendInput KEYEVENTF_UNICODE 直接在当前窗体打字（v4.10.24），
+ *     不经过剪贴板，用户剪贴板原值分毫不动。
  *   - noop
  */
 
@@ -22,6 +24,57 @@ const DEFAULT_RESTORE_MS = 8000;
  * 调用同目录下的 paste.ps1（PowerShell + Win32 SendInput）。
  * 失败不阻断主流程（已写入剪贴板，用户手动 Ctrl+V 即可）。
  */
+/**
+ * v4.10.24：定位 type.ps1 真实路径（逻辑同 resolvePasteScript，asar unpack 规则一致）。
+ */
+function resolveTypeScript() {
+  const path = require('path');
+  const p = path.join(__dirname, 'type.ps1');
+  if (/app\.asar[\\/]/.test(p)) {
+    const unpacked = p.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1');
+    if (fs.existsSync(unpacked)) return unpacked;
+  }
+  return p;
+}
+
+/**
+ * v4.10.24：直接打字输入（Windows）。
+ * 文本经 stdin（UTF-8）传给 type.ps1，PowerShell 侧用 SendInput KEYEVENTF_UNICODE
+ * 逐字敲进前台窗口——不碰剪贴板，用户正在复制的东西原样保留。
+ * 文本走 stdin 而不是命令行参数：避免转义地狱与 32K 命令行长度上限。
+ * 失败不阻断主流程，返回 false 供上层回退到粘贴。
+ */
+function simulateTyping(text, logger) {
+  return new Promise((resolve) => {
+    try {
+      const { spawn } = require('child_process');
+      const script = resolveTypeScript();
+      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], {
+        timeout: 30000,
+        windowsHide: true,
+      });
+      let settled = false;
+      const done = (ok, err) => {
+        if (settled) return;
+        settled = true;
+        if (logger) {
+          if (ok) logger.info('type-input-sent', { len: String(text || '').length });
+          else logger.warn('type-input-failed', { error: err && err.message });
+        }
+        resolve(ok);
+      };
+      child.on('error', (e) => done(false, e));
+      child.on('exit', (code) => done(code === 0, code === 0 ? null : new Error('type.ps1 exit ' + code)));
+      // stdin 写入可能因进程提前退出而报 EPIPE，吞掉即可
+      child.stdin.on('error', () => {});
+      child.stdin.end(String(text || ''), 'utf8');
+    } catch (e) {
+      if (logger) logger.warn('type-input-failed', { error: e.message });
+      resolve(false);
+    }
+  });
+}
+
 function simulatePaste(logger) {
   const { exec } = require('child_process');
   const path = require('path');
@@ -94,6 +147,15 @@ class ActionExecutor {
         setTimeout(() => simulatePaste(this.logger), 200);
       }
       return r;
+    }
+    if (type === 'type-input') {
+      // v4.10.24：直接打字进当前窗体，不碰剪贴板。失败时回退到 clipboard-paste。
+      const text = String(action.text || '');
+      if (!text) return { ok: true, type: 'type-input', message: '内容为空，跳过' };
+      const ok = await simulateTyping(text, this.logger);
+      if (ok) return { ok: true, type: 'type-input', message: '已直接输入到当前窗体（' + text.length + ' 字）' };
+      this.logger.warn('type-input-fallback-paste');
+      return this.execute({ type: 'clipboard-paste', text });
     }
     if (type === 'noop' || !action) {
       return { ok: true, type: 'noop', message: '无需执行' };

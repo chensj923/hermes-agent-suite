@@ -212,9 +212,11 @@ class IohookBackend {
  * @param {object} opts.logger
  * @param {function} opts.resolveWindow  async () => {windowClass,title,exeName}|null
  * @param {function} opts.onTrigger    (result) => void  引擎命中规则时回调（控制器接管截图/模型/浮窗）
+ * @param {function} [opts.onWindowChange] (p) => void  v4.10.24 每次前台窗口变化回调
+ *   （原始事件含 exeName/title，供场景规则监视器消费；与引擎评估解耦）
  * @param {object}  [opts.backend]     可注入的钩子后端（测试用 FakeBackend）
  */
-function createBehaviorHooks({ config, engine, db, logger, resolveWindow, onTrigger, backend } = {}) {
+function createBehaviorHooks({ config, engine, db, logger, resolveWindow, onTrigger, onWindowChange, backend } = {}) {
   if (!config) throw new Error('createBehaviorHooks 需要 config');
   if (!engine) throw new Error('createBehaviorHooks 需要 engine');
   logger = logger || { info() {}, warn() {}, error() {} };
@@ -235,6 +237,10 @@ function createBehaviorHooks({ config, engine, db, logger, resolveWindow, onTrig
   });
   be.on('window_change', (p) => {
     if (!running) return;
+    // v4.10.24：场景规则监视器消费原始窗口信息（exeName + title）
+    if (typeof onWindowChange === 'function') {
+      try { onWindowChange(p); } catch (_) {}
+    }
     // v4.10.1 遗漏修复：exeName 必须随事件进引擎，否则快照里永远是 null，
     // 远端模型拿不到「前台进程名」这个关键事实。
     const r = engine.handleEvent({ type: 'window_change', windowClass: p.windowClass, exeName: p.exeName });

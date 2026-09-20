@@ -2338,6 +2338,23 @@ async function renderPredictTab() {
 
       <h3>偏好结晶（只存模式，不存内容）</h3>
       <div id="predict-stats" class="predict-stats"></div>
+
+      <h3>回填方式</h3>
+      <label class="settings-field">生成内容如何进入当前窗体
+        <select id="predict-insert-mode">
+          <option value="type">直接输入（逐字敲进当前窗体，不碰剪贴板，推荐）</option>
+          <option value="paste">写入剪贴板 + 自动粘贴（旧行为）</option>
+        </select>
+      </label>
+
+      <h3>场景规则（结晶场景）</h3>
+      <p class="hint">预设触发场景：切换到匹配的前台窗口就<b>直接弹建议</b>（跳过截图和模型推断，反应更快）。每条规则独立冷却，不会反复骚扰。内置三条结晶场景，可修改匹配条件、建议文案与提示词方向，也可新增自己的场景。</p>
+      <div id="scene-rules-box" class="scene-rules-box"></div>
+      <div class="settings-actions">
+        <button class="ghost" id="scene-add" type="button">+ 新增场景规则</button>
+        <button class="primary" id="scene-save" type="button">保存场景规则</button>
+      </div>
+      <div class="settings-status" id="scene-status" role="status"></div>
     </section>
 
     <section>
@@ -2477,6 +2494,18 @@ async function renderPredictTab() {
     if (r && r.error) { $('predict-model-status').textContent = '触发失败：' + r.error; $('predict-model-status').dataset.tone = 'error'; }
     else { $('predict-model-status').textContent = '已触发（若未弹窗，可能是未达置信度门槛，属正常）'; $('predict-model-status').dataset.tone = 'ok'; }
   });
+
+  // 回填方式（v4.10.24：直接输入 / 剪贴板粘贴）
+  const insertModeSel = $('predict-insert-mode');
+  insertModeSel.value = await api.insertModeGet().catch(() => 'type');
+  insertModeSel.addEventListener('change', async () => {
+    const r = await api.insertModeSet(insertModeSel.value).catch((e) => ({ error: e.message }));
+    if (r && r.error) { $('scene-status').textContent = '保存失败：' + r.error; $('scene-status').dataset.tone = 'error'; }
+    else { $('scene-status').textContent = '回填方式已更新：' + (insertModeSel.value === 'paste' ? '剪贴板粘贴' : '直接输入'); $('scene-status').dataset.tone = 'ok'; }
+  });
+
+  // 场景规则编辑器（v4.10.24 结晶场景）
+  setupSceneRulesEditor();
 
   // 引擎现状提示 + 一键安装引导（v4.1）
   // v4.4：三档模式里 local / hybrid 都需要本地小模型，缺引擎时给安装入口
@@ -2849,6 +2878,101 @@ function prependPredictLogItem(listEl, entry) {
   while (listEl.children.length > 200) {
     listEl.removeChild(listEl.lastChild);
   }
+}
+
+// ---------------- 场景规则编辑器（v4.10.24 结晶场景） ----------------
+
+/** 场景规则表在渲染层的临时副本（编辑期间的操作对象）。 */
+let _sceneRulesDraft = null;
+
+async function setupSceneRulesEditor() {
+  const box = document.getElementById('scene-rules-box');
+  if (!box) return;
+  const saved = await api.sceneRulesGet().catch(() => null);
+  _sceneRulesDraft = Array.isArray(saved) && saved.length ? saved : [];
+  renderSceneRuleRows();
+
+  $('scene-add').addEventListener('click', () => {
+    _sceneRulesDraft.push({
+      id: 'scene-' + Date.now().toString(36),
+      name: '新场景',
+      enabled: true,
+      exeNames: '',
+      titleInclude: '',
+      titleExclude: '',
+      intent: 'word_writing',
+      suggestion: '需要我帮你做点什么吗？',
+      prompt: '',
+      cooldownMin: 30,
+    });
+    renderSceneRuleRows();
+  });
+
+  $('scene-save').addEventListener('click', async () => {
+    // 从 DOM 收集回 draft
+    collectSceneRuleRows();
+    const statusEl = $('scene-status');
+    const r = await api.sceneRulesSet(_sceneRulesDraft).catch((e) => ({ error: e.message }));
+    if (r && r.error) { statusEl.textContent = '保存失败：' + r.error; statusEl.dataset.tone = 'error'; return; }
+    _sceneRulesDraft = r;
+    renderSceneRuleRows();
+    statusEl.textContent = '场景规则已保存（' + r.length + ' 条，立即生效）';
+    statusEl.dataset.tone = 'ok';
+  });
+}
+
+function renderSceneRuleRows() {
+  const box = document.getElementById('scene-rules-box');
+  if (!box) return;
+  box.innerHTML = _sceneRulesDraft.map((r, i) => `
+    <div class="scene-rule-card" data-idx="${i}">
+      <div class="scene-rule-head">
+        <label class="scene-enable"><input type="checkbox" data-field="enabled" ${r.enabled !== false ? 'checked' : ''}> 启用</label>
+        <input class="scene-name" data-field="name" value="${escapeHtml(r.name || '')}" placeholder="场景名称">
+        <button class="ghost danger scene-del" type="button" title="删除此规则">✕</button>
+      </div>
+      <div class="scene-rule-grid">
+        <label>进程名匹配（逗号分隔，子串匹配，如 wps, winword）
+          <input data-field="exeNames" value="${escapeHtml(r.exeNames || '')}" placeholder="wps, winword, wechat">
+        </label>
+        <label>标题须含关键词（可选，逗号分隔）
+          <input data-field="titleInclude" value="${escapeHtml(r.titleInclude || '')}" placeholder=".docx, 方案">
+        </label>
+        <label>标题排除关键词（可选，命中则不触发）
+          <input data-field="titleExclude" value="${escapeHtml(r.titleExclude || '')}" placeholder="新建, 空白">
+        </label>
+        <label>建议文案（弹窗上显示的话）
+          <input data-field="suggestion" value="${escapeHtml(r.suggestion || '')}" placeholder="需要我帮你润色吗？">
+        </label>
+        <label>提示词方向（点「生成并插入」时告诉模型往哪个方向写）
+          <input data-field="prompt" value="${escapeHtml(r.prompt || '')}" placeholder="根据对话场景生成一条得体的回复">
+        </label>
+        <label>冷却（分钟，同规则两次弹窗最小间隔）
+          <input data-field="cooldownMin" type="number" min="0" value="${Number(r.cooldownMin) || 30}">
+        </label>
+      </div>
+    </div>`).join('') || '<p class="hint">暂无场景规则，点「新增场景规则」创建。</p>';
+
+  box.querySelectorAll('.scene-del').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.closest('.scene-rule-card').dataset.idx);
+      _sceneRulesDraft.splice(idx, 1);
+      renderSceneRuleRows();
+    });
+  });
+}
+
+function collectSceneRuleRows() {
+  document.querySelectorAll('#scene-rules-box .scene-rule-card').forEach((card) => {
+    const idx = Number(card.dataset.idx);
+    if (!_sceneRulesDraft[idx]) return;
+    card.querySelectorAll('[data-field]').forEach((input) => {
+      const f = input.dataset.field;
+      if (f === 'enabled') _sceneRulesDraft[idx].enabled = input.checked;
+      else if (f === 'cooldownMin') _sceneRulesDraft[idx][f] = Number(input.value) || 0;
+      else _sceneRulesDraft[idx][f] = input.value;
+    });
+  });
 }
 
 async function renderPredictLogTab() {

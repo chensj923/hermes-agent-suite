@@ -721,7 +721,7 @@ function registerIpc() {
             const proxyEnv = result.proxy_env || 'no';
             // 与 src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION 保持一致
             const REQUIRED_CHANNEL_VERSION = '2.2';
-            const REQUIRED_CHANNEL_BUILD = 9;
+            const REQUIRED_CHANNEL_BUILD = 10;
             const verAtLeast = (v, req) => {
               if (!v || v === 'none') return false;
               const a = String(v).split('.').map((n) => parseInt(n, 10) || 0);
@@ -1012,6 +1012,20 @@ function registerIpc() {
     const m = Math.max(0, Math.min(120, Number(minutes) || 0));
     getPredict().config.set({ proactivePatrolMinutes: m });
     return getPredict().getStatus();
+  });
+
+  // v4.10.24：场景规则（结晶场景）——读取 / 保存（热更新监视器）
+  handle('buddy:predict:scene-rules:get', () => getPredict().getSceneRules());
+  handle('buddy:predict:scene-rules:set', (_event, list) => getPredict().setSceneRules(list));
+  handle('buddy:predict:scene-rules:toggle', (_event, on) => {
+    getPredict().config.set({ sceneRulesEnabled: Boolean(on) });
+    return getPredict().getStatus();
+  });
+  // v4.10.24：回填方式（type=直接输入 / paste=剪贴板粘贴）
+  handle('buddy:predict:insert-mode:get', () => getPredict().config.get('insertMode') || 'type');
+  handle('buddy:predict:insert-mode:set', (_event, mode) => {
+    getPredict().config.set({ insertMode: mode === 'paste' ? 'paste' : 'type' });
+    return getPredict().config.get('insertMode');
   });
 
   // v4.10.18：推理记录--主进程持有一份回调，push 时转发给渲染层

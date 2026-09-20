@@ -48,7 +48,7 @@ test('model=none + 用户点「生成并插入」→ 剪贴板动作执行 + 引
   assert.ok(captured.actionCalls.length >= 1, '应执行至少一个动作');
   // v4.10.2：「生成并插入」走真生成，无生成函数时兜底回填也改为 clipboard-keep
   //（不被 8 秒恢复机制冲掉）
-  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste');
+  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste' || a.type === 'type-input');
   assert.ok(clip, '应触发剪贴板回填');
   assert.ok(clip.text && clip.text.length > 0, '回填文本非空');
   // 引擎回到 IDLE，且 word_writing 记了一次接受
@@ -91,7 +91,7 @@ test('predictFn 高置信度 + 用户生成 → 经 capture 截图并回填', as
   });
   await ctrl.triggerRule('api_lookup');
   assert.strictEqual(captured.analyzeCalls, 1, '应调用一次模型');
-  assert.ok(captured.actionCalls.find((a) => (a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste') && /报错/.test(a.text)), '应回填模型生成的建议');
+  assert.ok(captured.actionCalls.find((a) => (a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste' || a.type === 'type-input') && /报错/.test(a.text)), '应回填模型生成的建议');
 });
 
 test('本地模型未就绪（无 predictFn/buildRunner）→ 降级规则模板仍弹窗，不静默丢弃', async () => {
@@ -103,7 +103,7 @@ test('本地模型未就绪（无 predictFn/buildRunner）→ 降级规则模板
   assert.strictEqual(captured.suggestion.intent, 'api_lookup');
   assert.ok(/降级/.test(captured.suggestion.reason), 'reason 应注明降级原因');
   assert.ok(/未就绪/.test(captured.suggestion.reason), 'reason 应包含引擎未就绪信息');
-  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste');
+  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste' || a.type === 'type-input');
   assert.ok(clip, '降级模板也应走剪贴板动作');
 });
 
@@ -158,9 +158,24 @@ test('v4.10.22：屏幕有正文时点「生成并插入」→ 正常生成并�
   ctrl._lastObservation = '正在文档中写作，文档标题是《季度总结》，开头写着：本季度我们完成了三项重点任务';
   await ctrl.triggerRule('word_writing');
   assert.strictEqual(generateCalled, 1, '有正文时应调用远端生成');
-  const clip = captured.actionCalls.find((a) => a.type === 'clipboard-paste');
-  assert.ok(clip, '应触发剪贴板粘贴');
+  const clip = captured.actionCalls.find((a) => a.type === 'type-input' || a.type === 'clipboard-paste');
+  assert.ok(clip, '应触发回填动作（直接输入或粘贴）');
   assert.strictEqual(clip.text, '这是一段真正生成的正文内容。');
+});
+
+test('v4.10.24：insertMode 默认直接输入（type-input），paste 模式走剪贴板粘贴', async () => {
+  const a = makeController({ model: 'none', choice: 'generate' });
+  a.ctrl._generateContentFn = async () => ({ content: '直接输入的正文。' });
+  a.ctrl._lastObservation = '正在文档中写作，标题是《项目计划》，开头写着：本周进度如下';
+  await a.ctrl.triggerRule('word_writing');
+  assert.strictEqual(a.captured.actionCalls[0].type, 'type-input', '默认应为 type-input');
+
+  const b = makeController({ model: 'none', choice: 'generate' });
+  b.ctrl.config.set({ insertMode: 'paste' });
+  b.ctrl._generateContentFn = async () => ({ content: '粘贴的正文。' });
+  b.ctrl._lastObservation = '正在文档中写作，标题是《项目计划》，开头写着：本周进度如下';
+  await b.ctrl.triggerRule('word_writing');
+  assert.strictEqual(b.captured.actionCalls[0].type, 'clipboard-paste', 'insertMode=paste 应为 clipboard-paste');
 });
 
 test('v4.10.23：生成请求必须带上窗口标题（windowTitle）——文档名是最可靠的主题锚点', async () => {
