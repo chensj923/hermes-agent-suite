@@ -41,7 +41,7 @@ const REQUIRED_CHANNEL_VERSION = '2.2';
  * 并提示重新部署（老用户装新客户端后服务端仍是旧脚本 -> 功能静默缺失）。
  * 服务端 CHANNEL_BUILD < 此值 -> "服务端脚本过旧，请重新部署"。
  */
-const REQUIRED_CHANNEL_BUILD = 4;
+const REQUIRED_CHANNEL_BUILD = 5;
 
 /** 解析 "1.1" / "1" / "v2.0.3" 这类版本号，取 major.minor 比较。 */
 function parseVersion(value) {
