@@ -101,6 +101,37 @@ function _ungenericServerDegrade(result) {
   return result;
 }
 
+/**
+ * v4.10.22：判断屏幕观察描述里是否存在「可供生成的正文内容」。
+ *
+ * 背景：连续多个版本用户反馈「生成并插入粘贴出来的是模板」。根因不是 prompt 措辞，
+ * 而是截图拍到的画面里根本没有正文——用户在聊天输入框/空白页里触发时，VL 模型描述成
+ * 「光标在空白处，没有输入内容」，远端模型拿不到任何素材，只能按兜底规则吐一个模板。
+ *
+ * 与其继续调 prompt 求模型别出模板，不如在客户端堵死：源素材为空时压根不调远端、
+ * 不写剪贴板、不模拟粘贴，只提示用户把光标移到正文里。
+ *
+ * 判定优先级（先肯定后否定，避免误伤真实的正文）：
+ *   1. 描述以「无正文」开头  -> 明确无内容（v4.10.22 DESCRIBE_PROMPT 规则 4 约定）
+ *   2. 描述里有正文摘录特征  -> 有内容
+ *   3. 描述里有明确空内容表述 -> 无内容
+ *   4. 其余默认认为有内容（保守，宁可多生成一次也不误杀）
+ */
+function hasUsableSourceContent(observation) {
+  const obs = String(observation || '').trim();
+  // 空观察 != 无正文：remote 模式不跑本地 VL、或 VL 未就绪/截图失败时，
+  // screenObservation 本来就是空的，此时靠行为元数据（rule/suggestion）生成，
+  // 必须放行，否则 remote 模式下「生成并插入」会彻底失效。
+  if (!obs) return true;
+  if (/^无正文/.test(obs)) return false;                     // 结构化标记：无正文
+  // 有正文摘录特征：明确的写作动作 + 摘录/标题
+  if (/正在文档中写作/.test(obs)) return true;
+  if (/(开头写着|标题是|写着[：:]|正文|文档标题)/.test(obs)) return true;
+  // 明确的空内容表述
+  if (/(没有输入内容|没有看到.{0,8}内容|文档为空白|只有标题|空白页|输入框为空|空白文档|没有文字)/.test(obs)) return false;
+  return true;
+}
+
 class PredictController {
   /**
    * @param {object} opts
@@ -534,6 +565,24 @@ class PredictController {
    */
   async _generateAndDeliver(suggestion) {
     let content = '';
+    // v4.10.22 守卫：屏幕上没有可识别的正文内容时，不生成、不写剪贴板、不粘贴。
+    // 这是「生成并插入总是粘贴模板」的真正根因——源素材为空，远端只能吐模板兜底。
+    // 与其继续调 prompt 求模型别出模板，不如源头拦截并明确告诉用户原因。
+    const _obs = this._lastObservation || '';
+    if (!hasUsableSourceContent(_obs)) {
+      this.logger.warn('predict-generate-no-source-content', {
+        observation: _obs.slice(0, 120),
+        intent: (suggestion && suggestion.intent) || '',
+      });
+      this._logEntry({
+        phase: 'generated',
+        status: 'no-source-content',
+        intent: (suggestion && suggestion.intent) || '',
+        observationPreview: _obs.slice(0, 200),
+      });
+      this._notifyNoSourceContent();
+      return;
+    }
     // v4.10.2：内容生成走注入的 generateContentFn（main.js 里接远端通道）。
     // 不直接复用 this.channel/_resolveChannel——那会跟判断阶段的请求共用
     // 计数，测试断言「远端只被调一次」；且生成失败也不该影响主流程。
@@ -598,6 +647,25 @@ class PredictController {
         const n = new Notification({
           title: 'Hermes Buddy',
           body: '已生成 ' + chars + ' 字并复制到剪贴板，直接粘贴即可使用',
+          silent: true,
+        });
+        try { n.show(); } catch (_) {}
+      }
+    } catch (_) { /* node --test 环境无 electron */ }
+  }
+
+  /**
+   * v4.10.22：源素材为空时的用户提示。明确告知「没识别到正文」，
+   * 而不是静默失败或塞一个模板进去。
+   */
+  _notifyNoSourceContent() {
+    this.logger.info('predict-notify-no-source-content');
+    try {
+      const { Notification } = require('electron');
+      if (Notification && Notification.isSupported && Notification.isSupported()) {
+        const n = new Notification({
+          title: 'Hermes Buddy',
+          body: '当前屏幕没有识别到正在编辑的正文内容，已跳过生成。请把光标放到文档正文中，或先选中一段文字再使用「生成并插入」。',
           silent: true,
         });
         try { n.show(); } catch (_) {}
@@ -1159,4 +1227,4 @@ class PredictController {
   }
 }
 
-module.exports = { PredictController, RULE_TEMPLATE, PROACTIVE_TEMPLATE };
+module.exports = { PredictController, RULE_TEMPLATE, PROACTIVE_TEMPLATE, hasUsableSourceContent };

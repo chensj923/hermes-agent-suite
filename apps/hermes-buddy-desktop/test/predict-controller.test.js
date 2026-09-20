@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const { test } = require('node:test');
 
-const { PredictController } = require('../src/predict/predict-controller');
+const { PredictController, hasUsableSourceContent } = require('../src/predict/predict-controller');
 
 function tmpDir() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'pred-ctrl-'));
@@ -105,6 +105,62 @@ test('本地模型未就绪（无 predictFn/buildRunner）→ 降级规则模板
   assert.ok(/未就绪/.test(captured.suggestion.reason), 'reason 应包含引擎未就绪信息');
   const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste');
   assert.ok(clip, '降级模板也应走剪贴板动作');
+});
+
+// ---------------------------------------------------------------------------
+// v4.10.22：无正文守卫。用户连续反馈「生成并插入粘贴出来的是模板」，根因是截图里
+// 根本没有正文（在聊天输入框/空白页里触发），远端只能吐模板兜底。这里锁定：
+// 源素材明确无正文时不生成、不写剪贴板、不粘贴。
+// ---------------------------------------------------------------------------
+
+test('hasUsableSourceContent：空观察放行（remote 模式没有本地 VL，不能误杀）', () => {
+  assert.strictEqual(hasUsableSourceContent(''), true);
+  assert.strictEqual(hasUsableSourceContent(null), true);
+  assert.strictEqual(hasUsableSourceContent(undefined), true);
+});
+
+test('hasUsableSourceContent：结构化「无正文」标记 → 拦截', () => {
+  assert.strictEqual(hasUsableSourceContent('无正文：正在 WorkBuddy 的聊天输入框，输入框为空。'), false);
+});
+
+test('hasUsableSourceContent：空白页 / 空输入框类描述 → 拦截', () => {
+  assert.strictEqual(hasUsableSourceContent('正在编辑区中，光标在空白处，没有输入内容。'), false);
+  assert.strictEqual(hasUsableSourceContent('正在编辑的 Word 文档，光标在空白处，没有输入内容。'), false);
+  assert.strictEqual(hasUsableSourceContent('打开了一个空白文档，还没有写任何东西。'), false);
+});
+
+test('hasUsableSourceContent：有正文摘录的描述 → 放行（不误伤真实写作）', () => {
+  assert.strictEqual(hasUsableSourceContent('正在文档中写作，文档标题是《季度总结》，开头写着：本季度我们完成了...'), true);
+  assert.strictEqual(hasUsableSourceContent('正在文档中写作，光标停在段落中间，前面写着：综上所述。'), true);
+  // 描述里同时提到「光标在空白处」但有真实摘录时，不能误判成无正文
+  assert.strictEqual(hasUsableSourceContent('正在文档中写作，标题是《项目计划》，光标在空白处'), true);
+});
+
+test('v4.10.22：屏幕无正文时点「生成并插入」→ 不调远端、不写剪贴板、不粘贴', async () => {
+  const { ctrl, captured } = makeController({ model: 'none', choice: 'generate' });
+  let generateCalled = 0;
+  ctrl._generateContentFn = async () => { generateCalled += 1; return { content: '【模板】不该出现' }; };
+  // 模拟上一轮 VL 明确报告：屏幕上没有正文
+  ctrl._lastObservation = '无正文：正在聊天输入框，输入框为空。';
+  await ctrl.triggerRule('word_writing');
+  assert.strictEqual(generateCalled, 0, '源素材为空时不该调用远端生成');
+  assert.strictEqual(captured.actionCalls.length, 0, '不该写剪贴板 / 粘贴');
+  // 推理记录里要能看到这次拦截及原因
+  const entries = ctrl.getLog ? ctrl.getLog() : [];
+  const blocked = entries.find((e) => e.status === 'no-source-content');
+  assert.ok(blocked, '推理记录应记一条 no-source-content');
+});
+
+test('v4.10.22：屏幕有正文时点「生成并插入」→ 正常生成并回填（守卫不误伤）', async () => {
+  const { ctrl, captured } = makeController({ model: 'none', choice: 'generate' });
+  let generateCalled = 0;
+  ctrl._generateContentFn = async () => { generateCalled += 1; return { content: '这是一段真正生成的正文内容。' }; };
+  ctrl._lastObservation = '正在文档中写作，文档标题是《季度总结》，开头写着：本季度我们完成了三项重点任务';
+  await ctrl.triggerRule('word_writing');
+  assert.strictEqual(generateCalled, 1, '有正文时应调用远端生成');
+  const clip = captured.actionCalls.find((a) => a.type === 'clipboard-paste');
+  assert.ok(clip, '应触发剪贴板粘贴');
+  assert.strictEqual(clip.text, '这是一段真正生成的正文内容。');
 });
 
 test('一键关闭 → enabled/authorized 落盘为 false', async () => {

@@ -52,7 +52,7 @@ CHANNEL_VERSION = "2.2"
 #   1 = v4.10.0 视觉本地化（PREDICT_PROMPT 改写）
 #   2 = v4.10.1 防误判规则 + ctx 补字段
 #   3 = v4.10.2 GENERATE_PROMPT + generate_content 分支
-CHANNEL_BUILD = "7"
+CHANNEL_BUILD = "8"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -813,23 +813,20 @@ GENERATE_PROMPT = (
     "1. 中文，直接给内容本身——不要寒暄、不要复述建议、不要问问题、不要输出 JSON；"
     "2. 如果 screenObservation 能看出具体主题/标题，围绕它生成具体内容"
     "（如：正文续写段、要点总结、步骤清单）；"
-    "3. 只有在 screenObservation 完全为空、或者确实看不到任何可参考的内容时，"
-    "才按 intent 场景生成一个立即可用的提纲/模板，并在第一行写【模板】二字。"
-    "只要屏幕上有一丁点文字信息（哪怕只有标题、表格框架、几行正文），"
-    "就必须围绕那些真实内容来生成，而不是偷懒出模板；"
+    "3. 【禁止出模板】绝对不要输出提纲、大纲、模板、占位符、填空下划线"
+    "（如「主题：______」「一、二、三」「- [ ]」这类骨架）。"
+    "用户点「生成并插入」要的是可直接粘贴使用的成文内容，不是框架。"
+    "即使 screenObservation 很概略、没有具体主题，你也必须根据 rule 场景和"
+    "suggestion 文案写出一段通顺的成文段落，而不是退回模板骨架；"
     "4. 长度控制在 100~300 字。只输出正文。"
-    "5. 重要：screenObservation 里可能包含系统 UI 文字、输入法提示弹窗、"
+    "5. screenObservation 里可能包含系统 UI 文字、输入法提示弹窗、"
     "浏览器/编辑器的菜单项、状态栏文字等非正文内容。你必须区分哪些是用户"
-    "正在创作的正文、哪些是 UI 噪声。如果 screenObservation 里只有 UI 弹窗"
-    "提示（如「按 Esc 退出」「切换输入法」「保存后重启」等操作指引），没有"
-    "用户实际在写的文档内容，就按 intent 场景出模板（第一行写【模板】），"
-    "不要把 UI 提示当正文主题来生成。"
-    "6. 关键：如果 screenObservation 说了应用名（如 WPS、Word）但没读出文档"
-    "的实际标题或正文内容（只说光标在文档中之类），你也不要出模板。"
-    "应该根据 rule 场景和 suggestion 文案，生成一段通用的续写内容。"
-    "例如 rule=word_writing 且 suggestion 提到续写时，生成一段通用的"
-    "文章过渡段或总结段（如：综上所述，以上分析表明... 这种可粘贴的"
-    "通用段落），而不是出模板。出模板是最后手段，不是默认行为。"
+    "正在创作的正文、哪些是 UI 噪声，不要把 UI 提示当正文主题来生成。"
+    "6. 如果 screenObservation 说了应用名（如 WPS、Word）但没读出文档的"
+    "实际标题或正文内容，就根据 rule 场景生成一段通用的成文内容。"
+    "例如 rule=word_writing 时生成一段可粘贴的过渡段或总结段；"
+    "rule=reading_or_thinking 时生成一段围绕该主题的分析性文字。"
+    "始终输出成文段落，绝不输出骨架模板。"
 )
 
 
