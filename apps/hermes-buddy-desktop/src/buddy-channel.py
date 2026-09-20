@@ -52,7 +52,7 @@ CHANNEL_VERSION = "2.2"
 #   1 = v4.10.0 视觉本地化（PREDICT_PROMPT 改写）
 #   2 = v4.10.1 防误判规则 + ctx 补字段
 #   3 = v4.10.2 GENERATE_PROMPT + generate_content 分支
-CHANNEL_BUILD = "6"
+CHANNEL_BUILD = "7"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -824,6 +824,12 @@ GENERATE_PROMPT = (
     "提示（如「按 Esc 退出」「切换输入法」「保存后重启」等操作指引），没有"
     "用户实际在写的文档内容，就按 intent 场景出模板（第一行写【模板】），"
     "不要把 UI 提示当正文主题来生成。"
+    "6. 关键：如果 screenObservation 说了应用名（如 WPS、Word）但没读出文档"
+    "的实际标题或正文内容（只说光标在文档中之类），你也不要出模板。"
+    "应该根据 rule 场景和 suggestion 文案，生成一段通用的续写内容。"
+    "例如 rule=word_writing 且 suggestion 提到续写时，生成一段通用的"
+    "文章过渡段或总结段（如：综上所述，以上分析表明... 这种可粘贴的"
+    "通用段落），而不是出模板。出模板是最后手段，不是默认行为。"
 )
 
 
