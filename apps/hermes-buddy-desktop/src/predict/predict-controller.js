@@ -188,9 +188,80 @@ class PredictController {
     this._log = [];
     this._logSeq = 0;
     this._onLogEntry = opts.onLogEntry || null;  // 实时推送给渲染层的回调
+    // v4.10.27：目标窗口（要插入内容的那个窗体）。由 captureTargetWindowFn 在触发
+    // 那一刻异步捕获（那时前台还是用户的文档窗口），插入时直接用句柄 Activate，
+    // 不再依赖「打字时沿 Z 序猜」——浮窗 focus / 点按钮都会把前台抢走，猜不准。
+    this._captureTargetWindowFn = opts.captureTargetWindowFn || null;
+    this._targetWindow = null;
+    this._targetPromise = null;
     // v4.10.24：场景规则（结晶场景）监视器。规则表存 config.sceneRules，
     // 未配置时用内置默认（WPS 写作/润色 + 微信/QQ 回复）。
     this._sceneWatcher = createSceneWatcher(this.config.get('sceneRules'));
+  }
+
+  // ---------------- 目标窗口捕获（v4.10.27） ----------------
+
+  /**
+   * 在流水线起头发起一次目标窗口捕获——不 await，与截图/模型推理并行跑。
+   * 必须在这里（而不是插入时）发起：此刻前台还是用户真正在用的文档窗口，
+   * 再晚一步浮窗 focus 或用户点按钮就把前台抢走了。
+   * @returns {Promise<{hwnd:number,pid:number,title:string}|null>}
+   */
+  _startTargetCapture() {
+    if (typeof this._captureTargetWindowFn !== 'function') return Promise.resolve(null);
+    const p = Promise.resolve()
+      .then(() => this._captureTargetWindowFn({ buddyPid: process.pid, logger: this.logger }))
+      .then((w) => {
+        if (w && w.hwnd) {
+          this._targetWindow = w;
+          // 顺带把窗口标题补上——主题锚点（v4.10.23）在场景规则路径下常为空
+          if (!this._lastWindowTitle && w.title) this._lastWindowTitle = w.title;
+        }
+        return this._targetWindow;
+      })
+      .catch((e) => {
+        this.logger.warn('target-window-capture-error', { error: e && e.message });
+        return null;
+      });
+    this._targetPromise = p;
+    return p;
+  }
+
+  /** 插入前调用：等捕获落地（最多几秒），拿不到就返回 null（脚本内回退 Z 序查找）。 */
+  async _resolveTargetWindow() {
+    if (this._targetWindow) return this._targetWindow;
+    if (this._targetPromise) {
+      try { await this._targetPromise; } catch (_) {}
+      this._targetPromise = null;
+    }
+    if (!this._targetWindow && typeof this._captureTargetWindowFn === 'function') {
+      // 兜底：流水线起头没发起过（例如纯手动插入路径）→ 现抓一次
+      try {
+        const w = await this._captureTargetWindowFn({ buddyPid: process.pid, logger: this.logger });
+        if (w && w.hwnd) this._targetWindow = w;
+      } catch (_) {}
+    }
+    return this._targetWindow;
+  }
+
+  /**
+   * v4.10.27：给建议打上「需要主题输入」标记。
+   *
+   * 屏幕上没有可识别正文（空白文档 / 只有标题 / 聊天输入框）时，远端拿不到素材，
+   * 只能吐模板——这是「生成并插入总粘贴模板」的根源。与其硬生成，不如在浮窗里
+   * 直接问用户想写什么，把主题当方向喂给模型。
+   */
+  _decorateSuggestion(suggestion) {
+    if (!suggestion) return suggestion;
+    const obs = this._lastObservation || '';
+    // 没有观察（场景规则路径没跑 VL）或观察判定无正文 → 需要用户给主题
+    const needTopic = !obs || !hasUsableSourceContent(obs);
+    if (needTopic) {
+      suggestion.needTopic = true;
+      suggestion.topicHint = suggestion.topicHint
+        || '没有识别到正在编辑的正文，输入你想写的主题';
+    }
+    return suggestion;
   }
 
   // ---------------- 场景规则（v4.10.24 结晶场景） ----------------
@@ -207,6 +278,8 @@ class PredictController {
       if (this.config.get('sceneRulesEnabled') === false) return;
       const rule = this._sceneWatcher.feed(wi);
       if (!rule || !this.panel) return;
+      // v4.10.27：前台刚切到目标窗口，此时抓句柄最准（晚一点浮窗就抢焦点了）
+      this._startTargetCapture();
       this.logger.info('scene-rule-hit', { id: rule.id, exeName: wi && wi.exeName, title: wi && wi.title });
       this._logEntry({
         phase: 'trigger',
@@ -221,6 +294,8 @@ class PredictController {
         confidence: 1,
         sceneRule: rule,   // 生成时作为提示词方向透传给服务端
       };
+      // 场景规则路径没跑 VL，_lastObservation 常为空 → 这里几乎总会需要主题输入
+      this._decorateSuggestion(suggestion);
       let choice = 'later';
       try { choice = await this.panel.show(suggestion); } catch (_) {}
       this._applyDecision(choice, 'scene:' + rule.id, suggestion);
@@ -385,6 +460,8 @@ class PredictController {
     this._processing = true;
     this._degraded = false;                 // v4.8.5：每次新触发重置降级标记
     const mySeq = ++this._pipelineSeq;      // v4.8.8：标记本流水线所有权
+    // v4.10.27：趁前台还是用户窗口，异步抓下目标句柄（不 await，与截图并行）
+    this._startTargetCapture();
     // v4.10.18：记录触发
     this._logEntry({
       phase: 'trigger',
@@ -529,7 +606,7 @@ class PredictController {
       // 6) 浮窗展示 + 等决策
       let choice = 'later';
       if (this.panel) {
-        choice = await this.panel.show(suggestion);
+        choice = await this.panel.show(this._decorateSuggestion(suggestion));
       }
       // v4.10.18：记录用户决策
       this._logEntry({
@@ -579,22 +656,33 @@ class PredictController {
     this.engine.modelResult({ intent: suggestion.intent, confidence: suggestion.confidence });
     if (!this.panel) { this.logger.warn('predict-degrade-no-panel'); return 'later'; }
     this.logger.info('predict-degrade-show', { intent: suggestion.intent, reason: suggestion.reason });
-    const choice = await this.panel.show(suggestion);
+    const choice = await this.panel.show(this._decorateSuggestion(suggestion));
     this.logger.info('predict-degrade-choice', { choice });
     this._applyDecision(choice, rule, suggestion);
     return choice;
   }
 
-  /** 把用户决策写回引擎 + 执行动作。 */
+  /**
+   * 把用户决策写回引擎 + 执行动作。
+   *
+   * v4.10.27：choice 可能是字符串（旧协议），也可能是 {choice, topic}——
+   * 浮窗在「没识别到正文」时会带一个主题输入框，用户填的主题随决策一起回来。
+   */
   _applyDecision(choice, rule, suggestion) {
-    if (choice === 'generate') {
+    let picked = choice;
+    let topic = '';
+    if (choice && typeof choice === 'object') {
+      picked = choice.choice;
+      topic = String(choice.topic || '').trim();
+    }
+    if (picked === 'generate') {
       this.engine.userDecision(true);
       // v4.10.2：「生成并插入」不再把建议问句填进剪贴板（旧实现把
       // "需要我帮你总结吗？"这种话术当成了"内容"，8 秒后还会被恢复机制
       // 冲掉，用户点了等于没点）。改为真正调远端生成一段可粘贴的内容，
       // 失败才退回旧的建议文案兜底。
-      this._generateAndDeliver(suggestion).catch((e) => this.logger.warn('generate-deliver-failed', { error: e.message }));
-    } else if (choice === 'never') {
+      this._generateAndDeliver(suggestion, topic).catch((e) => this.logger.warn('generate-deliver-failed', { error: e.message }));
+    } else if (picked === 'never') {
       // 不再提示：先按拒绝计入冷却（recordDecision 记一次拒绝），再退休该规则。
       // 注意：不要再次 recordDecision，否则拒绝数会被重复计数。
       this.engine.userDecision(false);
@@ -617,13 +705,15 @@ class PredictController {
    * 可粘贴的正文内容，写入剪贴板且不被 8 秒恢复机制冲掉；
    * 远端不可用/旧服务端无 content 字段时退回建议文案（保持旧兜底）。
    */
-  async _generateAndDeliver(suggestion) {
+  async _generateAndDeliver(suggestion, topic) {
     let content = '';
     // v4.10.22 守卫：屏幕上没有可识别的正文内容时，不生成、不写剪贴板、不粘贴。
     // 这是「生成并插入总是粘贴模板」的真正根因——源素材为空，远端只能吐模板兜底。
     // 与其继续调 prompt 求模型别出模板，不如源头拦截并明确告诉用户原因。
+    // v4.10.27：唯一的例外是用户在浮窗里填了主题——主题就是素材，直接放行。
     const _obs = this._lastObservation || '';
-    if (!hasUsableSourceContent(_obs)) {
+    const _topic = String(topic || '').trim();
+    if (!_topic && !hasUsableSourceContent(_obs)) {
       this.logger.warn('predict-generate-no-source-content', {
         observation: _obs.slice(0, 120),
         intent: (suggestion && suggestion.intent) || '',
@@ -636,6 +726,15 @@ class PredictController {
       });
       this._notifyNoSourceContent();
       return;
+    }
+    if (_topic) {
+      this.logger.info('predict-generate-with-topic', { topic: _topic.slice(0, 80) });
+      this._logEntry({
+        phase: 'generated',
+        status: 'with-topic',
+        intent: (suggestion && suggestion.intent) || '',
+        topic: _topic.slice(0, 200),
+      });
     }
     // v4.10.2：内容生成走注入的 generateContentFn（main.js 里接远端通道）。
     // 不直接复用 this.channel/_resolveChannel——那会跟判断阶段的请求共用
@@ -650,7 +749,11 @@ class PredictController {
           screenObservation: this._lastObservation || '',
           windowTitle: this._lastWindowTitle || '',   // v4.10.23：文档名主题锚点
           // v4.10.24：场景规则自定义提示词方向（用户在设定框里写的推测方向）
-          direction: (suggestion && suggestion.sceneRule && suggestion.sceneRule.prompt) || '',
+          // v4.10.27：浮窗里手填的主题优先级最高——空白文档场景下它是唯一素材
+          direction: _topic
+            ? ('用户指定主题：' + _topic + '。请围绕该主题撰写正文内容。')
+            : ((suggestion && suggestion.sceneRule && suggestion.sceneRule.prompt) || ''),
+          topic: _topic,   // 结构化透传（老服务端忽略该字段也不影响）
         });
         if (res && typeof res.content === 'string' && res.content.trim()) {
           content = res.content.trim();
@@ -694,7 +797,20 @@ class PredictController {
       //   'type'（默认）= SendInput 逐字敲进当前窗体，不碰剪贴板；
       //   'paste' = 写剪贴板 + 模拟 Ctrl+V（旧行为，type 失败时也自动回退到它）。
       const mode = this.config.get('insertMode') || 'type';
-      await this.actionExecutor.execute({ type: mode === 'paste' ? 'clipboard-paste' : 'type-input', text: content });
+      // v4.10.27：把触发时捕获的目标窗口句柄一起交给注入脚本，
+      // 确保内容落在用户的文档窗口里，而不是被浮窗/主窗口抢焦点后的空处。
+      const target = await this._resolveTargetWindow();
+      const targetHwnd = target && target.hwnd ? target.hwnd : 0;
+      if (targetHwnd) {
+        this.logger.info('generate-deliver-target', { hwnd: String(targetHwnd), title: (target.title || '').slice(0, 80) });
+      } else {
+        this.logger.warn('generate-deliver-target-unknown');
+      }
+      await this.actionExecutor.execute({
+        type: mode === 'paste' ? 'clipboard-paste' : 'type-input',
+        text: content,
+        targetHwnd,
+      });
     }
     this._notifyGenerated(content.length);
   }
@@ -1123,6 +1239,9 @@ class PredictController {
       reason: '用户主动预测（点桌宠/按钮）',
     });
     try {
+      // v4.10.27：主动预测也要趁早抓目标句柄（点按钮后前台会是本应用，
+      // 这里捕获时脚本会自动沿 Z 序跳到用户上一个窗口）
+      this._startTargetCapture();
       // 跳过 TRIGGERED：直接进入 ANALYZING（截图 → 模型）
       this.engine.state = 'ANALYZING';
 
@@ -1227,8 +1346,8 @@ class PredictController {
       }
 
       let choice = 'later';
-      if (this.panel) choice = await this.panel.show(suggestion);
-      // v4.10.18：记录用户决策
+      if (this.panel) choice = await this.panel.show(this._decorateSuggestion(suggestion));
+      // v4.10.18：记录用户决策（带主题时只记长度，避免整段主题进日志）
       this._logEntry({
         phase: 'decision',
         rule: rule || '',

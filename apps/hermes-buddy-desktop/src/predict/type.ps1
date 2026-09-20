@@ -5,7 +5,10 @@
 # No clipboard involved -- content goes straight into the target app.
 # Fails silently -- caller logs the failure.
 
-param([int]$buddyPid = 0)
+# v4.10.27：-targetHwnd 由控制器在「触发的那一刻」捕获并传入（见 foreground.ps1）。
+# 有它就直接用——比打字时再沿 Z 序猜可靠得多（那时前台常已被浮窗/主窗口抢走）。
+# 没给（老调用方/捕获失败）才回退到 Z 序遍历。
+param([int]$buddyPid = 0, [int]$targetHwnd = 0)
 
 Add-Type -TypeDefinition @"
 using System;
@@ -18,6 +21,8 @@ public class KS2 {
   public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")]
   public static extern IntPtr GetWindow(IntPtr h, uint cmd);
+  [DllImport("user32.dll")]
+  public static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")]
   public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")]
@@ -84,17 +89,27 @@ function Activate-Window([IntPtr]$t) {
 }
 
 $target = [IntPtr]::Zero
-$cur = [KS2]::GetForegroundWindow()
-# 沿 Z 序往下找第一个「可见、且不属于 Buddy 自己」的窗口
-for ($i = 0; $i -lt 30; $i++) {
-  $cur = [KS2]::GetWindow($cur, 2)  # GW_HWNDNEXT
-  if ($cur -eq [IntPtr]::Zero) { break }
-  if (-not [KS2]::IsWindowVisible($cur)) { continue }
-  $p = Get-WindowPid $cur
-  if ($buddyPid -gt 0 -and $p -eq $buddyPid) { continue }   # 跳过 Buddy 自身的窗口
-  if ([KS2]::GetWindowTextLength($cur) -eq 0) { continue }  # 跳过无标题的隐藏/工具窗口
-  $target = $cur
-  break
+# 1) 优先用触发时捕获的句柄（v4.10.27）
+if ($targetHwnd -ne 0) {
+  $h = [IntPtr]$targetHwnd
+  if ([KS2]::IsWindow($h) -and [KS2]::IsWindowVisible($h)) {
+    $hp = Get-WindowPid $h
+    if (-not ($buddyPid -gt 0 -and $hp -eq $buddyPid)) { $target = $h }
+  }
+}
+# 2) 回退：沿 Z 序往下找第一个「可见、有标题、且不属于 Buddy 自己」的窗口
+if ($target -eq [IntPtr]::Zero) {
+  $cur = [KS2]::GetForegroundWindow()
+  for ($i = 0; $i -lt 30; $i++) {
+    $cur = [KS2]::GetWindow($cur, 2)  # GW_HWNDNEXT
+    if ($cur -eq [IntPtr]::Zero) { break }
+    if (-not [KS2]::IsWindowVisible($cur)) { continue }
+    $p = Get-WindowPid $cur
+    if ($buddyPid -gt 0 -and $p -eq $buddyPid) { continue }   # 跳过 Buddy 自身的窗口
+    if ([KS2]::GetWindowTextLength($cur) -eq 0) { continue }  # 跳过无标题的隐藏/工具窗口
+    $target = $cur
+    break
+  }
 }
 if ($target -ne [IntPtr]::Zero) {
   $ok = Activate-Window $target

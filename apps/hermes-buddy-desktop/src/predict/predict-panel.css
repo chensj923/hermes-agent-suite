@@ -98,6 +98,43 @@ body {
   letter-spacing: 0.3px;
 }
 
+/* v4.10.27 主题输入：屏幕上没有正文素材时，让用户直接告诉我们要写什么 */
+.topic-box {
+  margin: 2px 0 10px;
+}
+
+.topic-hint {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+
+.topic-hint.warn {
+  color: #ffb4a2;
+}
+
+.topic-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.topic-input:focus {
+  border-color: var(--accent);
+}
+
+.topic-input::placeholder {
+  color: #6b7690;
+}
+
 .actions {
   display: flex;
   gap: 8px;

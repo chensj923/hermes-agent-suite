@@ -19,8 +19,9 @@ const api = {
     ipcRenderer.on('predict-panel:thinking', (_event, data) => callback(data));
   },
   // 用户点击决策（generate / later / never）
-  decide: (choice) => {
-    ipcRenderer.send('predict-panel:decision', { choice });
+  // v4.10.27：带主题输入框时，把用户输入一起回传（topic 可为空串）
+  decide: (choice, topic) => {
+    ipcRenderer.send('predict-panel:decision', { choice, topic: String(topic || '').trim() });
   },
 };
 

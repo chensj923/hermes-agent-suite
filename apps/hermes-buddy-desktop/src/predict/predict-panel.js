@@ -19,7 +19,11 @@ try { _electron = require('electron'); } catch (_) { /* node 环境 */ }
 
 const PANEL_WIDTH = 360;
 const PANEL_HEIGHT = 240;
+// v4.10.27：带主题输入框时要高一些（多一行提示 + 一个输入框）
+const PANEL_HEIGHT_TOPIC = 320;
 const SUGGEST_TIMEOUT_MS = 10000;   // 用户 10s 不点 = 视为「稍后」
+// v4.10.27：需要手填主题时给足输入时间，别 10s 就把浮窗收了
+const TOPIC_TIMEOUT_MS = 90000;
 // v4.9.0：hybrid 时间预算 = 本地筛选 18s + 远端推断最长 30s ≈ 48s；
 // 控制器 30s 超时仍会先降级，这里 45s 只是最后兜底（v4.8.9 实测 23s 会在
 // 远端正常推理中途掐断弹窗，造成「思考半天然后超时」）。
@@ -51,7 +55,10 @@ class PredictPanel {
     const { ipcMain } = _electron;
     ipcMain.on('predict-panel:decision', (_event, payload) => {
       const choice = (payload && payload.choice) || 'later';
-      this._resolve(choice);
+      // v4.10.27：浮窗带主题输入框时把用户输入一并回传。
+      // 没有 topic（旧协议/普通场景）就 resolve 字符串，保持向后兼容。
+      const topic = (payload && typeof payload.topic === 'string') ? payload.topic.trim() : '';
+      this._resolve(topic ? { choice, topic } : choice);
     });
     this._ipcReady = true;
   }
@@ -97,8 +104,9 @@ class PredictPanel {
    * 定位浮窗：桌宠可见时弹在猫咪旁边（优先右侧，放不下换左侧，再放不下贴屏幕边缘）；
    * 否则跟旧行为一样弹在鼠标旁。两种来源都 clamp 到屏幕可用区内。
    */
-  _position(win) {
+  _position(win, height) {
     const { screen } = _electron;
+    const h = height || PANEL_HEIGHT;
     let anchor = null;
     if (this.anchorProvider) {
       try { anchor = this.anchorProvider(); } catch (_) { anchor = null; }
@@ -107,10 +115,10 @@ class PredictPanel {
       const disp = screen.getDisplayNearestPoint({ x: Math.round(anchor.x), y: Math.round(anchor.y) });
       const area = disp.workArea;
       let x = anchor.x + anchor.width + 12;
-      let y = anchor.y + (anchor.height - PANEL_HEIGHT) / 2;
+      let y = anchor.y + (anchor.height - h) / 2;
       if (x + PANEL_WIDTH > area.x + area.width) x = anchor.x - PANEL_WIDTH - 12;
       if (x < area.x) x = area.x;
-      if (y + PANEL_HEIGHT > area.y + area.height) y = area.y + area.height - PANEL_HEIGHT;
+      if (y + h > area.y + area.height) y = area.y + area.height - h;
       if (y < area.y) y = area.y;
       win.setPosition(Math.round(x), Math.round(y));
       return;
@@ -121,9 +129,9 @@ class PredictPanel {
     let x = cursor.x + 16;
     let y = cursor.y + 16;
     if (x + PANEL_WIDTH > area.x + area.width) x = cursor.x - PANEL_WIDTH - 16;
-    if (y + PANEL_HEIGHT > area.y + area.height) y = cursor.y - PANEL_HEIGHT - 16;
+    if (y + h > area.y + area.height) y = cursor.y - h - 16;
     x = Math.max(area.x, Math.min(x, area.x + area.width - PANEL_WIDTH));
-    y = Math.max(area.y, Math.min(y, area.y + area.height - PANEL_HEIGHT));
+    y = Math.max(area.y, Math.min(y, area.y + area.height - h));
     win.setPosition(Math.round(x), Math.round(y));
   }
 
@@ -184,10 +192,14 @@ class PredictPanel {
     if (!_electron) return 'later';
     const win = await this._ensureReady();
     if (this._thinkingTimeout) { clearTimeout(this._thinkingTimeout); this._thinkingTimeout = null; }
+    // v4.10.27：需要手填主题时窗口更高，且给用户充足的填写时间
+    const needTopic = Boolean(suggestion && suggestion.needTopic);
+    const height = needTopic ? PANEL_HEIGHT_TOPIC : PANEL_HEIGHT;
+    try { win.setSize(PANEL_WIDTH, height); } catch (_) {}
     return new Promise((resolve) => {
       this._pending = { resolve };
       win.webContents.send('predict-panel:suggestion', suggestion);
-      this._position(win);
+      this._position(win, height);
       try {
         win.setAlwaysOnTop(true, 'screen-saver');
         win.setVisibleOnAllWorkspaces(true);
@@ -198,7 +210,7 @@ class PredictPanel {
         this.logger.warn('predict-panel-show-failed', { error: e.message });
         try { win.show(); } catch (_) {}
       }
-      this._timeout = setTimeout(() => this._resolve('later'), SUGGEST_TIMEOUT_MS);
+      this._timeout = setTimeout(() => this._resolve('later'), needTopic ? TOPIC_TIMEOUT_MS : SUGGEST_TIMEOUT_MS);
     });
   }
 
@@ -223,4 +235,4 @@ class PredictPanel {
   }
 }
 
-module.exports = { PredictPanel, PANEL_WIDTH, PANEL_HEIGHT, SUGGEST_TIMEOUT_MS, THINKING_TIMEOUT_MS };
+module.exports = { PredictPanel, PANEL_WIDTH, PANEL_HEIGHT, PANEL_HEIGHT_TOPIC, SUGGEST_TIMEOUT_MS, TOPIC_TIMEOUT_MS, THINKING_TIMEOUT_MS };

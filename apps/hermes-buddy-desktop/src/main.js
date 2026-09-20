@@ -1193,6 +1193,7 @@ async function bootstrap() {
     const { LocalModelRunner } = require('./predict/local-model-runner');
     const llama = require('./predict/llama-engine');
     const { getForegroundWindowInfo } = require('./predict/win-info');
+    const { captureForegroundWindow } = require('./predict/target-window');
     const { addDefenderExclusion } = require('./predict/behavior-hooks');
 
     const panel = new PredictPanel({
@@ -1212,6 +1213,9 @@ async function bootstrap() {
       panel,
       actionExecutor,
       resolveWindow: async () => getForegroundWindowInfo(),
+      // v4.10.27：目标窗口句柄捕获——必须在触发那一刻抓（前台还是用户的文档窗口），
+      // 之后浮窗 focus / 点按钮都会抢走前台，那时再找就找不回来了。
+      captureTargetWindowFn: (o) => captureForegroundWindow(Object.assign({}, o, { logger })),
       // v4.10.2：「生成并插入」的内容生成——走同一条远端通道，
       // 服务端按 stage=generate_content 走生成分支返回 {content}
       generateContentFn: (payload) => {

@@ -44,14 +44,15 @@ function resolveTypeScript() {
  * 文本走 stdin 而不是命令行参数：避免转义地狱与 32K 命令行长度上限。
  * 失败不阻断主流程，返回 false 供上层回退到粘贴。
  */
-function simulateTyping(text, logger) {
+function simulateTyping(text, logger, targetHwnd) {
   return new Promise((resolve) => {
     const started = Date.now();
     try {
       const { spawn } = require('child_process');
       const script = resolveTypeScript();
       // v4.10.26：-buddyPid 让脚本跳过 Buddy 自身的窗口，把焦点交还给真正的工作窗口。
-      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-buddyPid', String(process.pid)], {
+      // v4.10.27：-targetHwnd 用触发那一刻捕获到的窗口句柄，直接插回那个窗口。
+      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-buddyPid', String(process.pid), '-targetHwnd', String(targetHwnd || 0)], {
         // v4.10.26：PowerShell 冷启动 + Add-Type 编译偶发到 30s（曾观察到 308 字被超时 kill），放宽到 45s。
         timeout: 45000,
         windowsHide: true,
@@ -62,7 +63,7 @@ function simulateTyping(text, logger) {
         settled = true;
         if (logger) {
           const ms = Date.now() - started;
-          if (ok) logger.info('type-input-sent', { len: String(text || '').length, ms: String(ms) });
+          if (ok) logger.info('type-input-sent', { len: String(text || '').length, ms: String(ms), targetHwnd: String(targetHwnd || 0) });
           else logger.warn('type-input-failed', { error: err && err.message, ms: String(ms) });
         }
         resolve(ok);
@@ -80,12 +81,12 @@ function simulateTyping(text, logger) {
 }
 
 // v4.10.26：改用 spawn（可按参数传 buddyPid）并等待退出，保证「焦点归还 → Ctrl+V」顺序执行。
-function simulatePaste(logger) {
+function simulatePaste(logger, targetHwnd) {
   return new Promise((resolve) => {
     try {
       const { spawn } = require('child_process');
       const script = resolvePasteScript();
-      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-buddyPid', String(process.pid)], {
+      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-buddyPid', String(process.pid), '-targetHwnd', String(targetHwnd || 0)], {
         timeout: 20000,
         windowsHide: true
       });
@@ -167,18 +168,19 @@ class ActionExecutor {
       const r = await this._fillClipboard(String(action.text || ''), true);
       if (r.ok) {
         // 延迟 200ms 让剪贴板写入生效，再模拟粘贴
-        setTimeout(() => simulatePaste(this.logger), 200);
+        const hwnd = action.targetHwnd || 0;
+        setTimeout(() => simulatePaste(this.logger, hwnd), 200);
       }
       return r;
     }
     if (type === 'type-input') {
-      // v4.10.24：直接打字进当前窗体，不碰剪贴板。失败时回退到 clipboard-paste。
+      // v4.10.24：直接打字进目标窗体，不碰剪贴板。失败时回退到 clipboard-paste。
       const text = String(action.text || '');
       if (!text) return { ok: true, type: 'type-input', message: '内容为空，跳过' };
-      const ok = await simulateTyping(text, this.logger);
+      const ok = await simulateTyping(text, this.logger, action.targetHwnd || 0);
       if (ok) return { ok: true, type: 'type-input', message: '已直接输入到当前窗体（' + text.length + ' 字）' };
       this.logger.warn('type-input-fallback-paste');
-      return this.execute({ type: 'clipboard-paste', text });
+      return this.execute({ type: 'clipboard-paste', text, targetHwnd: action.targetHwnd || 0 });
     }
     if (type === 'noop' || !action) {
       return { ok: true, type: 'noop', message: '无需执行' };

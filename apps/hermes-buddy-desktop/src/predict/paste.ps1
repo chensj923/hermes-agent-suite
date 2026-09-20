@@ -4,7 +4,8 @@
 # （排除 Buddy 进程自身），否则 Ctrl+V 会粘到 Buddy 自己身上。
 # Fails silently -- clipboard already has content, user can Ctrl+V manually.
 
-param([int]$buddyPid = 0)
+# v4.10.27：-targetHwnd 由控制器在触发那一刻捕获并传入（见 foreground.ps1），优先使用。
+param([int]$buddyPid = 0, [int]$targetHwnd = 0)
 
 Add-Type -TypeDefinition @"
 using System;
@@ -17,6 +18,8 @@ public class KS {
   public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")]
   public static extern IntPtr GetWindow(IntPtr h, uint cmd);
+  [DllImport("user32.dll")]
+  public static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")]
   public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")]
@@ -61,16 +64,27 @@ function Get-WindowPid([IntPtr]$h) {
   return $pid2
 }
 $target = [IntPtr]::Zero
-$cur = [KS]::GetForegroundWindow()
-for ($i = 0; $i -lt 30; $i++) {
-  $cur = [KS]::GetWindow($cur, 2)  # GW_HWNDNEXT
-  if ($cur -eq [IntPtr]::Zero) { break }
-  if (-not [KS]::IsWindowVisible($cur)) { continue }
-  $p = Get-WindowPid $cur
-  if ($buddyPid -gt 0 -and $p -eq $buddyPid) { continue }
-  if ([KS]::GetWindowTextLength($cur) -eq 0) { continue }
-  $target = $cur
-  break
+# 1) 优先用触发时捕获的句柄（v4.10.27）
+if ($targetHwnd -ne 0) {
+  $h = [IntPtr]$targetHwnd
+  if ([KS]::IsWindow($h) -and [KS]::IsWindowVisible($h)) {
+    $hp = Get-WindowPid $h
+    if (-not ($buddyPid -gt 0 -and $hp -eq $buddyPid)) { $target = $h }
+  }
+}
+# 2) 回退：沿 Z 序找用户上一个窗口
+if ($target -eq [IntPtr]::Zero) {
+  $cur = [KS]::GetForegroundWindow()
+  for ($i = 0; $i -lt 30; $i++) {
+    $cur = [KS]::GetWindow($cur, 2)  # GW_HWNDNEXT
+    if ($cur -eq [IntPtr]::Zero) { break }
+    if (-not [KS]::IsWindowVisible($cur)) { continue }
+    $p = Get-WindowPid $cur
+    if ($buddyPid -gt 0 -and $p -eq $buddyPid) { continue }
+    if ([KS]::GetWindowTextLength($cur) -eq 0) { continue }
+    $target = $cur
+    break
+  }
 }
 if ($target -ne [IntPtr]::Zero) {
   if ([KS]::IsIconic($target)) { [void][KS]::ShowWindow($target, 9) }
