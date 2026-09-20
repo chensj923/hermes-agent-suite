@@ -428,8 +428,11 @@ el.btnWizardAction.addEventListener('click', async () => {
       // 服务端通道过旧：ssh-check 本身不部署，这里自动补一次升级部署。
       // 不带上游参数 —— deploy.sh 检测不到 BUDDY_UPSTREAM_* 就不会动 buddy-proxy.env，
       // 服务端现有的上游配置原样保留。
-      if (result.channelOutdated) {
-        setWizardLog('\n检测到服务端通道版本过旧（' + (result.channelVersion || '未知') + '，客户端需要 1.1+），正在自动升级部署…\n');
+      if (result.channelOutdated || result.channelBuildStale) {
+        const reason = result.channelOutdated
+          ? '通道版本过旧（' + (result.channelVersion || '未知') + '）'
+          : '通道脚本过旧（build ' + (result.channelBuild || '?') + '，需要 build 更新）';
+        setWizardLog('\n检测到服务端' + reason + '，正在自动升级部署…\n');
         const initResult = await api.deployInit({});
         if (!initResult.ok) { setWizardLog('初始化部署包失败: ' + (initResult.error || '未知错误') + '\n'); return; }
         const deployResult = await api.deployToServer({ host, user, keyPath, password, sshPort });
@@ -438,6 +441,7 @@ el.btnWizardAction.addEventListener('click', async () => {
         result = await api.sshCheck({ host, user, keyPath, password, sshPort });
         if (!result.ok) { setWizardLog('复查失败: ' + (result.error || '未知错误') + '\n'); return; }
         if (result.channelOutdated) { setWizardLog('\n部署后通道版本仍过旧（' + (result.channelVersion || '未知') + '），请到服务器上手动重跑 deploy.sh。\n'); return; }
+        if (result.channelBuildStale) { setWizardLog('\n部署后通道脚本仍过旧（build ' + (result.channelBuild || '?') + '），请到服务器上手动重跑 deploy.sh。\n'); return; }
       }
       if (!result.apiKey) { setWizardLog('\n已部署但未找到 API Key，请手动检查服务端配置。\n'); return; }
       if (result.proxyEnv === 'no') {
