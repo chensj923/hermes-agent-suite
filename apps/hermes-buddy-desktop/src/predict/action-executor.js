@@ -14,6 +14,7 @@
  *   - noop
  */
 
+const fs = require('fs');
 const DEFAULT_RESTORE_MS = 8000;
 
 /**
@@ -24,11 +25,29 @@ const DEFAULT_RESTORE_MS = 8000;
 function simulatePaste(logger) {
   const { exec } = require('child_process');
   const path = require('path');
-  const script = path.join(__dirname, 'paste.ps1');
+  const script = resolvePasteScript();
   exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${script}"`, { timeout: 3000 }, (e) => {
-    if (e && logger) logger.warn('paste-simulate-failed', { error: e.message });
-    else if (logger) logger.info('paste-simulated');
+    if (e && logger) logger.warn('paste-simulate-failed', { error: e.message, script });
+    else if (logger) logger.info('paste-simulated', { script });
   });
+}
+
+/**
+ * v4.10.12：定位 paste.ps1 真实路径。
+ * 开发态：src/predict/paste.ps1 在真实文件系统，直接 exists 返回。
+ * 打包态：默认 src 下的文件进 asar，__dirname 落在 app.asar 虚拟路径，
+ * PowerShell 以 -File 打 app.asar 内的虚拟路径会报"路径不存在"导致粘贴失败。
+ * 已在 package.json 的 asarUnpack 把该 .ps1 解到 app.asar.unpacked 同结构位置，
+ * 这里检测 asar 内路径不存在时回退到 unpacked 真实路径。
+ */
+function resolvePasteScript() {
+  const p = path.join(__dirname, 'paste.ps1');
+  try {
+    if (fs.existsSync(p)) return p;
+    const unpacked = p.replace(/app\.asar[\\/]/, 'app.asar.unpacked' + path.sep);
+    if (unpacked !== p && fs.existsSync(unpacked)) return unpacked;
+  } catch (_) { /* 探测失败不阻断，返回 asar 内路径交由 PowerShell 报错 */ }
+  return p;
 }
 
 class ActionExecutor {

@@ -113,6 +113,35 @@ test('predictNow：不受冷却限制（冷却期内用户主动点也能出）'
   assert.strictEqual(r.shown, true, '主动预测应无视冷却');
 });
 
+test('predictNow：主动点猫（OS 前台是桌宠）时，用截到的真实 WPS 窗口标题反推身份 → word_writing', async () => {
+  // 复现线上 bug：用户正在 WPS 写 "Hermes-buddy4.5使用结论："，主动点猫触发预测。
+  // 此时 OS 前台是桌宠自己（resolveWindow 返回 Hermes Buddy），若直接用它会误判成
+  // reading_or_thinking 给出泛化话术；正确做法是读 capture 截到的 WPS 窗口标题。
+  const { ctrl, captured } = makeController({ model: 'none' });
+  ctrl.capture = {
+    captureActiveWindow: async () => ({ base64: 'B64', width: 800, height: 600, source: 'Hermes-buddy4.5使用结论： - WPS 文字' }),
+  };
+  ctrl.resolveWindow = async () => ({ windowClass: 'Chrome_WidgetWin_1', title: 'Hermes Buddy', exeName: 'Hermes Buddy' });
+  const r = await ctrl.predictNow();
+  assert.strictEqual(r.shown, true, '主动预测必须给出反馈');
+  assert.strictEqual(captured.suggestion.intent, 'word_writing', '应识别 WPS 写作场景，而非误判成 reading_or_thinking');
+  assert.strictEqual(captured.suggestion.suggestion, RULE_TEMPLATE.word_writing);
+  // 若身份仍被误判成桌宠（Chrome_WidgetWin_1→browser→reading_or_thinking），
+  // 这里 intent 会是 'none' 而非 'word_writing'，上面断言即回归保护。
+});
+
+test('predictNow：主动点猫但只截到整屏时，回落到 OS 前台真实身份（非桌宠）', async () => {
+  // 整屏截图拿不到窗口标题，此时 OS 前台若是真实应用（如 Word）仍可正确归档。
+  const { ctrl, captured } = makeController({ model: 'none' });
+  ctrl.capture = {
+    captureActiveWindow: async () => ({ base64: 'B64', width: 800, height: 600, source: 'Screen 1' }),
+  };
+  ctrl.resolveWindow = async () => ({ windowClass: 'OpusApp', title: '季度报告.docx - Word', exeName: 'WINWORD' });
+  const r = await ctrl.predictNow();
+  assert.strictEqual(r.shown, true);
+  assert.strictEqual(captured.suggestion.intent, 'word_writing');
+});
+
 test('_inferRuleFromContext：窗口类 → 场景映射', () => {
   const { ctrl } = makeController();
   const infer = (ctx) => ctrl._inferRuleFromContext(ctx);

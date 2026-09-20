@@ -22,6 +22,7 @@ const { BehaviorEngine } = require('./behavior-engine');
 const { BehaviorDB } = require('./behavior-db');
 const { createBehaviorHooks, detectAntivirus } = require('./behavior-hooks');
 const { ActionExecutor } = require('./action-executor');
+const { titleToApp } = require('./win-info');
 
 /** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」。
 /**
@@ -214,6 +215,45 @@ class PredictController {
     if (/hermes/i.test(exe)) return true;
     if (/hermes[\s-]?buddy/i.test(title)) return true;
     return false;
+  }
+
+  /**
+   * v4.10.12：主动预测时确定「用户正在用的应用」身份，写进行为上下文。
+   *
+   * 根因：主动点猫 → OS 前台窗口是桌宠自己，resolveWindow() 返回的 wi 是桌宠身份
+   * （exeName="Hermes Buddy"、Chrome_WidgetWin_1 → 被归成 browser → reading_or_thinking），
+   * 直接用它做规则推断/发给远端模型，就会给出「需要我帮你梳理思路吗」这类泛化话术。
+   * 而 capture 在隐藏本应用窗口后截到的，是用户真正在用的窗口——其 source.name 就是
+   * 真实窗口标题（如 "Hermes-buddy4.5使用结论： - WPS 文字"）。
+   *
+   * 优先级：
+   *  1) 截图源是真实业务窗口（capture 已排除桌宠）→ 用 titleToApp 反推身份覆盖；
+   *  2) 整屏截图（shotSource 形如 "Screen 1"）且 OS 前台是真实应用（非桌宠）→ 用 wi；
+   *  3) 都没拿到 → 不动（_inferRuleFromContext 退化为兜底，不至于误判成阅读）。
+   *
+   * @param {object} ctx 行为上下文（会被原地写入 windowClass/exeName/title）
+   * @param {string} [shotSource] capture 返回的真实窗口标题（或整屏标记）
+   * @param {{windowClass?:string,title?:string,exeName?:string}} [wi] OS 前台窗口信息
+   */
+  _applyScreenIdentity(ctx, shotSource, wi) {
+    if (!ctx) return;
+    const screenRe = /^(screen|entire|全屏)/i;
+    if (shotSource && !screenRe.test(shotSource)) {
+      // capture 选源时已排除桌宠窗口，能到这里的一定是真实业务窗口（即便文档名含 "Hermes"）
+      const id = titleToApp(shotSource);
+      if (id) {
+        ctx.windowClass = id.windowClass;
+        ctx.exeName = id.exeName;
+        ctx.title = id.title;
+        return;
+      }
+    }
+    // 整屏兜底：OS 前台是真实应用时才信任它（桌宠前台不能当业务身份）
+    if (wi && !this._isSelfForeground(wi)) {
+      if (wi.windowClass) ctx.windowClass = wi.windowClass;
+      if (wi.exeName) ctx.exeName = wi.exeName;
+      if (wi.title) ctx.title = wi.title;
+    }
   }
 
   /** 钩子命中规则时由 hooks 回调。 */
@@ -846,35 +886,31 @@ class PredictController {
       // 跳过 TRIGGERED：直接进入 ANALYZING（截图 → 模型）
       this.engine.state = 'ANALYZING';
 
-      // v4.10.3：前台是本应用自己 → 跳过本轮（用户正在操作 Buddy 界面，别打扰）
-      try {
-        const wi = await this.resolveWindow();
-        if (false) { // v4.10.8: 不再跳过
-          this.logger.info('predict-skip-self-foreground', { title: wi && wi.title, exeName: wi && wi.exeName });
-          this.engine.modelTimeout();
-          return { shown: false, reason: '前台是本应用窗口，跳过本轮预测' };
-        }
-      } catch (_) { /* 前台解析失败不拦截 */ }
+      // v4.10.12：取一次前台窗口（截图源匹配 + 身份兜底都用它）。
+      // 注意：主动点猫时 OS 前台就是桌宠自己，这里拿到的 wi 是桌宠身份，
+      // 不能直接当「用户正在用的应用」——真实身份要从截图源标题反推（见 _applyScreenIdentity）。
+      let wi = null;
+      try { wi = await this.resolveWindow(); } catch (_) { /* 前台解析失败不拦截 */ }
+      const fgTitle = (wi && wi.title) || '';
 
       let imageBase64 = null;
+      let shotSource = null;
       if (this.capture) {
         try {
-          let fgTitle = '';
-          try {
-            const wi = await this.resolveWindow();
-            fgTitle = (wi && wi.title) || '';
-          } catch (_) {}
           const shot = await this.capture.captureActiveWindow({
             skipName: /hermes buddy|hermes-buddy|桌宠|buddy/i,
             fgTitle,
           });
           imageBase64 = shot && shot.base64;
+          shotSource = shot && shot.source;
         } catch (e) {
           this.logger.warn('predict-now-capture-failed', { error: e.message });
         }
       }
 
+      // v4.10.12：用截到的真实窗口标题覆盖桌宠前台身份（点猫误判根因）。
       const ctx = this.engine._snapshot();
+      this._applyScreenIdentity(ctx, shotSource, wi);
       const rule = this._inferRuleFromContext(ctx);
       const behaviorContext = Object.assign({ rule, proactive: true }, ctx);
 
