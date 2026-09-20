@@ -101,14 +101,16 @@ test('getModel：落盘记录损坏或目录被删 → null（回落内置，不
   assert.strictEqual(makePet(dataDir2).getModel(), null);
 });
 
-test('点击穿透开关：默认关，开启后落盘并在新实例读回', () => {
+test('点击穿透开关：默认关，仅为运行时开关、不落盘（重启自动回到可交互，避免死锁）', () => {
   const dataDir = tmpDir();
   const pet = makePet(dataDir);
   assert.strictEqual(pet._clickThrough, false, '默认不穿透（否则菜单点不出来）');
   pet._setClickThrough(true);
-  assert.strictEqual(pet._clickThrough, true);
-  assert.strictEqual(makePet(dataDir)._loadClickThrough(), true);
+  assert.strictEqual(pet._clickThrough, true, '运行时可开启');
+  // v4.10.7：穿透不持久化——新实例必须回到 false，否则窗口收不到鼠标事件会死锁
+  assert.strictEqual(makePet(dataDir)._loadClickThrough(), false, '新实例不应读回已开启的穿透（防死锁）');
   pet._setClickThrough(false);
+  assert.strictEqual(pet._clickThrough, false);
   assert.strictEqual(makePet(dataDir)._loadClickThrough(), false);
 });
 

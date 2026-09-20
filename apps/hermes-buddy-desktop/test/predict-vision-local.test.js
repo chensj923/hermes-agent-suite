@@ -143,7 +143,7 @@ test('本机描述超时 → 降级为「不带视觉信息」，仍走远端且
     describeFn: async () => { throw new Error('描述模型推理失败'); },  // 报错而非超时
     modelRunner: { started: true },
   });
-  // 描述超时 18s（LOCAL_SCREEN_TIMEOUT_MS）+ 远端 → 必须在 30s 控制器超时内完成
+  // 描述报错应立即降级为「不带视觉信息」并继续走远端，不再等本机/远端看门狗计时
   const start = Date.now();
   await ctrl.triggerRule('word_writing');
   const elapsed = Date.now() - start;

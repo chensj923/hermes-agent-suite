@@ -30,16 +30,14 @@ const { ActionExecutor } = require('./action-executor');
  * 掐掉只是白等一轮再降级，用户什么都没得到。
  * 改为：本地模型不设短超时，等到有结果或报错（reject/error）；
  * 只设 5 分钟看门狗防止模型进程假死（永远挂起既不是答复也不是报错）。
- * 远端模型保留 30s 超时（网络可能挂死，需要保护）。
+ * v4.10.11：远端模型也改 5 分钟看门狗——实测远端网络 30s 明显不够，
+ * 网络慢时不应掐掉正常推理；看门狗只用于防止连接假死（既不返回也不报错）。
  */
 const LOCAL_SCREEN_TIMEOUT_MS = 300000;  // 5 分钟看门狗（模型进程假死保护）
 const LOCAL_ANALYZE_TIMEOUT_MS = 300000; // 5 分钟看门狗
 
-/** v4.8.6：控制器级模型推断超时。remote/hybrid 与通道层 30s 对齐，避免真实推理 20s+ 时提前降级。 */
-const REMOTE_ANALYZE_TIMEOUT_MS = 30000;
-
-// v4.10.9：本地模式全在本机跑 VLM，推理时间不确定，不设超时（已在前面声明为 0）。
-// 远端模型保留超时保护（网络可能挂死）。
+/** v4.10.11：远端模型推断超时升级为 5 分钟看门狗，与本地对齐，避免远端慢推理被掐。 */
+const REMOTE_ANALYZE_TIMEOUT_MS = 300000;
 
 /** v4.8.8：_withTimeout 轨迹回调（由控制器构造时注入 logger），用于定位「30s 定时器未触发」问题。 */
 let _timeoutTrace = null;

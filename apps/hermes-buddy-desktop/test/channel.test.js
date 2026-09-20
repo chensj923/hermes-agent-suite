@@ -29,10 +29,10 @@ function startMockChannel(onUpgrade) {
 }
 
 // 用客户端要求的最低版本，别写死——协议一升级测试就假失败
-const { REQUIRED_CHANNEL_VERSION } = require('../src/agent/channel');
+const { REQUIRED_CHANNEL_VERSION, REQUIRED_CHANNEL_BUILD } = require('../src/agent/channel');
 
 function sendWelcome(socket, session = 'sess-test') {
-  const payload = Buffer.from(JSON.stringify({ type: 'welcome', session, version: REQUIRED_CHANNEL_VERSION }));
+  const payload = Buffer.from(JSON.stringify({ type: 'welcome', session, version: REQUIRED_CHANNEL_VERSION, channel_build: REQUIRED_CHANNEL_BUILD }));
   const header = payload.length <= 125
     ? Buffer.from([0x81, payload.length])
     : Buffer.from([0x81, 126, payload.length >> 8, payload.length & 0xFF]);
