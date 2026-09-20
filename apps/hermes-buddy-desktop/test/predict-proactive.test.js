@@ -228,3 +228,55 @@ test('浏览器↔IDE 反复横跳 → 判为查接口/查资料', () => {
   assert.strictEqual(r.shouldScreenshot, true);
   assert.strictEqual(r.rule, 'api_lookup');
 });
+
+// ---- v4.10.13：自动触发（_onTrigger）身份纠正 + 低置信度兜底 ----
+
+test('_onTrigger：OS 前台是桌宠时也用截图源标题纠正身份（不再发 Hermes Buddy自身）', async () => {
+  // 复现线上「推理弹没了/没反应」：用户正在 WPS 写文档，但 OS 前台被识别成桌宠自己，
+  // 旧的自动触发路径不纠正身份 → 远端拿到 exeName="Hermes Buddy自身" → 回低置信度「不打扰」
+  // → 被 0.6 门槛拦下 → 思考气泡闪一下就消失。修复后自动路径也要跑 _applyScreenIdentity。
+  let gotCtx = null;
+  const { ctrl, captured } = makeController({
+    model: 'qwen2.5-vl-3b',
+    predictFn: async (ctx) => {
+      gotCtx = ctx;
+      // 模拟服务端：身份正确（wps）才给高置信度写作建议；仍是桌宠则低置信度「不打扰」
+      if (ctx.exeName === 'wps') {
+        return { intent: 'word_writing', confidence: 0.9, suggestion: '需要我帮你续写吗？', reason: '前台为WPS文档编辑器' };
+      }
+      return { intent: 'reading_or_thinking', confidence: 0.55, suggestion: '需要我帮你梳理思路吗？', reason: 'exeName与windowClass为Hermes Buddy自身' };
+    },
+  });
+  ctrl.capture = {
+    captureActiveWindow: async () => ({ base64: 'B64', width: 800, height: 600, source: 'Hermes-buddy4.5使用结论： - WPS 文字' }),
+  };
+  ctrl.resolveWindow = async () => ({ windowClass: 'Chrome_WidgetWin_1', title: 'Hermes Buddy', exeName: 'Hermes Buddy' });
+  await ctrl.triggerRule('word_writing');
+  assert.ok(gotCtx, '应调用模型');
+  assert.strictEqual(gotCtx.exeName, 'wps', '自动路径也必须把桌宠前台纠正成真实 WPS 身份');
+  assert.ok(captured.suggestion, '应弹出浮层（不再无反应）');
+  assert.strictEqual(captured.suggestion.intent, 'word_writing');
+  assert.strictEqual(captured.suggestion.confidence, 0.9);
+});
+
+test('_onTrigger：模型低置信度「不打扰」但行为规则已命中时，退回场景规则模板弹窗（不再静默）', async () => {
+  // 兜底验证「思考闪一下就消失」被消除：即便服务端因身份问题回了低置信度，
+  // 只要行为规则已命中（用户在明确场景），自动触发也要给建议，而不是安静退出。
+  const { ctrl, captured } = makeController({
+    model: 'qwen2.5-vl-3b',
+    predictFn: async () => ({ intent: 'reading_or_thinking', confidence: 0.5, suggestion: '需要我帮你梳理思路吗？', reason: '信息较模糊，低置信度不打扰' }),
+  });
+  // 模拟身份仍误判成桌宠、且截图源标题无法反推（titleToApp 返回 null）
+  ctrl.capture = {
+    captureActiveWindow: async () => ({ base64: 'B64', width: 800, height: 600, source: '某未知文档' }),
+  };
+  ctrl.resolveWindow = async () => ({ windowClass: 'Chrome_WidgetWin_1', title: 'Hermes Buddy', exeName: 'Hermes Buddy' });
+  ctrl.engine.ctx.exeName = 'Hermes Buddy';
+  ctrl.engine.ctx.windowClass = 'Chrome_WidgetWin_1';
+  await ctrl.triggerRule('word_writing');
+  assert.ok(captured.suggestion, '低置信度但规则命中也应弹窗，不能无反应');
+  assert.strictEqual(captured.suggestion.intent, 'word_writing', '应退回场景规则模板');
+  assert.strictEqual(captured.suggestion.suggestion, RULE_TEMPLATE.word_writing);
+  assert.ok(/场景/.test(captured.suggestion.reason), 'reason 应注明按场景兜底');
+});
+

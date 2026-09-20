@@ -282,18 +282,20 @@ class PredictController {
       //    v4.10.2：带上前台窗口标题，截图源优先匹配它（避免拿到后台/空白窗口）；
       //    capture 内部还会隐藏本应用窗口，防止桌宠猫污染画面。
       let imageBase64 = null;
+      let shotSource = null;
+      let wi = null;
       if (this.capture) {
         try {
-          let fgTitle = '';
           try {
-            const wi = await this.resolveWindow();
-            fgTitle = (wi && wi.title) || '';
+            wi = await this.resolveWindow();
           } catch (_) {}
+          const fgTitle = (wi && wi.title) || '';
           const shot = await this.capture.captureActiveWindow({
             skipName: /hermes buddy|hermes-buddy|桌宠|buddy/i,
             fgTitle,
           });
           imageBase64 = shot && shot.base64;
+          shotSource = shot && shot.source;
         } catch (e) {
           this.logger.warn('predict-capture-failed', { error: e.message });
         }
@@ -305,6 +307,10 @@ class PredictController {
       // v4.8.9：记住最近一次触发的规则，供超时降级兜底（engine.pending() 在
       // 超时回调里常已清空，导致降级弹窗 intent 退化成 unknown、建议泛化）。
       if (rule) this._lastRule = rule;
+      // v4.10.13：自动触发也要纠正「桌宠被当成前台应用」的身份误判。
+      // 否则远端拿到 exeName="Hermes Buddy自身" 会回低置信度「不打扰」，
+      // 被 0.6 门槛拦下后思考气泡闪一下就消失，用户观感是「推理弹没了、没反应」。
+      this._applyScreenIdentity(ctx, shotSource, wi);
       const behaviorContext = Object.assign({ rule }, ctx);
 
       // 4) 模型判断意图（本地 / 远端 / 本地+远端）
@@ -356,12 +362,6 @@ class PredictController {
         intent: result.intent,
         confidence: result.confidence,
       });
-      if (!r2.suggest) {
-        // 模型觉得不该打扰 → 不弹窗，回到 IDLE
-        return;
-      }
-
-      // 6) 浮窗展示 + 等决策
       const suggestion = {
         intent: result.intent,
         suggestion: result.suggestion || RULE_TEMPLATE[result.intent] || '需要我帮你做点什么吗？',
@@ -369,6 +369,25 @@ class PredictController {
         confidence: result.confidence,
         action: this._buildAction(result.intent, result.suggestion),
       };
+      // v4.10.13：自动触发复用主动预测的兜底——行为规则已命中（用户在写字/查资料
+      // 等明确场景），却因身份误判导致远端回低置信度「不打扰」时，退回场景规则模板，
+      // 避免「思考中闪一下就消失、毫无反应」。仅当连场景规则都没有（真的不明确）
+      // 时才真正安静退出，收走 thinking 态。
+      if (!r2.suggest) {
+        // 仅对「明确场景」规则兜底弹窗（写作/录表/查接口/收集资料）；
+        // 泛化的 reading_or_thinking（鼠标空闲 3s 即触发）不兜底，避免每次发呆都弹
+        // 「需要我帮你梳理思路吗」。这一步消除「思考中闪一下就消失、毫无反应」的顽疾，
+        // 又守住被动模式的「不打扰」语义。
+        if (rule && rule !== 'reading_or_thinking' && RULE_TEMPLATE[rule]) {
+          suggestion.intent = rule;
+          suggestion.suggestion = RULE_TEMPLATE[rule];
+          suggestion.reason = (result.reason ? result.reason + '；' : '') + '已按当前场景给出建议';
+        } else {
+          return;   // 模型觉得不该打扰，且场景也不明确 → 回到 IDLE
+        }
+      }
+
+      // 6) 浮窗展示 + 等决策
       let choice = 'later';
       if (this.panel) {
         choice = await this.panel.show(suggestion);
