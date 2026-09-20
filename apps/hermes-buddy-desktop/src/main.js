@@ -34,6 +34,7 @@ let updater = null;
 let predictController = null;   // v4.0 预测模式编排器（bootstrap 中惰性创建）
 let pet = null;                 // v4.1 桌宠猫咪（bootstrap 中惰性创建）
 let trayInstance = null;        // v4.8.3 常驻系统托盘
+let predictLogCallback = null;  // v4.10.18 推理记录实时推送给渲染层的回调
 let isQuitting = false;         // 真正退出时置 true，关闭到托盘时保持 false
 let logger = { info() {}, warn() {}, error() {}, debug() {} };
 const pendingConfirms = new Map();
@@ -1013,6 +1014,24 @@ function registerIpc() {
     return getPredict().getStatus();
   });
 
+  // v4.10.18：推理记录--主进程持有一份回调，push 时转发给渲染层
+  handle('buddy:predict:log', () => {
+    const pc = getPredict();
+    return pc ? pc.getLog() : [];
+  });
+  handle('buddy:predict:clear-log', () => {
+    const pc = getPredict();
+    if (pc) pc.clearLog();
+    return { ok: true };
+  });
+  // PredictController 构造时注入 onLogEntry 回调 -> 实时推给渲染层
+  // 在 registerIpc 之前注册，但回调引用 mainWindow（延迟取）
+  predictLogCallback = (entry) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('buddy:predict:log-entry', entry); } catch (_) {}
+    }
+  };
+
   // ---- 桌宠猫咪（v4.1）：最小化主窗口为桌面小猫，预测浮层弹在猫旁边 ----
   handle('buddy:pet:minimize', async () => {
     if (!pet) throw new Error('桌宠未初始化');
@@ -1198,6 +1217,11 @@ async function bootstrap() {
         const mmproj = llama.findMmproj(userData, cfg.get('vlmMmprojPath'));
         if (!server || !modelPath) return null;
         return new LocalModelRunner({ llamaServerPath: server, modelPath, mmprojPath: mmproj, logger });
+      },
+      // v4.10.18：推理记录实时推送--注入 onLogEntry 回调，
+      // registerIpc 中会把 predictLogCallback 赋值为转发给 mainWindow 的函数。
+      onLogEntry: (entry) => {
+        if (typeof predictLogCallback === 'function') predictLogCallback(entry);
       },
     });
     logger.info('predict-controller-ready');

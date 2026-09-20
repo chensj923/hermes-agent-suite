@@ -128,6 +128,10 @@ const api = {
   onPredictEngineProgress: (handler) => subscribe('buddy:predict:engine-progress', handler),
   predictNow: () => invoke('buddy:predict:now'),
   predictSetPatrol: (minutes) => invoke('buddy:predict:set-patrol', minutes),
+  // v4.10.18：推理记录
+  predictLog: () => invoke('buddy:predict:log'),
+  predictClearLog: () => invoke('buddy:predict:clear-log'),
+  onPredictLogEntry: (handler) => subscribe('buddy:predict:log-entry', handler),
 
   // ---- 桌宠猫咪（v4.1） ----
   petMinimize: () => invoke('buddy:pet:minimize'),

@@ -959,6 +959,29 @@ button:disabled { opacity: .5; cursor: default; }
 .predict-crystal-table th:first-child,
 .predict-crystal-table td:first-child { text-align: left; }
 .predict-crystal-table th { color: var(--muted); font-weight: 600; background: var(--surface-2); }
+
+/* v4.10.18：推理记录 */
+.predict-log-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.predict-log-header h2 { margin: 0; }
+.predict-log-actions { display: flex; gap: 6px; }
+.predict-log-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; max-height: 560px; overflow-y: auto; }
+.predict-log-item { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font-size: 12px; }
+.predict-log-item .pl-time { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+.predict-log-item .pl-phase { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; background: var(--surface-2); color: var(--text); }
+.predict-log-item .pl-phase[data-phase="trigger"] { background: var(--accent-bg, #e8f0fe); color: var(--accent, #4a7); }
+.predict-log-item .pl-phase[data-phase="analyzed"] { background: var(--surface-2); }
+.predict-log-item .pl-phase[data-phase="decision"] { background: var(--surface-2); }
+.predict-log-item .pl-phase[data-phase="generated"] { background: #e8f5e9; color: #2e7d32; }
+.predict-log-item .pl-meta { margin-top: 4px; color: var(--text-secondary, var(--muted)); font-size: 11px; }
+.predict-log-item .pl-suggestion { margin-top: 4px; color: var(--text); }
+.predict-log-item .pl-content { margin-top: 4px; font-size: 11px; }
+.predict-log-item .pl-content[data-tone="ok"] { color: #2e7d32; }
+.predict-log-item .pl-content[data-tone="warn"] { color: #e65100; }
+.predict-log-item .pl-content[data-tone="error"] { color: #c62828; }
+.predict-log-item .pl-content .pl-preview { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 10px; }
+.predict-log-item .pl-reason { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.predict-log-empty { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; }
+
 .workspace-actions { display: flex; gap: 8px; margin: 10px 0; }
 .tree {
   margin: 6px 0 0;

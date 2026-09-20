@@ -856,6 +856,14 @@ api.onPredictEngineProgress((progress) => {
   if (node && progress.message) { node.textContent = progress.message; node.dataset.tone = ''; }
 });
 
+// v4.10.18：推理记录实时推送--当前在「推理记录」tab 时追加到列表
+api.onPredictLogEntry((entry) => {
+  if (state.settingsTab !== 'predict-log') return;
+  const list = document.getElementById('predict-log-list');
+  if (!list) return;
+  prependPredictLogItem(list, entry);
+});
+
 function beginAssistantBubble() {
   state.pendingTools = new Map();
   const bubble = addMessage('assistant pending', '');
@@ -1850,6 +1858,7 @@ async function renderSettings() {
     toolchain: '本机工具',
     media: '本地媒体引擎',
     predict: '预测模式',
+    'predict-log': '推理记录',
     workspace: '工作区',
     'gateway-diag': 'Gateway 诊断'
   };
@@ -1863,6 +1872,7 @@ async function renderSettings() {
     else if (state.settingsTab === 'toolchain') await renderToolchainTab();
     else if (state.settingsTab === 'media') await renderMediaTab();
     else if (state.settingsTab === 'predict') await renderPredictTab();
+    else if (state.settingsTab === 'predict-log') await renderPredictLogTab();
     else if (state.settingsTab === 'workspace') await renderWorkspaceTab();
     else if (state.settingsTab === 'gateway-diag') await renderGatewayDiagTab();
   } catch (error) {
@@ -2747,6 +2757,132 @@ async function renderPredictTab() {
     refreshModelName();
     petStatusNode.textContent = '已恢复内置模型（Hiyori）';
     petStatusNode.dataset.tone = 'ok';
+  });
+}
+
+// ---- 推理记录面板（v4.10.18）----
+
+function formatPredictTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+const PHASE_LABELS = {
+  trigger: '触发',
+  analyzed: '分析完成',
+  decision: '用户决策',
+  generated: '生成完成',
+};
+
+const CHOICE_LABELS = {
+  generate: '生成并插入',
+  later: '稍后',
+  never: '不再提示',
+};
+
+const STATUS_TONES = {
+  ok: 'ok',
+  'no-content': 'warn',
+  failed: 'error',
+};
+
+function buildPredictLogItem(entry) {
+  const div = document.createElement('div');
+  div.className = 'predict-log-item';
+  div.dataset.phase = entry.phase || '';
+
+  const time = formatPredictTime(entry.ts);
+  const phaseLabel = PHASE_LABELS[entry.phase] || entry.phase || '';
+  const parts = [];
+
+  // 行 1：时间 + 阶段标签
+  parts.push(`<span class="pl-time">${escapeHtml(time)}</span>`);
+  parts.push(`<span class="pl-phase" data-phase="${escapeHtml(entry.phase || '')}">${escapeHtml(phaseLabel)}</span>`);
+
+  // 行 2：意图/规则/置信度
+  const meta = [];
+  if (entry.intent) meta.push(`意图: ${escapeHtml(entry.intent)}`);
+  if (entry.rule) meta.push(`规则: ${escapeHtml(entry.rule)}`);
+  if (entry.confidence != null) meta.push(`置信度: ${Number(entry.confidence).toFixed(2)}`);
+  if (entry.mode) meta.push(`模式: ${escapeHtml(entry.mode)}`);
+  if (entry.choice) meta.push(`决策: ${escapeHtml(CHOICE_LABELS[entry.choice] || entry.choice)}`);
+  if (entry.proactive) meta.push('主动触发');
+  if (meta.length) parts.push(`<div class="pl-meta">${meta.join(' · ')}</div>`);
+
+  // 行 3：建议文案
+  if (entry.suggestion) {
+    parts.push(`<div class="pl-suggestion">${escapeHtml(entry.suggestion.slice(0, 150))}</div>`);
+  }
+
+  // 行 4：生成内容预览
+  if (entry.phase === 'generated') {
+    if (entry.status === 'ok' && entry.contentPreview) {
+      parts.push(`<div class="pl-content" data-tone="ok">已生成 ${entry.chars || 0} 字：<span class="pl-preview">${escapeHtml(entry.contentPreview.slice(0, 120))}${entry.contentPreview.length > 120 ? '…' : ''}</span></div>`);
+    } else if (entry.status === 'no-content') {
+      parts.push(`<div class="pl-content" data-tone="warn">远端返回无 content（keys: ${escapeHtml((entry.responseKeys || []).join(','))}）</div>`);
+    } else if (entry.status === 'failed') {
+      parts.push(`<div class="pl-content" data-tone="error">生成失败: ${escapeHtml(entry.error || '')}</div>`);
+    }
+  }
+
+  // 行 5：原因
+  if (entry.reason) {
+    parts.push(`<div class="pl-reason">${escapeHtml(entry.reason.slice(0, 150))}</div>`);
+  }
+
+  div.innerHTML = parts.join('');
+  return div;
+}
+
+function prependPredictLogItem(listEl, entry) {
+  const item = buildPredictLogItem(entry);
+  listEl.insertBefore(item, listEl.firstChild);
+  // 限制 DOM 条数
+  while (listEl.children.length > 200) {
+    listEl.removeChild(listEl.lastChild);
+  }
+}
+
+async function renderPredictLogTab() {
+  const entries = await api.predictLog().catch(() => []);
+  el.contextBody.innerHTML = `
+    <div class="predict-log-header">
+      <h2>推理记录</h2>
+      <div class="predict-log-actions">
+        <button class="ghost" id="predict-log-refresh" type="button">刷新</button>
+        <button class="ghost danger" id="predict-log-clear" type="button">清空</button>
+      </div>
+    </div>
+    <p class="hint">每次预测触发、分析结果、用户决策、生成内容都会记录在此。实时推送，无需手动刷新。</p>
+    <div class="predict-log-list" id="predict-log-list"></div>
+  `;
+
+  const listEl = $('predict-log-list');
+  if (entries && entries.length) {
+    for (const entry of entries) {
+      listEl.appendChild(buildPredictLogItem(entry));
+    }
+  } else {
+    listEl.innerHTML = '<div class="predict-log-empty">暂无推理记录。启用预测模式后，每次触发、分析、决策、生成都会记录在此。</div>';
+  }
+
+  $('predict-log-refresh').addEventListener('click', async () => {
+    const fresh = await api.predictLog().catch(() => []);
+    listEl.textContent = '';
+    if (fresh && fresh.length) {
+      for (const entry of fresh) listEl.appendChild(buildPredictLogItem(entry));
+    } else {
+      listEl.innerHTML = '<div class="predict-log-empty">暂无推理记录</div>';
+    }
+  });
+
+  $('predict-log-clear').addEventListener('click', async () => {
+    await api.predictClearLog().catch(() => {});
+    listEl.innerHTML = '<div class="predict-log-empty">已清空</div>';
   });
 }
 

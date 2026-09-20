@@ -150,6 +150,43 @@ class PredictController {
     _timeoutTrace = (ev, info) => {
       try { this.logger.info('predict-timeout-trace', { ev, ...info }); } catch (_) {}
     };
+
+    // v4.10.18：推理记录环形缓冲（最多 200 条），供客户端 UI 展示
+    this._logMax = 200;
+    this._log = [];
+    this._logSeq = 0;
+    this._onLogEntry = opts.onLogEntry || null;  // 实时推送给渲染层的回调
+  }
+
+  // ---------------- 推理记录（v4.10.18） ----------------
+
+  /**
+   * 记录一次推理流水线事件，存入环形缓冲并实时推送给渲染层。
+   * 在触发、分析完成、用户决策、生成完成/失败等关键节点调用。
+   */
+  _logEntry(entry) {
+    const record = {
+      id: ++this._logSeq,
+      ts: Date.now(),
+      ...entry,
+    };
+    this._log.push(record);
+    if (this._log.length > this._logMax) this._log.shift();
+    if (typeof this._onLogEntry === 'function') {
+      try { this._onLogEntry(record); } catch (_) {}
+    }
+    return record;
+  }
+
+  /** 返回最近的推理记录（倒序，最多 200 条）。 */
+  getLog() {
+    return this._log.slice().reverse();
+  }
+
+  /** 清空推理记录。 */
+  clearLog() {
+    this._log = [];
+    this._logSeq = 0;
   }
 
   // ---------------- 生命周期 ----------------
@@ -263,6 +300,12 @@ class PredictController {
     this._processing = true;
     this._degraded = false;                 // v4.8.5：每次新触发重置降级标记
     const mySeq = ++this._pipelineSeq;      // v4.8.8：标记本流水线所有权
+    // v4.10.18：记录触发
+    this._logEntry({
+      phase: 'trigger',
+      rule: triggerResult.rule || '',
+      reason: (triggerResult.reason || '').slice(0, 200),
+    });
     try {
       // 1) 进入 ANALYZING
       const r1 = this.engine.screenshotTaken();
@@ -362,6 +405,17 @@ class PredictController {
         intent: result.intent,
         confidence: result.confidence,
       });
+      // v4.10.18：记录分析结果
+      this._logEntry({
+        phase: 'analyzed',
+        rule: rule || '',
+        intent: result.intent || '',
+        confidence: result.confidence || 0,
+        suggestion: (result.suggestion || '').slice(0, 200),
+        reason: (result.reason || '').slice(0, 200),
+        mode: this.config.get('model'),
+        suggest: r2.suggest,
+      });
       const suggestion = {
         intent: result.intent,
         suggestion: result.suggestion || RULE_TEMPLATE[result.intent] || '需要我帮你做点什么吗？',
@@ -392,6 +446,14 @@ class PredictController {
       if (this.panel) {
         choice = await this.panel.show(suggestion);
       }
+      // v4.10.18：记录用户决策
+      this._logEntry({
+        phase: 'decision',
+        rule: rule || '',
+        intent: suggestion.intent || '',
+        suggestion: (suggestion.suggestion || '').slice(0, 200),
+        choice: choice,
+      });
       this._applyDecision(choice, rule, suggestion);
     } catch (e) {
       this.logger.error('predict-pipeline-error', { error: e.message });
@@ -487,11 +549,33 @@ class PredictController {
         if (res && typeof res.content === 'string' && res.content.trim()) {
           content = res.content.trim();
           this.logger.info('predict-generate-ok', { chars: content.length });
+          // v4.10.18：记录生成成功
+          this._logEntry({
+            phase: 'generated',
+            status: 'ok',
+            intent: (suggestion && suggestion.intent) || '',
+            contentPreview: content.slice(0, 300),
+            chars: content.length,
+          });
         } else {
           this.logger.warn('predict-generate-no-content', { keys: res ? Object.keys(res) : null });
+          // v4.10.18：记录无内容
+          this._logEntry({
+            phase: 'generated',
+            status: 'no-content',
+            intent: (suggestion && suggestion.intent) || '',
+            responseKeys: res ? Object.keys(res) : null,
+          });
         }
       } catch (e) {
         this.logger.warn('predict-generate-failed', { error: e.message });
+        // v4.10.18：记录生成失败
+        this._logEntry({
+          phase: 'generated',
+          status: 'failed',
+          intent: (suggestion && suggestion.intent) || '',
+          error: e.message,
+        });
       }
     } else {
       this.logger.warn('predict-generate-no-fn');
@@ -901,6 +985,12 @@ class PredictController {
     if (this._processing) return { shown: false, busy: true, reason: '上一次分析还在进行中' };
     this._processing = true;
     const mySeq = ++this._pipelineSeq;   // v4.8.8：所有权序列
+    // v4.10.18：记录主动触发
+    this._logEntry({
+      phase: 'trigger',
+      rule: 'proactive',
+      reason: '用户主动预测（点桌宠/按钮）',
+    });
     try {
       // 跳过 TRIGGERED：直接进入 ANALYZING（截图 → 模型）
       this.engine.state = 'ANALYZING';
@@ -975,6 +1065,18 @@ class PredictController {
       // 「判断草率、思考完就跳掉」。现在置信度不过门槛也弹窗：
       // 模型给不出明确意图时，退回场景规则推断（Word→word_writing 等）给建议。
       const r2 = this.engine.modelResult({ intent: result.intent, confidence: result.confidence });
+      // v4.10.18：记录分析结果
+      this._logEntry({
+        phase: 'analyzed',
+        rule: rule || '',
+        intent: result.intent || '',
+        confidence: result.confidence || 0,
+        suggestion: (result.suggestion || '').slice(0, 200),
+        reason: (result.reason || '').slice(0, 200),
+        mode: this.config.get('model'),
+        suggest: r2.suggest,
+        proactive: true,
+      });
       const suggestion = {
         intent: result.intent,
         suggestion: result.suggestion || (result.intent && RULE_TEMPLATE[result.intent]) || PROACTIVE_TEMPLATE,
@@ -995,6 +1097,15 @@ class PredictController {
 
       let choice = 'later';
       if (this.panel) choice = await this.panel.show(suggestion);
+      // v4.10.18：记录用户决策
+      this._logEntry({
+        phase: 'decision',
+        rule: rule || '',
+        intent: suggestion.intent || '',
+        suggestion: (suggestion.suggestion || '').slice(0, 200),
+        choice: choice,
+        proactive: true,
+      });
       this._applyDecision(choice, rule || result.intent, suggestion);
       return { shown: true, choice, intent: result.intent, suggestion: suggestion.suggestion, reason: result.reason };
     } catch (e) {
