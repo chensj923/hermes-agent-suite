@@ -46,11 +46,14 @@ function resolveTypeScript() {
  */
 function simulateTyping(text, logger) {
   return new Promise((resolve) => {
+    const started = Date.now();
     try {
       const { spawn } = require('child_process');
       const script = resolveTypeScript();
-      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], {
-        timeout: 30000,
+      // v4.10.26：-buddyPid 让脚本跳过 Buddy 自身的窗口，把焦点交还给真正的工作窗口。
+      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-buddyPid', String(process.pid)], {
+        // v4.10.26：PowerShell 冷启动 + Add-Type 编译偶发到 30s（曾观察到 308 字被超时 kill），放宽到 45s。
+        timeout: 45000,
         windowsHide: true,
       });
       let settled = false;
@@ -58,8 +61,9 @@ function simulateTyping(text, logger) {
         if (settled) return;
         settled = true;
         if (logger) {
-          if (ok) logger.info('type-input-sent', { len: String(text || '').length });
-          else logger.warn('type-input-failed', { error: err && err.message });
+          const ms = Date.now() - started;
+          if (ok) logger.info('type-input-sent', { len: String(text || '').length, ms: String(ms) });
+          else logger.warn('type-input-failed', { error: err && err.message, ms: String(ms) });
         }
         resolve(ok);
       };
@@ -75,13 +79,32 @@ function simulateTyping(text, logger) {
   });
 }
 
+// v4.10.26：改用 spawn（可按参数传 buddyPid）并等待退出，保证「焦点归还 → Ctrl+V」顺序执行。
 function simulatePaste(logger) {
-  const { exec } = require('child_process');
-  const path = require('path');
-  const script = resolvePasteScript();
-  exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${script}"`, { timeout: 3000 }, (e) => {
-    if (e && logger) logger.warn('paste-simulate-failed', { error: e.message, script });
-    else if (logger) logger.info('paste-simulated', { script });
+  return new Promise((resolve) => {
+    try {
+      const { spawn } = require('child_process');
+      const script = resolvePasteScript();
+      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-buddyPid', String(process.pid)], {
+        timeout: 20000,
+        windowsHide: true
+      });
+      let settled = false;
+      const done = (ok, err) => {
+        if (settled) return;
+        settled = true;
+        if (logger) {
+          if (ok) logger.info('paste-simulated', { script });
+          else logger.warn('paste-simulate-failed', { error: err && err.message, script });
+        }
+        resolve(ok);
+      };
+      child.on('error', (e) => done(false, e));
+      child.on('exit', (code) => done(code === 0, code === 0 ? null : new Error('paste.ps1 exit ' + code)));
+    } catch (e) {
+      if (logger) logger.warn('paste-simulate-failed', { error: e.message });
+      resolve(false);
+    }
   });
 }
 

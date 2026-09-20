@@ -1,13 +1,38 @@
-# v4.10.10: Simulate Ctrl+V paste via Win32 SendInput
+# v4.10.26: Simulate Ctrl+V paste via Win32 SendInput
 # Called by action-executor.js after writing content to clipboard.
+# 关键：和 type.ps1 一样，先把键盘焦点交还给用户真正在用的上一个窗口
+# （排除 Buddy 进程自身），否则 Ctrl+V 会粘到 Buddy 自己身上。
 # Fails silently -- clipboard already has content, user can Ctrl+V manually.
+
+param([int]$buddyPid = 0)
 
 Add-Type -TypeDefinition @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public class KS {
   [DllImport("user32.dll")]
   public static extern uint SendInput(uint n, INPUT[] i, int s);
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetWindow(IntPtr h, uint cmd);
+  [DllImport("user32.dll")]
+  public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")]
+  public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")]
+  public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")]
+  public static extern bool AttachThreadInput(uint a, uint b, bool f);
+  [DllImport("user32.dll")]
+  public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")]
+  public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")]
+  public static extern int GetWindowTextLength(IntPtr h);
   [StructLayout(LayoutKind.Sequential)]
   public struct INPUT {
     public int type;
@@ -28,6 +53,37 @@ public class KS {
   }
 }
 "@
+
+# ---------- v4.10.26：把键盘焦点交还给真正的工作窗口 ----------
+function Get-WindowPid([IntPtr]$h) {
+  $pid2 = 0
+  [void][KS]::GetWindowThreadProcessId($h, [ref]$pid2)
+  return $pid2
+}
+$target = [IntPtr]::Zero
+$cur = [KS]::GetForegroundWindow()
+for ($i = 0; $i -lt 30; $i++) {
+  $cur = [KS]::GetWindow($cur, 2)  # GW_HWNDNEXT
+  if ($cur -eq [IntPtr]::Zero) { break }
+  if (-not [KS]::IsWindowVisible($cur)) { continue }
+  $p = Get-WindowPid $cur
+  if ($buddyPid -gt 0 -and $p -eq $buddyPid) { continue }
+  if ([KS]::GetWindowTextLength($cur) -eq 0) { continue }
+  $target = $cur
+  break
+}
+if ($target -ne [IntPtr]::Zero) {
+  if ([KS]::IsIconic($target)) { [void][KS]::ShowWindow($target, 9) }
+  $fg = [KS]::GetForegroundWindow()
+  $a = 0; $b = 0
+  [void][KS]::GetWindowThreadProcessId($fg, [ref]$a)
+  [void][KS]::GetWindowThreadProcessId($target, [ref]$b)
+  if ($a -ne $b) { [void][KS]::AttachThreadInput($a, $b, $true) }
+  [void][KS]::SetForegroundWindow($target)
+  [void][KS]::BringWindowToTop($target)
+  if ($a -ne $b) { [void][KS]::AttachThreadInput($a, $b, $false) }
+  Start-Sleep -Milliseconds 250
+}
 
 $VK_CTRL = 0x11
 $VK_V = 0x56
