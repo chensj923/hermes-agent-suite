@@ -818,8 +818,28 @@ button:disabled { opacity: .5; cursor: default; }
   flex-direction: column;
   background: var(--surface);
   border-left: 1px solid var(--border);
+  position: relative; /* v4.10.25 承载左缘拖拽条 */
 }
 .context-panel[hidden] { display: none; }
+
+/* v4.10.25 面板宽度拖拽条：贴左缘 7px 热区，hover/拖拽中高亮 */
+.context-resizer {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 30;
+  -webkit-app-region: no-drag;
+}
+.context-resizer:hover,
+body.resizing .context-resizer {
+  background: linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.45));
+}
+body.resizing { user-select: none; cursor: col-resize; }
+body.resizing * { pointer-events: none; }
+body.resizing .context-resizer { pointer-events: auto; }
 
 .context-header {
   height: 50px;
@@ -973,6 +993,12 @@ button:disabled { opacity: .5; cursor: default; }
 .scene-enable { display: flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 12px; }
 .scene-name { flex: 1; font-weight: 600; }
 .scene-rule-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+/* v4.10.25 面板被拖窄（<430px）时场景规则表单退化为单列，保证可读 */
+.context-panel { container-type: inline-size; }
+@container (max-width: 430px) {
+  .scene-rule-grid { grid-template-columns: 1fr; }
+  .scene-rule-grid .connect-field small { white-space: normal; }
+}
 .scene-rule-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 .scene-rule-grid input { width: 100%; box-sizing: border-box; }
 .predict-log-item { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font-size: 12px; }

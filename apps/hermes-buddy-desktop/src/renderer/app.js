@@ -3340,6 +3340,64 @@ el.btnManageConn.addEventListener('click', () => {
   showConnectWithProfiles();
 });
 
+// ---------------- 右侧面板宽度拖拽（v4.10.25） ----------------
+// 面板左缘 7px 热区可横向拖动（280~720px，且不挤没聊天区），宽度存 localStorage，双击恢复默认 320px。
+(function setupContextResizer() {
+  const resizer = document.getElementById('context-resizer');
+  const panel = document.getElementById('context-panel');
+  if (!resizer || !panel) return;
+  const KEY = 'hb.contextWidth';
+  const MIN = 280;
+  const MAX = 720;
+  const DEFAULT_W = 320;
+  const CHAT_MIN = 460; // 拖拽时保证聊天区至少剩这么宽
+
+  const applyWidth = (px) => {
+    document.documentElement.style.setProperty('--context-width', px + 'px');
+  };
+  const clampWidth = (px) => {
+    const cap = Math.max(MIN, Math.min(MAX, window.innerWidth - CHAT_MIN));
+    return Math.min(cap, Math.max(MIN, Math.round(px)));
+  };
+
+  const saved = Number(localStorage.getItem(KEY));
+  if (saved >= MIN && saved <= MAX) applyWidth(saved);
+
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+
+  resizer.addEventListener('mousedown', (e) => {
+    dragging = true;
+    startX = e.clientX;
+    startW = panel.getBoundingClientRect().width;
+    document.body.classList.add('resizing');
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    applyWidth(clampWidth(startW + (startX - e.clientX))); // 面板在右侧：向左拖 = 变宽
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('resizing');
+    const finalW = clampWidth(panel.getBoundingClientRect().width);
+    applyWidth(finalW);
+    localStorage.setItem(KEY, String(finalW));
+  });
+  resizer.addEventListener('dblclick', () => {
+    applyWidth(DEFAULT_W);
+    localStorage.removeItem(KEY);
+  });
+  // 窗口变窄时把已保存的宽度收回合法范围，避免挤没聊天区
+  window.addEventListener('resize', () => {
+    const cur = panel.getBoundingClientRect().width;
+    const want = clampWidth(cur);
+    if (want !== Math.round(cur)) applyWidth(want);
+  });
+})();
+
 (async function boot() {
   try {
     const info = await api.appInfo();
