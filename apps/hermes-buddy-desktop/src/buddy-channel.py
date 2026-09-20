@@ -1355,11 +1355,16 @@ class WSConnection:
                     result = {"intent": rule, "confidence": 0.5,
                               "suggestion": "需要我帮你做点什么吗？", "reason": "预测失败: %s" % exc}
                 sid = self.session.sid if self.session else ""
-                self.send_json({"type": "predict_response", "session": sid,
-                                "intent": result.get("intent"),
-                                "confidence": result.get("confidence", 0.5),
-                                "suggestion": result.get("suggestion", ""),
-                                "reason": result.get("reason", "")})
+                resp = {"type": "predict_response", "session": sid,
+                        "intent": result.get("intent"),
+                        "confidence": result.get("confidence", 0.5),
+                        "suggestion": result.get("suggestion", ""),
+                        "reason": result.get("reason", "")}
+                # v4.10.14：generate_content 分支返回的 {content} 要带给客户端，
+                # 否则「生成并插入」拿不到正文，只能兜底粘贴建议问句。
+                if "content" in result:
+                    resp["content"] = result["content"]
+                self.send_json(resp)
 
             threading.Thread(target=_run_predict, daemon=True).start()
         else:

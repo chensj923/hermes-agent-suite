@@ -353,15 +353,21 @@ class ChannelClient {
     }
     if (msg.type === 'predict_response') {
       // 2.0 预测模式：predict_request 的应答
+      // v4.10.14：服务端 generate_content 分支返回 {content, intent}，
+      // 旧代码只提取 intent/confidence/suggestion/reason，把 content 丢了，
+      // 导致「生成并插入」永远拿不到正文，只能兜底粘贴建议问句。
       if (this.pendingPredict) {
         const p = this.pendingPredict;
         this.pendingPredict = null;
-        p.resolve({
+        const resp = {
           intent: msg.intent,
           confidence: Number(msg.confidence) || 0,
           suggestion: msg.suggestion,
           reason: msg.reason,
-        });
+        };
+        // v4.10.2 generate_content 分支返回的正文内容
+        if (msg.content !== undefined) resp.content = msg.content;
+        p.resolve(resp);
       }
       return;
     }
