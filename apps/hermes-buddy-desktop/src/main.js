@@ -721,7 +721,7 @@ function registerIpc() {
             const proxyEnv = result.proxy_env || 'no';
             // 与 src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION 保持一致
             const REQUIRED_CHANNEL_VERSION = '2.2';
-            const REQUIRED_CHANNEL_BUILD = 5;
+            const REQUIRED_CHANNEL_BUILD = 6;
             const verAtLeast = (v, req) => {
               if (!v || v === 'none') return false;
               const a = String(v).split('.').map((n) => parseInt(n, 10) || 0);

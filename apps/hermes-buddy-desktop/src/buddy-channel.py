@@ -52,7 +52,7 @@ CHANNEL_VERSION = "2.2"
 #   1 = v4.10.0 视觉本地化（PREDICT_PROMPT 改写）
 #   2 = v4.10.1 防误判规则 + ctx 补字段
 #   3 = v4.10.2 GENERATE_PROMPT + generate_content 分支
-CHANNEL_BUILD = "4"
+CHANNEL_BUILD = "6"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -818,6 +818,12 @@ GENERATE_PROMPT = (
     "只要屏幕上有一丁点文字信息（哪怕只有标题、表格框架、几行正文），"
     "就必须围绕那些真实内容来生成，而不是偷懒出模板；"
     "4. 长度控制在 100~300 字。只输出正文。"
+    "5. 重要：screenObservation 里可能包含系统 UI 文字、输入法提示弹窗、"
+    "浏览器/编辑器的菜单项、状态栏文字等非正文内容。你必须区分哪些是用户"
+    "正在创作的正文、哪些是 UI 噪声。如果 screenObservation 里只有 UI 弹窗"
+    "提示（如「按 Esc 退出」「切换输入法」「保存后重启」等操作指引），没有"
+    "用户实际在写的文档内容，就按 intent 场景出模板（第一行写【模板】），"
+    "不要把 UI 提示当正文主题来生成。"
 )
 
 
