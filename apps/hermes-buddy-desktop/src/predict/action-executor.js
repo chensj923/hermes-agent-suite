@@ -33,20 +33,26 @@ function simulatePaste(logger) {
 }
 
 /**
- * v4.10.12：定位 paste.ps1 真实路径。
- * 开发态：src/predict/paste.ps1 在真实文件系统，直接 exists 返回。
- * 打包态：默认 src 下的文件进 asar，__dirname 落在 app.asar 虚拟路径，
- * PowerShell 以 -File 打 app.asar 内的虚拟路径会报"路径不存在"导致粘贴失败。
- * 已在 package.json 的 asarUnpack 把该 .ps1 解到 app.asar.unpacked 同结构位置，
- * 这里检测 asar 内路径不存在时回退到 unpacked 真实路径。
+ * v4.10.13：定位 paste.ps1 真实路径。
+ *
+ * 根因：Electron 把 asar 挂为虚拟文件系统，fs.existsSync() 对 asar 内的文件
+ * 也返回 true。旧逻辑先 existsSync(asar 内路径) -> true -> 直接返回 asar 内路径，
+ * 回退到 app.asar.unpacked 从未执行。PowerShell -File 无法访问 asar 虚拟路径，
+ * 报"路径不存在"，导致 simulatePaste 永远失败 -> "推测完了但没粘贴"。
+ *
+ * 修复：检测到 __dirname 含 app.asar 时，直接优先用 unpacked 路径（asarUnpack
+ * 已在 package.json 配置，打包时 paste.ps1 一定被解到 app.asar.unpacked 同结构
+ * 位置）；只有 unpacked 不存在时才退回 asar 内路径（开发态或未配置 unpack）。
  */
 function resolvePasteScript() {
+  const path = require('path');
   const p = path.join(__dirname, 'paste.ps1');
-  try {
-    if (fs.existsSync(p)) return p;
-    const unpacked = p.replace(/app\.asar[\\/]/, 'app.asar.unpacked' + path.sep);
-    if (unpacked !== p && fs.existsSync(unpacked)) return unpacked;
-  } catch (_) { /* 探测失败不阻断，返回 asar 内路径交由 PowerShell 报错 */ }
+  // 打包态：__dirname 含 app.asar -> 直接走 unpacked 真实路径
+  if (/app\.asar[\\/]/.test(p)) {
+    const unpacked = p.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1');
+    if (fs.existsSync(unpacked)) return unpacked;
+  }
+  // 开发态或未配置 unpack：用原始路径（开发态 __dirname 在真实文件系统）
   return p;
 }
 
