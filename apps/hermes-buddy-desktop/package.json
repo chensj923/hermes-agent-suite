@@ -9,7 +9,9 @@
     "test": "node --test",
     "smoke": "electron . --smoke-test --no-sandbox --disable-gpu --disable-gpu-sandbox --use-gl=disabled",
     "build:bundle": "node scripts/build-server-deploy-bundle.js",
-    "build:win": "node scripts/build-server-deploy-bundle.js && electron-builder --win nsis --x64"
+    "build:win": "node scripts/build-server-deploy-bundle.js && electron-builder --win nsis --x64",
+    "build:win:local": "node scripts/build-server-deploy-bundle.js && electron-builder --win nsis --x64 --config.directories.output=C:\\HermesBuild\\dist",
+    "stage": "node scripts/stage-installer.js"
   },
   "dependencies": {
     "@hermes/connection": "*",
