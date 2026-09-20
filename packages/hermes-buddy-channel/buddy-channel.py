@@ -44,7 +44,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 #   2.1  v4.10.4：generate_content 生成分支 + 防误判 PREDICT_PROMPT +
 #        CHANNEL_BUILD 版本协商。用户要求：以后修复服务端 prompt/逻辑时
 #        CHANNEL_VERSION 必须升级（不只抬 BUILD），让老客户端一眼看出不兼容。
-CHANNEL_VERSION = "2.1"
+CHANNEL_VERSION = "2.2"
 
 # v4.10.3：脚本内容版本（不等于协议版本）。
 # 协议版本（CHANNEL_VERSION）只在新增/删除帧类型时抬；修 prompt 文案、加新函数
@@ -52,7 +52,7 @@ CHANNEL_VERSION = "2.1"
 #   1 = v4.10.0 视觉本地化（PREDICT_PROMPT 改写）
 #   2 = v4.10.1 防误判规则 + ctx 补字段
 #   3 = v4.10.2 GENERATE_PROMPT + generate_content 分支
-CHANNEL_BUILD = "3"
+CHANNEL_BUILD = "4"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -1355,11 +1355,16 @@ class WSConnection:
                     result = {"intent": rule, "confidence": 0.5,
                               "suggestion": "需要我帮你做点什么吗？", "reason": "预测失败: %s" % exc}
                 sid = self.session.sid if self.session else ""
-                self.send_json({"type": "predict_response", "session": sid,
-                                "intent": result.get("intent"),
-                                "confidence": result.get("confidence", 0.5),
-                                "suggestion": result.get("suggestion", ""),
-                                "reason": result.get("reason", "")})
+                resp = {"type": "predict_response", "session": sid,
+                        "intent": result.get("intent"),
+                        "confidence": result.get("confidence", 0.5),
+                        "suggestion": result.get("suggestion", ""),
+                        "reason": result.get("reason", "")}
+                # v4.10.15：generate_content 分支返回的 {content} 要带给客户端，
+                # 否则「生成并插入」拿不到正文，只能兜底粘贴建议问句。
+                if "content" in result:
+                    resp["content"] = result["content"]
+                self.send_json(resp)
 
             threading.Thread(target=_run_predict, daemon=True).start()
         else:

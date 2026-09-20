@@ -33,7 +33,7 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
  *       没有 predict 能力，握手时通过 welcome 的 supports_predict 标志区分；客户端
  *       在远端模式下没有该能力时退化为本地/兜底，不会整条挂掉（见 predict-controller）。
  */
-const REQUIRED_CHANNEL_VERSION = '2.1';
+const REQUIRED_CHANNEL_VERSION = '2.2';
 
 /**
  * v4.10.3：服务端脚本内容版本。协议版本（CHANNEL_VERSION）只在新增/删除帧类型时抬；
@@ -41,7 +41,7 @@ const REQUIRED_CHANNEL_VERSION = '2.1';
  * 并提示重新部署（老用户装新客户端后服务端仍是旧脚本 -> 功能静默缺失）。
  * 服务端 CHANNEL_BUILD < 此值 -> "服务端脚本过旧，请重新部署"。
  */
-const REQUIRED_CHANNEL_BUILD = 3;
+const REQUIRED_CHANNEL_BUILD = 4;
 
 /** 解析 "1.1" / "1" / "v2.0.3" 这类版本号，取 major.minor 比较。 */
 function parseVersion(value) {
