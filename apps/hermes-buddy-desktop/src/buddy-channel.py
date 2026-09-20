@@ -52,7 +52,7 @@ CHANNEL_VERSION = "2.2"
 #   1 = v4.10.0 视觉本地化（PREDICT_PROMPT 改写）
 #   2 = v4.10.1 防误判规则 + ctx 补字段
 #   3 = v4.10.2 GENERATE_PROMPT + generate_content 分支
-CHANNEL_BUILD = "8"
+CHANNEL_BUILD = "9"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -807,39 +807,49 @@ def mock_predict(behavior):
 GENERATE_PROMPT = (
     "你是 Hermes Buddy 的内容生成器。用户刚在预测浮窗接受了建议（如总结要点、"
     "继续写作、整理笔记），现在需要你直接生成可粘贴使用的正文内容。"
-    "你会收到：行为场景（rule）、当时的建议文案（suggestion）、以及本机视觉模型"
-    "对屏幕的文字描述（screenObservation，可能为空或只有概略信息）。"
+    "你会收到：行为场景（rule）、当时的建议文案（suggestion）、前台窗口标题"
+    "（windowTitle，文档编辑器的窗口标题通常就是文档名，是最可靠的主题线索）、"
+    "以及本机视觉模型对屏幕的文字描述（screenObservation，可能为空或只有概略信息）。"
     "要求："
     "1. 中文，直接给内容本身——不要寒暄、不要复述建议、不要问问题、不要输出 JSON；"
-    "2. 如果 screenObservation 能看出具体主题/标题，围绕它生成具体内容"
-    "（如：正文续写段、要点总结、步骤清单）；"
+    "2. 主题判断优先级：windowTitle（剥掉文件扩展名和「- Word/WPS」等窗口后缀后"
+    "就是文档主题）> screenObservation 里可见的标题/正文 > suggestion 文案。"
+    "只要有主题，就必须围绕主题生成**有实际信息量**的内容"
+    "（如：围绕该主题展开的正文续写段、该主题的要点总结、相关步骤清单）；"
     "3. 【禁止出模板】绝对不要输出提纲、大纲、模板、占位符、填空下划线"
     "（如「主题：______」「一、二、三」「- [ ]」这类骨架）。"
-    "用户点「生成并插入」要的是可直接粘贴使用的成文内容，不是框架。"
-    "即使 screenObservation 很概略、没有具体主题，你也必须根据 rule 场景和"
-    "suggestion 文案写出一段通顺的成文段落，而不是退回模板骨架；"
-    "4. 长度控制在 100~300 字。只输出正文。"
+    "用户点「生成并插入」要的是可直接粘贴使用的成文内容，不是框架；"
+    "4. 【禁止空洞套话】不要生成与主题无关的泛泛过渡段。像「以上论述至此已"
+    "勾勒出核心问题的基本轮廓，接下来还需向纵深推进」「值得注意的是…构成了"
+    "后续讨论无法回避的关键节点」这种放到任何文章里都成立的空话是失败的输出——"
+    "它们没有传达任何关于主题的信息。检验标准：把生成的文字里的主题词换掉，"
+    "如果句子仍然通顺，说明它是空话，必须重写；"
     "5. screenObservation 里可能包含系统 UI 文字、输入法提示弹窗、"
-    "浏览器/编辑器的菜单项、状态栏文字等非正文内容。你必须区分哪些是用户"
-    "正在创作的正文、哪些是 UI 噪声，不要把 UI 提示当正文主题来生成。"
-    "6. 如果 screenObservation 说了应用名（如 WPS、Word）但没读出文档的"
-    "实际标题或正文内容，就根据 rule 场景生成一段通用的成文内容。"
-    "例如 rule=word_writing 时生成一段可粘贴的过渡段或总结段；"
-    "rule=reading_or_thinking 时生成一段围绕该主题的分析性文字。"
-    "始终输出成文段落，绝不输出骨架模板。"
+    "浏览器/编辑器的菜单项、状态栏文字等非正文内容。不要把 UI 提示当正文主题。"
+    "此时应改用 windowTitle 作为主题来源；"
+    "6. 长度控制在 100~300 字。只输出正文。"
 )
 
 
 def generate_content(behavior, model=None):
-    """v4.10.2：为「生成并插入」生成真正的内容。返回 {content, intent}。"""
+    """v4.10.2：为「生成并插入」生成真正的内容。返回 {content, intent}。
+    v4.10.23：新增 windowTitle —— 文档编辑器的窗口标题就是文档名，
+    是比 VL 描述可靠得多的主题线索（小 VL 模型实测读不出文档正文）。"""
     rule = (behavior or {}).get("rule", "") or "word_writing"
     suggestion = (behavior or {}).get("suggestion", "") or ""
     obs = (behavior or {}).get("screenObservation", "") or ""
     reason = (behavior or {}).get("reason", "") or ""
+    raw_title = (behavior or {}).get("windowTitle", "") or ""
+    # 清洗窗口标题：剥掉「 - Word」「 - WPS Office」等窗口后缀与扩展名，留文档名
+    window_title = re.sub(
+        r"\s*[-–—]\s*(Microsoft\s*)?(Word|WPS(\s*Office)?|Excel|PowerPoint|记事本|Notepad)\s*$",
+        "", raw_title, flags=re.I)
+    window_title = re.sub(r"\.(docx?|xlsx?|pptx?|md|txt)\s*$", "", window_title, flags=re.I).strip()
     user_text = (
         "场景 rule: %s\n建议 suggestion: %s\n判断依据 reason: %s\n"
-        "屏幕观察 screenObservation: %s\n\n请生成用户可直接粘贴使用的内容。" % (
-            rule, suggestion or "(无)", reason or "(无)", obs or "(无)")
+        "窗口标题 windowTitle: %s\n屏幕观察 screenObservation: %s\n\n请生成用户可直接粘贴使用的内容。"
+        % (rule, suggestion or "(无)", reason or "(无)",
+           window_title or "(无)", obs or "(无)")
     )
     messages = [
         {"role": "system", "content": GENERATE_PROMPT},

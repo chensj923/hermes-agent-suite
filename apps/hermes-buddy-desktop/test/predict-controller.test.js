@@ -163,6 +163,19 @@ test('v4.10.22：屏幕有正文时点「生成并插入」→ 正常生成并�
   assert.strictEqual(clip.text, '这是一段真正生成的正文内容。');
 });
 
+test('v4.10.23：生成请求必须带上窗口标题（windowTitle）——文档名是最可靠的主题锚点', async () => {
+  const { ctrl } = makeController({ model: 'none', choice: 'generate' });
+  let payload = null;
+  ctrl._generateContentFn = async (p) => { payload = p; return { content: '围绕文档主题生成的正文。' }; };
+  ctrl._lastObservation = '正在文档中写作，文档标题是《项目计划》，开头写着：本周进度如下';
+  ctrl._lastWindowTitle = 'Hermes-buddy4.5 使用结论.docx - Word';
+  await ctrl.triggerRule('word_writing');
+  assert.ok(payload, '生成函数应被调用');
+  assert.strictEqual(payload.windowTitle, 'Hermes-buddy4.5 使用结论.docx - Word',
+    'windowTitle 必须随生成请求上行');
+  assert.strictEqual(payload.screenObservation, ctrl._lastObservation);
+});
+
 test('一键关闭 → enabled/authorized 落盘为 false', async () => {
   const { ctrl } = makeController({ model: 'none' });
   await ctrl.oneClickOff();

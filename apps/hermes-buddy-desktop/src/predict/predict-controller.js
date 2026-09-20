@@ -594,6 +594,7 @@ class PredictController {
           suggestion: (suggestion && suggestion.suggestion) || '',
           reason: (suggestion && suggestion.reason) || '',
           screenObservation: this._lastObservation || '',
+          windowTitle: this._lastWindowTitle || '',   // v4.10.23：文档名主题锚点
         });
         if (res && typeof res.content === 'string' && res.content.trim()) {
           content = res.content.trim();
@@ -782,6 +783,9 @@ class PredictController {
       if (observation) ctx.screenObservation = observation;
       // v4.10.2：留一份观察描述，用户点「生成并插入」时作为生成上下文
       this._lastObservation = observation;
+      // v4.10.23：窗口标题（Word/WPS 的窗口标题就是文档名）随生成请求上行——
+      // 小 VL 模型实测读不出文档正文，窗口标题是最可靠的主题线索。
+      this._lastWindowTitle = String(ctx.title || behaviorContext.title || '');
       if (localJudgment) {
         ctx.localJudgment = { intent: localJudgment.intent, confidence: localJudgment.confidence };
         ctx.stage = 'deep_think';
