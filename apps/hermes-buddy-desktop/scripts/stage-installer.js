@@ -42,6 +42,10 @@ function isCloudPlaceholder(p) {
 
 function find7z() {
   const cands = [
+    // electron-builder 自带的 7z：能正确校验 26.x 生成的 LZMA2 载荷归档。
+    // 优先用它——系统装的 C:\Program Files\7-Zip\7z.exe 版本过旧，对这类归档
+    // 会误报 "Data Error"（实际解包内容与魔数均正常），导致 stage 假失败。
+    path.join(REPO, '..', '..', 'node_modules', 'electron-winstaller', 'vendor', '7z.exe'),
     'C:\\Program Files\\7-Zip\\7z.exe',
     'C:\\Program Files (x86)\\7-Zip\\7z.exe',
     path.join(REPO, '..', '..', 'node_modules', '7zip-bin', 'win', 'x64', '7za.exe'),
@@ -53,6 +57,7 @@ function find7z() {
 function testPayload(installer) {
   const seven = find7z();
   if (!seven) return { ok: null, errors: -1, detail: '未找到 7z，跳过载荷校验' };
+  console.error('[stage] using 7z = ' + seven);
   const tmp = path.join(require('os').tmpdir(), 'hb-stage-' + Date.now());
   fs.mkdirSync(tmp, { recursive: true });
   try {

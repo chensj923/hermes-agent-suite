@@ -8,9 +8,11 @@
  * 满足「截图仅一帧、30 秒内删除」的承诺。
  *
  * v4.10.2 两个修正（实测教训）：
- * 1. 截图瞬间隐藏本应用所有窗口——桌宠猫和它的「喵~」气泡是置顶悬浮窗，
- *    全屏/窗口截图都会把它拍进去；3B 本地 VL 的注意力全被卡通猫吸走，
- *    观察描述变成「屏幕显示一只卡通猫…」，远端据此给出的建议全是空话。
+ * 1. 桌宠猫和它的「喵~」气泡是置顶悬浮窗，整屏截图会把它拍进去；3B 本地
+ *    VL 的注意力全被卡通猫吸走，观察描述变成「屏幕显示一只卡通猫…」，远端
+ *    据此给出的建议全是空话。→ 因此抓整屏前必须隐藏这些浮窗。但抓「用户
+ *    前台窗口」这张独立缩略图时，DWM 不会把别的窗口合成进去，无需隐藏，
+ *    v4.10.29 起优先走窗口源路径，从根本上消除推理时的闪屏。
  * 2. 优先按「前台窗口标题」匹配截图源——desktopCapturer 的窗口顺序不保证
  *    z 序，旧逻辑「取第一个非本应用窗口」可能拿到后台/空白窗口。
  *
@@ -72,12 +74,78 @@ function _isBlankImage(image) {
  * @param {string} [opts.fgTitle] 前台窗口标题（win-info 解析），优先按它匹配截图源
  * @returns {Promise<{buffer:Buffer, base64:string, width:number, height:number, source:string}>}
  */
+/**
+ * v4.10.29：彻底消除「推理时整窗 + 桌宠闪 2 秒」。
+ * 旧实现（≤4.10.28）在截图前先把本应用所有窗口 hide()，等
+ * desktopCapturer.getSources 返回后才在 finally 恢复——而 getSources 在
+ * 某些机器上要 ~2s，于是整窗 + 桌宠被藏 2 秒再出现。
+ *
+ * 新思路：优先截「用户前台窗口」这张独立缩略图。DWM 的窗口缩略图只含
+ * 该窗口自身画面，绝不会把我们的置顶桌宠/预测浮层合成进去，因此根本
+ * 不需要隐藏本应用任何窗口 → 零闪屏。仅当没有可用窗口源（用户在桌面 /
+ * UWP 全屏）必须退到整屏时，才隐藏浮动窗后重新取一次屏。
+ */
 async function captureActiveWindow({ maxWidth = MAX_WIDTH, maxHeight = MAX_HEIGHT, quality = JPEG_QUALITY, skipName, fgTitle } = {}) {
   if (!_electron) throw new Error('capture 只能在 Electron 主进程中使用');
-  const { desktopCapturer, nativeImage, BrowserWindow } = _electron;
+  const { desktopCapturer } = _electron;
 
-  // v4.10.28：只隐藏本应用的悬浮窗（桌宠 / 气泡 / 预测浮层），不隐藏主窗口。
-  // 这样触发预测时主界面不会闪消失，体验更自然。
+  const sources = await desktopCapturer.getSources({
+    types: ['screen', 'window'],
+    thumbnailSize: { width: 1920, height: 1080 },
+  });
+  if (!sources.length) throw new Error('没有可用的截图源');
+
+  const skip = skipName instanceof RegExp ? skipName
+    : (typeof skipName === 'string' ? new RegExp(skipName, 'i') : null);
+  const buddyRe = /hermes buddy|hermes-buddy|桌宠|buddy/i;
+  const winSources = sources.filter((s) => s.id.startsWith('window:'));
+
+  // 优先匹配前台窗口标题（截「用户正在看的窗口」，而非碰巧排前面的源）
+  const fg = String(fgTitle || '').trim();
+  let source = null;
+  if (fg) {
+    const key = fg.slice(0, 24);
+    source = winSources.find((s) => s.name && s.name.indexOf(key) !== -1 && !buddyRe.test(s.name));
+  }
+  // 其次：第一个非本应用窗口（旧行为兜底）
+  if (!source) {
+    source = winSources.find((s) => {
+      if (!s.name) return false;
+      if (skip && skip.test(s.name)) return false;
+      return !buddyRe.test(s.name);
+    });
+  }
+
+  if (source) {
+    let image = source.thumbnail; // nativeImage
+    // v4.10.3：该窗口缩略图全黑（最小化/被遮挡）→ 退而抓整屏；整屏会拍到
+    // 置顶桌宠，所以走 _captureScreenHidingSelf 先隐藏浮窗再重新取一次。
+    if (_isBlankImage(image)) {
+      const screenSource = sources.find((s) => s.id.startsWith('screen:'));
+      if (screenSource && screenSource.id !== source.id && !_isBlankImage(screenSource.thumbnail)) {
+        image = await _captureScreenHidingSelf(screenSource);
+        source = screenSource;
+      } else {
+        throw new Error('截图为黑帧（目标窗口最小化或屏幕不可见）');
+      }
+    }
+    return _finishCapture(image, source, maxWidth, maxHeight, quality);
+  }
+
+  // 没有任何可用窗口源（用户在桌面 / UWP 全屏）→ 只能抓整屏，需先隐藏浮窗。
+  const screenSource = sources.find((s) => s.id.startsWith('screen:'));
+  if (!screenSource) throw new Error('未找到截图目标');
+  const image = await _captureScreenHidingSelf(screenSource);
+  return _finishCapture(image, screenSource, maxWidth, maxHeight, quality);
+}
+
+/**
+ * 隐藏本应用浮动窗（桌宠/气泡/预测浮层）后重新取一次整屏缩略图。
+ * 必须在隐藏【之后】重新 getSources——首轮 sources 是在隐藏前取的，缩略图
+ * 里仍含桌宠。返回不含本应用浮窗的整屏画面。
+ */
+async function _captureScreenHidingSelf(screenSource) {
+  const { desktopCapturer, BrowserWindow } = _electron;
   const wasVisible = [];
   try {
     for (const w of BrowserWindow.getAllWindows()) {
@@ -85,80 +153,41 @@ async function captureActiveWindow({ maxWidth = MAX_WIDTH, maxHeight = MAX_HEIGH
         if (!w.isDestroyed() && w.isVisible() && w._isBuddyFloating) { w.hide(); wasVisible.push(w); }
       } catch (_) {}
     }
-    if (wasVisible.length) await new Promise((r) => setTimeout(r, 220)); // 等合成器刷新掉桌面残影
+    // 等合成器把桌面残影刷新掉（桌宠真的从屏上消失）再取屏
+    if (wasVisible.length) await new Promise((r) => setTimeout(r, 180));
   } catch (_) {}
-
   try {
-    const sources = await desktopCapturer.getSources({
-      types: ['screen', 'window'],
+    const fresh = await desktopCapturer.getSources({
+      types: ['screen'],
       thumbnailSize: { width: 1920, height: 1080 },
     });
-    if (!sources.length) throw new Error('没有可用的截图源');
-
-    const skip = skipName instanceof RegExp ? skipName
-      : (typeof skipName === 'string' ? new RegExp(skipName, 'i') : null);
-
-    const winSources = sources.filter((s) => s.id.startsWith('window:'));
-    let source = null;
-
-    // v4.10.2：优先匹配前台窗口标题（截「用户正在看的窗口」，而非碰巧排前面的源）
-    const fg = String(fgTitle || '').trim();
-    if (fg) {
-      const key = fg.slice(0, 24);
-      source = winSources.find((s) => s.name && s.name.indexOf(key) !== -1
-        && !/hermes buddy|hermes-buddy|桌宠|buddy/i.test(s.name));
-    }
-
-    // 其次：第一个非本应用窗口（旧行为兜底）
-    if (!source) {
-      source = winSources.find((s) => {
-        if (!s.name) return false;
-        if (skip && skip.test(s.name)) return false;
-        return !/hermes buddy|hermes-buddy|桌宠|buddy/i.test(s.name);
-      });
-    }
-    // 最后：整屏（此时本应用窗口已隐藏，猫不会入镜）
-    if (!source) {
-      source = sources.find((s) => s.id.startsWith('screen:'));
-    }
-    if (!source) throw new Error('未找到截图目标');
-
-    let image = source.thumbnail; // nativeImage
-    // v4.10.3：黑帧兜底——选中的窗口源是最小化/被隐藏窗口时 thumbnail 纯黑，
-    // 换整屏重取；整屏也黑（锁屏/显示器关闭）就放弃本帧（调用方无图分析）。
-    if (_isBlankImage(image)) {
-      const screenSource = sources.find((s) => s.id.startsWith('screen:'));
-      if (screenSource && screenSource.id !== source.id && !_isBlankImage(screenSource.thumbnail)) {
-        source = screenSource;
-        image = screenSource.thumbnail;
-      } else {
-        throw new Error('截图为黑帧（目标窗口最小化或屏幕不可见）');
-      }
-    }
-    const size = image.getSize();
-    const scale = Math.min(1, maxWidth / size.width, maxHeight / size.height);
-    if (scale < 1) {
-      image = image.resize({
-        width: Math.round(size.width * scale),
-        height: Math.round(size.height * scale),
-      });
-    }
-
-    const buffer = image.toJPEG(quality);
-    const outSize = image.getSize();
-    return {
-      buffer,
-      base64: buffer.toString('base64'),
-      width: outSize.width,
-      height: outSize.height,
-      source: source.name || 'screen',
-    };
+    const sc = fresh.find((s) => s.id === screenSource.id) || fresh.find((s) => s.id.startsWith('screen:'));
+    return (sc && sc.thumbnail) || screenSource.thumbnail;
   } finally {
-    // 无论截图成败都恢复窗口可见性
     for (const w of wasVisible) {
       try { if (!w.isDestroyed()) w.showInactive(); } catch (_) {}
     }
   }
+}
+
+function _finishCapture(image, source, maxWidth, maxHeight, quality) {
+  const size = image.getSize();
+  const scale = Math.min(1, maxWidth / size.width, maxHeight / size.height);
+  if (scale < 1) {
+    image = image.resize({
+      width: Math.round(size.width * scale),
+      height: Math.round(size.height * scale),
+    });
+  }
+  const buffer = image.toJPEG(quality);
+  const outSize = image.getSize();
+  return {
+    buffer,
+    base64: buffer.toString('base64'),
+    width: outSize.width,
+    height: outSize.height,
+    source: source.name || 'screen',
+  };
 }
 
 /** 截整个主屏幕（用于「用户在哪儿」的兜底）。 */
