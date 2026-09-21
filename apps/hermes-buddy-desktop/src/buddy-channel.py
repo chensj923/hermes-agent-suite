@@ -44,7 +44,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 #   2.1  v4.10.4：generate_content 生成分支 + 防误判 PREDICT_PROMPT +
 #        CHANNEL_BUILD 版本协商。用户要求：以后修复服务端 prompt/逻辑时
 #        CHANNEL_VERSION 必须升级（不只抬 BUILD），让老客户端一眼看出不兼容。
-CHANNEL_VERSION = "2.2"
+#   2.2  v4.10.2x：结晶记忆注入 / 预测兜底细化（详见 git 历史）
+#   2.3  v4.10.30：修复 ping/pong 协议错误 —— 服务端回 pong 时被二次编码成文本帧，
+#        客户端每 25 秒收到非法 JSON。修协议语义，故抬协议版本。
+CHANNEL_VERSION = "2.3"
 
 # v4.10.3：脚本内容版本（不等于协议版本）。
 # 协议版本（CHANNEL_VERSION）只在新增/删除帧类型时抬；修 prompt 文案、加新函数
@@ -52,7 +55,10 @@ CHANNEL_VERSION = "2.2"
 #   1 = v4.10.0 视觉本地化（PREDICT_PROMPT 改写）
 #   2 = v4.10.1 防误判规则 + ctx 补字段
 #   3 = v4.10.2 GENERATE_PROMPT + generate_content 分支
-CHANNEL_BUILD = "10"
+# ...
+#   10 = v4.10.2x 结晶记忆注入 / 预测兜底
+#   11 = v4.10.30 pong 帧不再被二次编码成文本帧（修 channel-bad-json）
+CHANNEL_BUILD = "11"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -1271,7 +1277,14 @@ class WSConnection:
                 if op == 0x8:  # close
                     break
                 if op == 0x9:  # ping
-                    self.send_raw(encode_frame(0xA, frame["payload"]))
+                    # v4.10.30：必须直接把 pong 帧字节写进 socket。
+                    # 旧代码走 send_raw()，而 send_raw 内部又包了一层文本帧（0x1），
+                    # 于是客户端收到的是「文本帧里装着 pong 帧的原始字节」（0x8A 0x00），
+                    # JSON.parse 必然失败 —— 这就是每 25 秒一条 channel-bad-json 的来源。
+                    try:
+                        self.sock.sendall(encode_frame(0xA, frame["payload"]))
+                    except Exception:
+                        self.closed = True
                     continue
                 if op == 0xA:  # pong
                     continue

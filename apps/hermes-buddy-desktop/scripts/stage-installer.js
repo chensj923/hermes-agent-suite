@@ -22,7 +22,13 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..');
-const DEFAULT_SRC = path.join(REPO, 'dist', 'hermes-suite-windows-x86_64.exe');
+// v4.10.30：构建产物实际落在非同步目录 C:\HermesBuild\dist（build:win:local / -c.directories.output）。
+// 仓库内的 dist/ 是云同步目录里的陈旧产物，会被同步客户端做成占位文件而损坏
+// （实测 107 项 CRC 错）。因此默认源改为 C:\HermesBuild\dist，仅在它不存在时才回退。
+const BUILD_DIST = 'C:\\HermesBuild\\dist\\hermes-suite-windows-x86_64.exe';
+const DEFAULT_SRC = fs.existsSync(BUILD_DIST)
+  ? BUILD_DIST
+  : path.join(REPO, 'dist', 'hermes-suite-windows-x86_64.exe');
 const DEFAULT_OUT_DIR = 'C:\\HermesSetup';
 
 function arg(name, fallback) {
