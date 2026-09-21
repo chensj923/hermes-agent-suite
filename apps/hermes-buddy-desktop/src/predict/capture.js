@@ -76,13 +76,13 @@ async function captureActiveWindow({ maxWidth = MAX_WIDTH, maxHeight = MAX_HEIGH
   if (!_electron) throw new Error('capture 只能在 Electron 主进程中使用');
   const { desktopCapturer, nativeImage, BrowserWindow } = _electron;
 
-  // v4.10.2：截图瞬间隐藏本应用所有窗口（桌宠 / 气泡 / 浮层）。
-  // 用 showInactive 恢复，不抢前台焦点。失败不阻断截图。
+  // v4.10.28：只隐藏本应用的悬浮窗（桌宠 / 气泡 / 预测浮层），不隐藏主窗口。
+  // 这样触发预测时主界面不会闪消失，体验更自然。
   const wasVisible = [];
   try {
     for (const w of BrowserWindow.getAllWindows()) {
       try {
-        if (!w.isDestroyed() && w.isVisible()) { w.hide(); wasVisible.push(w); }
+        if (!w.isDestroyed() && w.isVisible() && w._isBuddyFloating) { w.hide(); wasVisible.push(w); }
       } catch (_) {}
     }
     if (wasVisible.length) await new Promise((r) => setTimeout(r, 220)); // 等合成器刷新掉桌面残影

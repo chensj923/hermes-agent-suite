@@ -86,6 +86,7 @@ class PredictPanel {
     });
     win.loadFile(path.join(__dirname, 'predict-panel.html'));
     win.on('closed', () => { this.win = null; this._ready = false; });
+    win._isBuddyFloating = true; // 截图时只隐藏悬浮窗，不隐藏主窗口
     return win;
   }
 

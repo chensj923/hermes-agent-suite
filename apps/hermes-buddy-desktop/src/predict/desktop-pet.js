@@ -408,6 +408,7 @@ class DesktopPet {
     win.setMenuBarVisibility(false);
     win.loadFile(path.join(__dirname, 'desktop-pet-editor.html'));
     win.on('closed', () => { this.editorWin = null; });
+    win._isBuddyFloating = true; // 截图时只隐藏悬浮窗，不隐藏主窗口
     this.editorWin = win;
   }
 
@@ -442,6 +443,7 @@ class DesktopPet {
       query: { model: this._modelUrl() },
     });
     win.on('closed', () => { this.win = null; this._ready = false; });
+    win._isBuddyFloating = true; // 截图时只隐藏悬浮窗，不隐藏主窗口
     return win;
   }
 
