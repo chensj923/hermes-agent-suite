@@ -470,4 +470,6 @@ module.exports = {
   fetchJson, withMirrors, downloadTo, downloadFirstAvailable, extractZip, walk,
   // 导出以便单测"代理解析"这条在国内网络下决定成败的逻辑
   resolveProxy, makeHttpsAgent,
+  // v4.10.28：llama-engine.js 复用此常量，避免"DOWNLOAD_TIMEOUT is not defined"
+  DOWNLOAD_TIMEOUT,
 };

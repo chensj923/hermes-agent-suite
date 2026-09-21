@@ -23,6 +23,7 @@ const https = require('https');
 const { spawnSync } = require('child_process');
 const {
   downloadFirstAvailable, withMirrors, extractZip, placeFiles, fetchJson, makeHttpsAgent,
+  DOWNLOAD_TIMEOUT,
 } = require('../media-engines');
 
 const LLAMA_RELEASES_API = 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=8';

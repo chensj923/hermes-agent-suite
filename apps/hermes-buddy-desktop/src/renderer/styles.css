@@ -810,19 +810,35 @@ button:disabled { opacity: .5; cursor: default; }
 .msg-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .msg-text { white-space: pre-wrap; word-break: break-word; }
 
-/* 右侧上下文面板 */
+/* 右侧上下文面板：弹出式侧栏抽屉（v4.10.28） */
+.context-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 999;
+  -webkit-app-region: no-drag;
+}
+.context-overlay[hidden] { display: none; }
+
 .context-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
   width: var(--context-width);
-  flex-shrink: 0;
+  min-width: 360px;
+  max-width: 95vw;
   display: flex;
   flex-direction: column;
   background: var(--surface);
   border-left: 1px solid var(--border);
-  position: relative; /* v4.10.25 承载左缘拖拽条 */
+  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.22);
+  z-index: 1000;
+  -webkit-app-region: no-drag;
 }
 .context-panel[hidden] { display: none; }
 
-/* v4.10.25 面板宽度拖拽条：贴左缘 7px 热区，hover/拖拽中高亮 */
+/* v4.10.25 左缘拖拽条：保留宽度调节能力 */
 .context-resizer {
   position: absolute;
   left: -3px;

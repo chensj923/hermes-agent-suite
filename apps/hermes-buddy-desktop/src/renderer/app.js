@@ -103,8 +103,9 @@ const el = {
   fileInput: $('file-input'),
   attachLimit: $('attach-limit'),
 
-  // 右侧上下文面板（集成设置）
+  // 右侧上下文面板（弹出式抽屉，v4.10.28）
   contextPanel: $('context-panel'),
+  contextOverlay: $('context-overlay'),
   contextTitle: $('context-title'),
   contextTabs: $('context-tabs'),
   contextBody: $('context-body'),
@@ -231,6 +232,7 @@ function showView(name) {
   el.viewConnect.hidden = !isConnect;
   el.app.hidden = isConnect;
   el.contextPanel.hidden = !isSettings;
+  if (el.contextOverlay) el.contextOverlay.hidden = !isSettings;
   el.btnDisconnect.hidden = isConnect;
   el.btnReconnect.hidden = isConnect;
   el.btnClearChat.hidden = isConnect;
@@ -1836,6 +1838,13 @@ el.btnSettings.addEventListener('click', () => {
   else showView('settings');
 });
 el.btnContextClose.addEventListener('click', () => showView('chat'));
+if (el.contextOverlay) {
+  el.contextOverlay.addEventListener('click', () => showView('chat'));
+}
+// Esc 关闭弹出式设置面板
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && state.currentView === 'settings') showView('chat');
+});
 
 el.contextTabs.addEventListener('click', (event) => {
   const tab = event.target.closest('[data-tab]');
@@ -3347,21 +3356,21 @@ el.btnManageConn.addEventListener('click', () => {
   const panel = document.getElementById('context-panel');
   if (!resizer || !panel) return;
   const KEY = 'hb.contextWidth';
-  const MIN = 280;
-  const MAX = 720;
-  const DEFAULT_W = 320;
-  const CHAT_MIN = 460; // 拖拽时保证聊天区至少剩这么宽
+  const MIN = 360;
+  const MAX = 820;
+  const DEFAULT_W = 560; // v4.10.28 弹出式抽屉默认更宽
 
   const applyWidth = (px) => {
     document.documentElement.style.setProperty('--context-width', px + 'px');
   };
   const clampWidth = (px) => {
-    const cap = Math.max(MIN, Math.min(MAX, window.innerWidth - CHAT_MIN));
+    const cap = Math.max(MIN, Math.min(MAX, Math.round(window.innerWidth * 0.95)));
     return Math.min(cap, Math.max(MIN, Math.round(px)));
   };
 
   const saved = Number(localStorage.getItem(KEY));
-  if (saved >= MIN && saved <= MAX) applyWidth(saved);
+  if (saved >= MIN && saved <= MAX) applyWidth(clampWidth(saved));
+  else applyWidth(DEFAULT_W);
 
   let dragging = false;
   let startX = 0;
@@ -3390,9 +3399,9 @@ el.btnManageConn.addEventListener('click', () => {
     applyWidth(DEFAULT_W);
     localStorage.removeItem(KEY);
   });
-  // 窗口变窄时把已保存的宽度收回合法范围，避免挤没聊天区
+  // 窗口变窄时把抽屉宽度收回合法范围
   window.addEventListener('resize', () => {
-    const cur = panel.getBoundingClientRect().width;
+    const cur = Number(getComputedStyle(panel).width.replace('px', ''));
     const want = clampWidth(cur);
     if (want !== Math.round(cur)) applyWidth(want);
   });
