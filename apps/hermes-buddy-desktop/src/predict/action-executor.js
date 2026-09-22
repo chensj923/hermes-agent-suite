@@ -58,18 +58,20 @@ function simulateTyping(text, logger, targetHwnd) {
         windowsHide: true,
       });
       let settled = false;
+      let stderrTail = '';  // v4.10.32：收集 stderr，失败时带进日志（之前只有 "exit 1" 无法定位根因）
+      if (child.stderr) child.stderr.on('data', (d) => { stderrTail = (stderrTail + d).slice(-1500); });
       const done = (ok, err) => {
         if (settled) return;
         settled = true;
         if (logger) {
           const ms = Date.now() - started;
           if (ok) logger.info('type-input-sent', { len: String(text || '').length, ms: String(ms), targetHwnd: String(targetHwnd || 0) });
-          else logger.warn('type-input-failed', { error: err && err.message, ms: String(ms) });
+          else logger.warn('type-input-failed', { error: err && err.message, stderr: stderrTail.trim().slice(0, 400), ms: String(ms) });
         }
         resolve(ok);
       };
       child.on('error', (e) => done(false, e));
-      child.on('exit', (code) => done(code === 0, code === 0 ? null : new Error('type.ps1 exit ' + code)));
+      child.on('exit', (code) => done(code === 0, code === 0 ? null : new Error('type.ps1 exit ' + code + (stderrTail.trim() ? ' stderr=' + stderrTail.trim().slice(0, 200) : ''))));
       // stdin 写入可能因进程提前退出而报 EPIPE，吞掉即可
       child.stdin.on('error', () => {});
       child.stdin.end(String(text || ''), 'utf8');
@@ -91,17 +93,19 @@ function simulatePaste(logger, targetHwnd) {
         windowsHide: true
       });
       let settled = false;
+      let stderrTail = '';  // v4.10.32：收集 stderr，失败时带进日志
+      if (child.stderr) child.stderr.on('data', (d) => { stderrTail = (stderrTail + d).slice(-1500); });
       const done = (ok, err) => {
         if (settled) return;
         settled = true;
         if (logger) {
           if (ok) logger.info('paste-simulated', { script });
-          else logger.warn('paste-simulate-failed', { error: err && err.message, script });
+          else logger.warn('paste-simulate-failed', { error: err && err.message, stderr: stderrTail.trim().slice(0, 400), script });
         }
         resolve(ok);
       };
       child.on('error', (e) => done(false, e));
-      child.on('exit', (code) => done(code === 0, code === 0 ? null : new Error('paste.ps1 exit ' + code)));
+      child.on('exit', (code) => done(code === 0, code === 0 ? null : new Error('paste.ps1 exit ' + code + (stderrTail.trim() ? ' stderr=' + stderrTail.trim().slice(0, 200) : ''))));
     } catch (e) {
       if (logger) logger.warn('paste-simulate-failed', { error: e.message });
       resolve(false);

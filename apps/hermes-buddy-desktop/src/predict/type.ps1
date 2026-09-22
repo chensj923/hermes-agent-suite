@@ -41,15 +41,32 @@ public class KS2 {
   public static extern int GetWindowTextLength(IntPtr h);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  // v4.10.32：PowerShell 5.1 里 Marshal.SizeOf([KS2+INPUT]) 会把类型字面量绑定到
+  // SizeOf(object) 重载，抛“RuntimeType 不能作为非托管结构封送”→ 脚本 exit 1，
+// type/paste 注入从 v4.10.26 起一直静默失败。改为 C# 侧编译期 typeof 取尺寸。
+  public static int InputSize() { return Marshal.SizeOf(typeof(INPUT)); }
   [StructLayout(LayoutKind.Sequential)]
   public struct INPUT {
     public int type;
     public MOUSEKEYBDHARDWAREINPUT u;
   }
+  // v4.10.32：补全官方 union（MOUSEINPUT 是最大成员 32 字节），
+  // 否则托管 INPUT 只有 32 字节，与原生 sizeof(INPUT)=40(x64) 不符，SendInput 直接拒绝。
   [StructLayout(LayoutKind.Explicit)]
   public struct MOUSEKEYBDHARDWAREINPUT {
     [FieldOffset(0)]
     public KEYBDINPUT ki;
+    [FieldOffset(0)]
+    public MOUSEINPUT mi;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct MOUSEINPUT {
+    public int dx;
+    public int dy;
+    public uint mouseData;
+    public uint dwFlags;
+    public uint time;
+    public IntPtr dwExtraInfo;
   }
   [StructLayout(LayoutKind.Sequential)]
   public struct KEYBDINPUT {
@@ -141,7 +158,10 @@ function Send-Char([ushort]$code, [bool]$isSpecialKey) {
     $up.u.ki.dwFlags = $UNICODE -bor $KEYUP
   }
   $arr = @($down, $up)
-  [KS2]::SendInput(2, $arr, [System.Runtime.InteropServices.Marshal]::SizeOf([KS2+INPUT])) | Out-Null
+  # v4.10.32：SizeOf 改走 C# InputSize()（见类注释）；SendInput 返回 0 说明注入被拒（UIPI/安全软件），打到 stderr 供主进程日志
+  $sent = [KS2]::SendInput(2, $arr, [KS2]::InputSize())
+  if ($sent -eq 0) { [Console]::Error.WriteLine('SendInput returned 0 (blocked by UIPI or security software)') }
+  $sent | Out-Null
 }
 
 # Normalize newlines, then type in batches with tiny sleeps so target apps keep up
