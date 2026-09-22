@@ -41,7 +41,7 @@ const REQUIRED_CHANNEL_VERSION = '2.3';
  * 并提示重新部署（老用户装新客户端后服务端仍是旧脚本 -> 功能静默缺失）。
  * 服务端 CHANNEL_BUILD < 此值 -> "服务端脚本过旧，请重新部署"。
  */
-const REQUIRED_CHANNEL_BUILD = 11;
+const REQUIRED_CHANNEL_BUILD = 12;
 
 /**
  * v4.10.30：predict_request 的等待上限。
@@ -147,7 +147,8 @@ class ChannelClient {
     this.pendingModels = null; // 当前 list_models 的 { resolve, reject }
     this.pendingResume = null;  // 当前 resume_session 的 { resolve, reject }
     this.pendingSync = null;  // 当前 sync_memory 的 { resolve, reject }
-    this.pendingPredict = null; // 当前 predict_request 的 { resolve, reject }
+    this.pendingPredictMap = new Map(); // req_id -> { resolve, reject }，支持并发 predict
+    this._predictSeq = 0;               // predict 请求自增序号
     this.serverVersion = '';   // 服务端 welcome 里声明的通道版本
     this.serverUpstream = '';  // 服务端实际在调的模型地址（出错时才知道该去查哪里）
     this._welcomed = false;    // 是否已收到 welcome（决定断连时该 resolve 还是 reject）
@@ -368,19 +369,26 @@ class ChannelClient {
       // v4.10.14：服务端 generate_content 分支返回 {content, intent}，
       // 旧代码只提取 intent/confidence/suggestion/reason，把 content 丢了，
       // 导致「生成并插入」永远拿不到正文，只能兜底粘贴建议问句。
-      if (this.pendingPredict) {
-        const p = this.pendingPredict;
-        this.pendingPredict = null;
-        const resp = {
-          intent: msg.intent,
-          confidence: Number(msg.confidence) || 0,
-          suggestion: msg.suggestion,
-          reason: msg.reason,
-        };
-        // v4.10.2 generate_content 分支返回的正文内容
-        if (msg.content !== undefined) resp.content = msg.content;
-        p.resolve(resp);
+      // v4.10.35：按 req_id 精确匹配，支持分析/生成请求并发（旧单槽会互相截胡响应）。
+      const resp = {
+        intent: msg.intent,
+        confidence: Number(msg.confidence) || 0,
+        suggestion: msg.suggestion,
+        reason: msg.reason,
+      };
+      // v4.10.2 generate_content 分支返回的正文内容
+      if (msg.content !== undefined) resp.content = msg.content;
+      let p = null;
+      if (msg.req_id !== undefined && this.pendingPredictMap.has(String(msg.req_id))) {
+        p = this.pendingPredictMap.get(String(msg.req_id));
+        this.pendingPredictMap.delete(String(msg.req_id));
+      } else if (msg.req_id === undefined && this.pendingPredictMap.size > 0) {
+        // 旧服务端（无 req_id）：无法区分归属，交给最早的等待者（FIFO）
+        const firstKey = this.pendingPredictMap.keys().next().value;
+        p = this.pendingPredictMap.get(firstKey);
+        this.pendingPredictMap.delete(firstKey);
       }
+      if (p) p.resolve(resp);
       return;
     }
     if (msg.type === 'ping') { this._sendFrame(0x9, Buffer.alloc(0)); return; }
@@ -596,22 +604,24 @@ class ChannelClient {
       // 于是客户端先放弃、服务端还在算，表现就是"远端推断失败"。
       // 这里与服务端对齐到 90s，并留 env 覆盖口子。
       const timeoutMs = PREDICT_TIMEOUT_MS;
+      // v4.10.35：每个 predict 请求独立 req_id + Map 槽位，支持分析/生成并发
+      const reqId = String(++this._predictSeq);
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        this.pendingPredict = null;
+        this.pendingPredictMap.delete(reqId);
         // v4.8.8 插桩：确认通道层定时器是否真正触发
         try { this.logger.warn('channel-predict-timeout-fired'); } catch (_) {}
         reject(new Error(`预测推断超时（服务端 ${Math.round(timeoutMs / 1000)} 秒无响应）`));
       }, timeoutMs);
-      this.pendingPredict = {
+      this.pendingPredictMap.set(reqId, {
         resolve: (r) => { if (settled) return; settled = true; clearTimeout(timer); resolve(r); },
         reject: (e) => { if (settled) return; settled = true; clearTimeout(timer); reject(e); },
-      };
-      const payload = { type: 'predict_request', session: this.sessionId, behavior: behaviorContext || {} };
+      });
+      const payload = { type: 'predict_request', session: this.sessionId, req_id: reqId, behavior: behaviorContext || {} };
       if (imageBase64) payload.image = imageBase64;
       // v4.8.8 插桩：记录请求发出（含截图大小），配合 timer-fired 判断服务端是否响应
-      try { this.logger.info('channel-predict-request-sent', { withImage: Boolean(imageBase64) }); } catch (_) {}
+      try { this.logger.info('channel-predict-request-sent', { withImage: Boolean(imageBase64), reqId }); } catch (_) {}
       this.send(payload);
     });
   }
@@ -692,10 +702,10 @@ class ChannelClient {
         : '通道连接已断开';
       p.reject(new Error(msg));
     }
-    if (this.pendingPredict) {
-      const p = this.pendingPredict;
-      this.pendingPredict = null;
-      p.reject(new Error('通道连接已断开'));
+    if (this.pendingPredictMap.size > 0) {
+      const pending = Array.from(this.pendingPredictMap.values());
+      this.pendingPredictMap.clear();
+      for (const p of pending) p.reject(new Error('通道连接已断开'));
     }
     // 握手完成前断连必须 reject：之前这里无条件 resolve，导致「连不上」被当成连上了，
     // 后续发消息才暴露问题（表现为莫名其妙的失败）。

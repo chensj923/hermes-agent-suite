@@ -202,3 +202,44 @@ test('断线时 pendingPredict 被 reject', async () => {
     try { server.close(); } catch (_) {}
   }
 });
+
+test('v4.10.35 并发 predict：响应按 req_id 精确匹配，不互相截胡', async () => {
+  // 模拟真实场景：请求1（分析）慢、请求2（生成）快，且请求2的响应晚于请求1到达。
+  // 服务端把 req_id 原样带回，并对不同请求延迟不同时间应答。
+  const timers = [];
+  const { server, port } = await startMockServer((msg, socket) => {
+    if (msg.type !== 'predict_request') return;
+    const reqId = msg.req_id;
+    const isAnalyze = msg.behavior && msg.behavior.stage !== 'generate_content';
+    const delay = isAnalyze ? 120 : 40;   // 分析慢、生成快
+    timers.push(setTimeout(() => {
+      if (msg.behavior.stage === 'generate_content') {
+        sendRaw(socket, JSON.stringify({
+          type: 'predict_response', req_id: reqId, intent: 'word_writing',
+          confidence: 0.9, suggestion: '', reason: '', content: '这是生成的正文内容',
+        }));
+      } else {
+        sendRaw(socket, JSON.stringify({
+          type: 'predict_response', req_id: reqId, intent: 'word_writing',
+          confidence: 0.9, suggestion: '要不要帮你续写？', reason: '在 Word 中停顿',
+        }));
+      }
+    }, delay));
+  });
+  const client = makeClient(port);
+  try {
+    await client.connect();
+    // 先发分析请求（不 await），再发生成请求 → 两请求并发在飞
+    const analyzeP = client.predict({ rule: 'word_writing' }, null);
+    const generateP = client.predict({ rule: 'word_writing', stage: 'generate_content' }, null);
+    const [analyze, generated] = await Promise.all([analyzeP, generateP]);
+    // 生成请求必须拿到自己的 content，而不是分析请求的意图格式
+    assert.equal(generated.content, '这是生成的正文内容', '生成响应必须按 req_id 拿到自己的 content');
+    assert.equal(analyze.suggestion, '要不要帮你续写？', '分析响应也必须拿到自己的结果');
+    assert.equal(generated.suggestion, '', '生成响应不应串到分析的 suggestion');
+  } finally {
+    for (const t of timers) clearTimeout(t);
+    client.close();
+    server.close();
+  }
+});

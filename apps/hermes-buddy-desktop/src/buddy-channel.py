@@ -58,7 +58,8 @@ CHANNEL_VERSION = "2.3"
 # ...
 #   10 = v4.10.2x 结晶记忆注入 / 预测兜底
 #   11 = v4.10.30 pong 帧不再被二次编码成文本帧（修 channel-bad-json）
-CHANNEL_BUILD = "11"
+#   12 = v4.10.35 predict_request/response 携带 req_id（支持并发请求按 ID 匹配）
+CHANNEL_BUILD = "12"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -1383,6 +1384,7 @@ class WSConnection:
             # 因此即使当前会话正在跑任务也可以并发发起，放进线程避免阻塞读循环。
             behavior = msg.get("behavior") or {}
             image = msg.get("image") or None
+            req_id = msg.get("req_id")
             rule = (behavior or {}).get("rule", "word_writing")
             model = (self.session.model if self.session else None)
 
@@ -1398,6 +1400,9 @@ class WSConnection:
                         "confidence": result.get("confidence", 0.5),
                         "suggestion": result.get("suggestion", ""),
                         "reason": result.get("reason", "")}
+                # v4.10.35：原样带回 req_id，客户端据此区分并发请求的响应归属
+                if req_id is not None:
+                    resp["req_id"] = req_id
                 # v4.10.15：generate_content 分支返回的 {content} 要带给客户端，
                 # 否则「生成并插入」拿不到正文，只能兜底粘贴建议问句。
                 if "content" in result:
