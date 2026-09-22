@@ -774,6 +774,22 @@ class PredictController {
       this._notifyNoSourceContent();
       return;
     }
+    // v4.10.34：VL 输出太泛（长度 < 50 且不含"正在文档中写作"）→ 视为无效观察，不生成。
+    // 防止 VL 模型偷懒输出"光标在文档中"这类空话，服务端拿到只能瞎编。
+    if (!_topic && _obs && _obs.length < 50 && !/正在文档中写作/.test(_obs)) {
+      this.logger.warn('predict-generate-vague-observation', {
+        observationLength: _obs.length,
+        observationPreview: _obs.slice(0, 120),
+        intent: (suggestion && suggestion.intent) || '',
+      });
+      this._logEntry({
+        phase: 'generated',
+        status: 'vague-observation',
+        observationPreview: _obs.slice(0, 200),
+      });
+      this._notifyVagueObservation();
+      return;
+    }
     if (_topic) {
       this.logger.info('predict-generate-with-topic', { topic: _topic.slice(0, 80) });
       this._logEntry({
@@ -804,7 +820,7 @@ class PredictController {
         });
         if (res && typeof res.content === 'string' && res.content.trim()) {
           content = res.content.trim();
-          this.logger.info('predict-generate-ok', { chars: content.length });
+          this.logger.info('predict-generate-ok', { chars: content.length, content_preview: content.slice(0, 500) });
           // v4.10.18：记录生成成功
           this._logEntry({
             phase: 'generated',
@@ -915,6 +931,22 @@ class PredictController {
         const n = new Notification({
           title: 'Hermes Buddy',
           body: '当前屏幕没有识别到正在编辑的正文内容，已跳过生成。请把光标放到文档正文中，或先选中一段文字再使用「生成并插入」。',
+          silent: true,
+        });
+        try { n.show(); } catch (_) {}
+      }
+    } catch (_) { /* node --test 环境无 electron */ }
+  }
+
+  /** v4.10.34：VL 模型输出太泛（没有摘录文档正文）时的通知。 */
+  _notifyVagueObservation() {
+    this.logger.info('predict-notify-vague-observation');
+    try {
+      const { Notification } = require('electron');
+      if (Notification && Notification.isSupported && Notification.isSupported()) {
+        const n = new Notification({
+          title: 'Hermes Buddy',
+          body: '视觉模型没能读到文档内容（描述太泛），已跳过生成。请确保文档窗口处于前景且正文可见，稍后再试。',
           silent: true,
         });
         try { n.show(); } catch (_) {}
