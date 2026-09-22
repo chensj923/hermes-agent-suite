@@ -48,7 +48,7 @@ function makeController({ model = 'hybrid', predictFn = null, channel = null, mo
     channel,
     modelRunner,
   });
-  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6 });
+  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6, autoInsert: false });
   return { ctrl, captured };
 }
 

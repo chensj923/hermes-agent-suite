@@ -70,6 +70,11 @@ const DEFAULT_CONFIG = {
   // 实测 volcengine-coding 收到图片会直接报「Model only support text input」，
   // 纯文本 LLM 更不用说。只有明确知道自己服务端接的是视觉模型时才置 true。
   sendImageToServer: false,
+  // v4.10.38：自动插入。远端识别出明确的写作类意图后，不再停在「要不要生成」
+  // 确认框等点击，而是直接走远端生成并把正文打进目标窗口（WPS/Word）；生成期间
+  // 浮窗保留并显示「正在生成…」。仅对明确写作意图生效，reading_or_thinking 等
+  // 模糊意图仍只提示不自动写。置 false 回到「先确认再生成」的旧行为。
+  autoInsert: true,
   // v4.2：通用兜底规则。开启后「任意窗口里打字停顿 + 输入量足够」即触发写作类预判，
   // 不再要求必须是 Word——解决在 WPS / 记事本 / 微信 / 浏览器表单 / IDE 里完全不触发的问题。
   genericWritingFallback: true,

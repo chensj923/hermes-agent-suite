@@ -51,6 +51,13 @@ const PANEL_INFLIGHT_SAFETY_MS = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw + 3000 : 93000;
 })();
 
+/**
+ * v4.10.38：自动插入走生成阶段时浮窗安全网。生成（含注入）实测可达近 1 分钟，
+ * 与 _generateAndDeliver 的 300s 窗口对齐并略收，先让生成自身的超时/兜底生效，
+ * 安全网只兜底「正在生成…」浮窗卡死、永不消失。
+ */
+const PANEL_GENERATE_SAFETY_MS = 180000;
+
 /** v4.8.8：_withTimeout 轨迹回调（由控制器构造时注入 logger），用于定位「30s 定时器未触发」问题。 */
 let _timeoutTrace = null;
 
@@ -661,6 +668,29 @@ class PredictController {
       }
 
       // 6) 浮窗展示 + 等决策
+      // v4.10.38：autoInsert 开启且是明确写作类意图 → 不再停在确认框等点击，
+      // 直接生成并打进目标窗口；浮窗保留显示「正在生成…」。模糊意图
+      // （reading_or_thinking）仍只提示，避免发呆时自动往文档里写东西。
+      if (this._shouldAutoInsert(suggestion.intent)) {
+        this.logger.info('predict-auto-insert', { intent: suggestion.intent || '' });
+        this._logEntry({
+          phase: 'decision', rule: rule || '',
+          intent: suggestion.intent || '',
+          suggestion: (suggestion.suggestion || '').slice(0, 200),
+          choice: 'auto-generate',
+        });
+        this.engine.userDecision(true);
+        // 浮窗换成「正在生成…」并重新计时安全网（生成窗口最长 300s）
+        this._showThinking('正在生成…（可能需要约 1 分钟）');
+        this._rearmPanelSafety(PANEL_GENERATE_SAFETY_MS);
+        try {
+          await this._generateAndDeliver(suggestion, '');
+        } catch (e) {
+          this.logger.warn('predict-auto-insert-failed', { error: e.message });
+        }
+        return;
+      }
+
       let choice = 'later';
       if (this.panel) {
         choice = await this.panel.show(this._decorateSuggestion(suggestion));
@@ -864,7 +894,10 @@ class PredictController {
     }
     // 兜底：生成不出真内容时退回建议文案（旧行为）
     if (!content) content = (suggestion && suggestion.suggestion) || '';
-    if (!content) return;
+    if (!content) {
+      if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
+      return;
+    }
     if (this.actionExecutor) {
       // v4.10.24：insertMode 配置决定回填方式。
       //   'type'（默认）= SendInput 逐字敲进当前窗体，不碰剪贴板；
@@ -884,6 +917,7 @@ class PredictController {
         this.logger.warn('generate-deliver-no-safe-target');
         await this.actionExecutor.execute({ type: 'clipboard-keep', text: content });
         this._notifyClipboardFallback(content.length);
+        if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
         return;
       } else {
         this.logger.warn('generate-deliver-target-unknown');
@@ -903,6 +937,9 @@ class PredictController {
       }
     }
     this._notifyGenerated(content.length);
+    // v4.10.38：自动插入路径在 _onTrigger 中提前 return、不走其 finally，
+    // 由这里收走「正在生成…」浮窗（手动点击路径的 finally 也会再收一次，幂等）。
+    if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
   }
 
   /** 生成完成后的系统通知（Electron 主进程；测试/node 环境静默跳过）。 */
@@ -1261,10 +1298,21 @@ class PredictController {
    * 旧逻辑安全网从 showThinking 起按 45s 计时，本机 VL 的 14~27s 被计入，导致
    * 服务端 37~72s 的正常结果总被判超时。无 panel / 无 arm 方法时静默跳过。
    */
-  _rearmPanelSafety() {
+  _rearmPanelSafety(ms) {
     if (!this.panel || typeof this.panel.armThinkingTimeout !== 'function') return;
-    try { this.panel.armThinkingTimeout(PANEL_INFLIGHT_SAFETY_MS); } catch (_) {}
-    this.logger.info('predict-panel-safety-rearmed', { ms: PANEL_INFLIGHT_SAFETY_MS });
+    const delay = Number.isFinite(ms) && ms > 0 ? ms : PANEL_INFLIGHT_SAFETY_MS;
+    try { this.panel.armThinkingTimeout(delay); } catch (_) {}
+    this.logger.info('predict-panel-safety-rearmed', { ms: delay });
+  }
+
+  /**
+   * v4.10.38：是否对该意图自动生成并插入。
+   * 要求 autoInsert 开启，且是明确写作类意图；reading_or_thinking 这类
+   * 「发呆/斟酌」模糊意图不自动写（否则一发呆就往文档里塞字）。
+   */
+  _shouldAutoInsert(intent) {
+    if (this.config.get('autoInsert') !== true) return false;
+    return intent === 'word_writing';
   }
 
   // ---------------- 配置 / 状态 ----------------

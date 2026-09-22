@@ -32,7 +32,7 @@ function makeController({ model = 'none', choice = 'generate', predictFn = null 
     actionExecutor: { execute: async (a) => { captured.actionCalls.push(a); return { ok: true }; } },
     predictFn: predictFn || null,
   });
-  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6 });
+  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6, autoInsert: false });
   return { ctrl, captured, appDir };
 }
 
