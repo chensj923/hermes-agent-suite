@@ -878,11 +878,19 @@ class PredictController {
       } else {
         this.logger.warn('generate-deliver-target-unknown');
       }
-      await this.actionExecutor.execute({
+      const result = await this.actionExecutor.execute({
         type: mode === 'paste' ? 'clipboard-paste' : 'type-input',
         text: content,
         targetHwnd,
       });
+      // v4.10.36：直接输入和自动粘贴都没能把内容送进目标窗口时（Windows 限制
+      // 后台进程抢前台），内容已安全落在剪贴板。明确通知用户手动 Ctrl+V，
+      // 不再像旧版那样静默"成功"、结果文档里什么都没有。
+      if (result && result.ok === false && result.delivered === false) {
+        this.logger.warn('generate-deliver-manual-paste', { chars: content.length });
+        this._notifyClipboardFallback(content.length);
+        return;
+      }
     }
     this._notifyGenerated(content.length);
   }

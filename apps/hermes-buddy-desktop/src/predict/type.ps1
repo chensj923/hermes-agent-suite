@@ -128,15 +128,30 @@ if ($target -eq [IntPtr]::Zero) {
     break
   }
 }
+# v4.10.36：激活后必须确认前台确实是目标窗口，且做少量重试。
+# 旧逻辑焦点没切成功只 sleep 一下就继续打字，317 个键事件全部发给了
+# 当时真正在前台的窗口（Buddy 自己，被丢弃），脚本却 exit 0 谎报成功，
+# 控制器因此不回退粘贴——用户既看不到字、剪贴板也没有内容。
+$focusOk = $false
 if ($target -ne [IntPtr]::Zero) {
-  $ok = Activate-Window $target
-  if (-not $ok) { Start-Sleep -Milliseconds 200 }  # 焦点没切成就再缓一下，不阻断
+  for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    $ok = Activate-Window $target
+    if ($ok -and ([KS2]::GetForegroundWindow() -eq $target)) { $focusOk = $true; break }
+    Start-Sleep -Milliseconds 150
+  }
+}
+# 拿不到目标焦点：绝不盲打。exit 2 让调用方回退到剪贴板粘贴；
+# 粘贴也失败则内容留在剪贴板，通知用户手动 Ctrl+V（内容不会丢）。
+if (-not $focusOk) {
+  [Console]::Error.WriteLine('target window could not be brought to foreground; abort typing to avoid sending keys elsewhere')
+  exit 2
 }
 
 $UNICODE = 0x0004   # KEYEVENTF_UNICODE
 $KEYUP   = 0x0002   # KEYEVENTF_KEYUP
 $VK_RETURN = 0x0D
 $VK_TAB    = 0x09
+$script:sendFailures = 0   # v4.10.36：统计被系统拒绝的 SendInput 次数
 
 function Send-Char([ushort]$code, [bool]$isSpecialKey) {
   $down = [KS2+INPUT]::new()
@@ -158,9 +173,13 @@ function Send-Char([ushort]$code, [bool]$isSpecialKey) {
     $up.u.ki.dwFlags = $UNICODE -bor $KEYUP
   }
   $arr = @($down, $up)
-  # v4.10.32：SizeOf 改走 C# InputSize()（见类注释）；SendInput 返回 0 说明注入被拒（UIPI/安全软件），打到 stderr 供主进程日志
+  # v4.10.32：SizeOf 改走 C# InputSize()（见类注释）；SendInput 返回 0 说明注入被拒（UIPI/安全软件）
+  # v4.10.36：累计失败次数，结束后用非零码告知调用方，不再谎报成功。
   $sent = [KS2]::SendInput(2, $arr, [KS2]::InputSize())
-  if ($sent -eq 0) { [Console]::Error.WriteLine('SendInput returned 0 (blocked by UIPI or security software)') }
+  if ($sent -eq 0) {
+    $script:sendFailures++
+    [Console]::Error.WriteLine('SendInput returned 0 (blocked by UIPI or security software)')
+  }
   $sent | Out-Null
 }
 
@@ -169,6 +188,12 @@ $text = $text -replace "`r`n", "`n"
 $chars = $text.ToCharArray()
 $batch = 0
 foreach ($c in $chars) {
+  # v4.10.36：打字途中若焦点被抢走（前台不再是目标），立即停止，
+  # 避免剩余字符继续打错窗口；以 exit 2 触发上层回退。
+  if (($batch % 30) -eq 0 -and ([KS2]::GetForegroundWindow() -ne $target)) {
+    [Console]::Error.WriteLine('foreground changed mid-typing; abort to avoid sending keys to the wrong window')
+    exit 2
+  }
   $code = [ushort][int]$c
   if ($c -eq "`n") {
     Send-Char $VK_RETURN $true
@@ -183,6 +208,10 @@ foreach ($c in $chars) {
   $batch++
   if ($batch -ge 30) {
     Start-Sleep -Milliseconds 12
-    $batch = 0
   }
 }
+
+# v4.10.36：有任何一次 SendInput 被系统拒绝都按失败处理（exit 3），
+# 让调用方回退粘贴 / 保留剪贴板，而不是误以为整段已输入。
+if ($script:sendFailures -gt 0) { exit 3 }
+exit 0

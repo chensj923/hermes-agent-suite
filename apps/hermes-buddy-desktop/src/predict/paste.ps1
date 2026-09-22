@@ -103,17 +103,28 @@ if ($target -eq [IntPtr]::Zero) {
     break
   }
 }
+# v4.10.36：激活后必须确认前台确实是目标窗口（含重试）。旧逻辑切焦点失败后
+# 照样发 Ctrl+V，可能粘错窗口；改为拿不到焦点就 exit 2，由调用方保留剪贴板
+# 并通知用户手动 Ctrl+V（内容已在剪贴板，不会丢）。
+$focusOk = $false
 if ($target -ne [IntPtr]::Zero) {
-  if ([KS]::IsIconic($target)) { [void][KS]::ShowWindow($target, 9) }
-  $fg = [KS]::GetForegroundWindow()
-  $a = 0; $b = 0
-  [void][KS]::GetWindowThreadProcessId($fg, [ref]$a)
-  [void][KS]::GetWindowThreadProcessId($target, [ref]$b)
-  if ($a -ne $b) { [void][KS]::AttachThreadInput($a, $b, $true) }
-  [void][KS]::SetForegroundWindow($target)
-  [void][KS]::BringWindowToTop($target)
-  if ($a -ne $b) { [void][KS]::AttachThreadInput($a, $b, $false) }
-  Start-Sleep -Milliseconds 250
+  for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    if ([KS]::IsIconic($target)) { [void][KS]::ShowWindow($target, 9) }
+    $fg = [KS]::GetForegroundWindow()
+    $a = 0; $b = 0
+    [void][KS]::GetWindowThreadProcessId($fg, [ref]$a)
+    [void][KS]::GetWindowThreadProcessId($target, [ref]$b)
+    if ($a -ne $b) { [void][KS]::AttachThreadInput($a, $b, $true) }
+    [void][KS]::SetForegroundWindow($target)
+    [void][KS]::BringWindowToTop($target)
+    if ($a -ne $b) { [void][KS]::AttachThreadInput($a, $b, $false) }
+    Start-Sleep -Milliseconds 200
+    if ([KS]::GetForegroundWindow() -eq $target) { $focusOk = $true; break }
+  }
+}
+if (-not $focusOk) {
+  [Console]::Error.WriteLine('target window could not be brought to foreground; abort paste to avoid sending Ctrl+V elsewhere')
+  exit 2
 }
 
 $VK_CTRL = 0x11
@@ -139,7 +150,13 @@ $inputs[3].type = 1
 $inputs[3].u.ki.wVk = $VK_CTRL
 $inputs[3].u.ki.dwFlags = $UP
 
-# v4.10.32：SizeOf 改走 C# InputSize()（见类注释）；返回 0 说明注入被拒，写 stderr 供主进程日志
+# v4.10.32：SizeOf 改走 C# InputSize()（见类注释）；返回 0 说明注入被拒
+# v4.10.36：被拒时用非零码退出，调用方据此保留剪贴板并提示手动粘贴。
 $sent = [KS]::SendInput(4, $inputs, [KS]::InputSize())
-if ($sent -eq 0) { [Console]::Error.WriteLine('SendInput returned 0 (blocked by UIPI or security software)') }
-$sent | Out-Null
+if ($sent -eq 0) {
+  [Console]::Error.WriteLine('SendInput returned 0 (blocked by UIPI or security software)')
+  exit 3
+}
+# 给目标应用一点时间处理粘贴，再正常退出
+Start-Sleep -Milliseconds 200
+exit 0

@@ -191,6 +191,28 @@ test('v4.10.23：生成请求必须带上窗口标题（windowTitle）——文�
   assert.strictEqual(payload.screenObservation, ctrl._lastObservation);
 });
 
+test('v4.10.36：直接输入+自动粘贴均未送达 → 内容留剪贴板并提示手动 Ctrl+V，不谎报成功', async () => {
+  const { ctrl } = makeController({ model: 'none' });
+  const calls = [];
+  // 模拟 type-input 与其回退的 clipboard-paste 都没能把内容送进目标窗口
+  ctrl.actionExecutor = {
+    execute: async (a) => {
+      calls.push(a.type);
+      return { ok: false, type: a.type, delivered: false, message: '请手动 Ctrl+V' };
+    },
+  };
+  ctrl._targetWindow = { hwnd: 12345, title: '文档1 - WPS Office' };
+  ctrl._targetCaptureAttempted = false;
+  ctrl._lastObservation = '正在文档中写作，文档标题是《运维规划》，开头写着：本规划旨在保障服务连续';
+  ctrl._generateContentFn = async () => ({ content: '这是真正生成的正文内容。' });
+  let notified = false;
+  ctrl._notifyClipboardFallback = () => { notified = true; };
+  ctrl._notifyGenerated = () => { throw new Error('未送达时不应弹"已生成并输入"通知'); };
+  await ctrl._generateAndDeliver({ intent: 'word_writing', suggestion: '' });
+  assert.deepStrictEqual(calls, ['type-input'], '应先尝试直接输入（其内部回退由 executor 负责）');
+  assert.ok(notified, '两种方式都未送达时，必须通知用户手动粘贴');
+});
+
 test('一键关闭 → enabled/authorized 落盘为 false', async () => {
   const { ctrl } = makeController({ model: 'none' });
   await ctrl.oneClickOff();

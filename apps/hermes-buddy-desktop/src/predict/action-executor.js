@@ -170,12 +170,16 @@ class ActionExecutor {
     if (type === 'clipboard-paste') {
       // v4.10.10：写入剪贴板 + 模拟 Ctrl+V 自动粘贴
       const r = await this._fillClipboard(String(action.text || ''), true);
-      if (r.ok) {
-        // 延迟 200ms 让剪贴板写入生效，再模拟粘贴
-        const hwnd = action.targetHwnd || 0;
-        setTimeout(() => simulatePaste(this.logger, hwnd), 200);
-      }
-      return r;
+      if (!r.ok) return r;
+      // v4.10.36：等待粘贴真实结果（旧逻辑用 setTimeout 不等待，粘贴脚本是否
+      // 把焦点切回目标、Ctrl+V 有没有发对窗口，全都不可知）。粘贴失败时返回
+      // ok:false，让上层提示用户手动 Ctrl+V——内容已在剪贴板，不会丢。
+      const hwnd = action.targetHwnd || 0;
+      await new Promise((res) => setTimeout(res, 120));
+      const pasted = await simulatePaste(this.logger, hwnd);
+      if (pasted) return { ok: true, type: 'clipboard-paste', message: '已粘贴到目标窗口（' + String(action.text || '').length + ' 字）' };
+      this.logger.warn('clipboard-paste-not-delivered', { len: String(action.text || '').length });
+      return { ok: false, type: 'clipboard-paste', delivered: false, message: '内容已写入剪贴板，但无法自动粘贴，请在目标窗口按 Ctrl+V' };
     }
     if (type === 'type-input') {
       // v4.10.24：直接打字进目标窗体，不碰剪贴板。失败时回退到 clipboard-paste。
