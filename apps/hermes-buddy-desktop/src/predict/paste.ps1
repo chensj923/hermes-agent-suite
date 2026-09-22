@@ -1,4 +1,4 @@
-# v4.10.26: Simulate Ctrl+V paste via Win32 SendInput
+﻿# v4.10.26: Simulate Ctrl+V paste via Win32 SendInput
 # Called by action-executor.js after writing content to clipboard.
 # 关键：和 type.ps1 一样，先把键盘焦点交还给用户真正在用的上一个窗口
 # （排除 Buddy 进程自身），否则 Ctrl+V 会粘到 Buddy 自己身上。

@@ -84,12 +84,12 @@ test('触发时捕获到的目标窗口句柄会传到注入动作上', async ()
   assert.strictEqual(act.targetHwnd, 987654, '动作应带上触发时捕获的 HWND');
 });
 
-test('捕获失败（返回 null）→ 动作 targetHwnd=0，由脚本回退 Z 序查找', async () => {
+test('v4.10.33：捕获失败 → 不盲插，只写剪贴板（Z 序回退会猜错窗口）', async () => {
   const { ctrl, captured } = makeCtrl({ choice: 'generate', captureFn: async () => null });
   await ctrl.triggerRule('word_writing');
   await settle();
   assert.ok(captured.actionCalls.length >= 1);
-  assert.strictEqual(captured.actionCalls[0].targetHwnd, 0, '没捕获到就传 0');
+  assert.strictEqual(captured.actionCalls[0].type, 'clipboard-keep', '没有可靠目标句柄时只写剪贴板，不执行注入');
 });
 
 // ---------- 主题输入（空白文档） ----------

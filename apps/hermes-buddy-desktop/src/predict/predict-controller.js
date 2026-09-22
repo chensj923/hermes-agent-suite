@@ -195,6 +195,9 @@ class PredictController {
     this._captureTargetWindowFn = opts.captureTargetWindowFn || null;
     this._targetWindow = null;
     this._targetPromise = null;
+    // v4.10.33：记录「触发时是否真的发起过捕获」。发起过却拿不到句柄时，
+    // 插入时刻的窗口已不可信（用户可能切去别的窗口），宁可只写剪贴板也不盲插。
+    this._targetCaptureAttempted = false;
     // v4.10.24：场景规则（结晶场景）监视器。规则表存 config.sceneRules，
     // 未配置时用内置默认（WPS 写作/润色 + 微信/QQ 回复）。
     this._sceneWatcher = createSceneWatcher(this.config.get('sceneRules'));
@@ -210,6 +213,7 @@ class PredictController {
    */
   _startTargetCapture() {
     if (typeof this._captureTargetWindowFn !== 'function') return Promise.resolve(null);
+    this._targetCaptureAttempted = true;
     const p = Promise.resolve()
       .then(() => this._captureTargetWindowFn({ buddyPid: process.pid, logger: this.logger }))
       .then((w) => {
@@ -239,7 +243,22 @@ class PredictController {
       // 兜底：流水线起头没发起过（例如纯手动插入路径）→ 现抓一次
       try {
         const w = await this._captureTargetWindowFn({ buddyPid: process.pid, logger: this.logger });
-        if (w && w.hwnd) this._targetWindow = w;
+        // v4.10.33 护栏：现抓发生在「插入时刻」，此时前台可能早已被用户切走
+        //（比如切回来看推理记录），往里打字 = 内容插错窗口。只有现抓窗口与
+        // 分析时刻记录的窗口标题一致时才可信；不一致宁可放弃（调用方降级为
+        // 只写剪贴板）。anchor 为空时无从校验，保持旧行为。
+        if (w && w.hwnd) {
+          const anchor = String(this._lastWindowTitle || '').trim();
+          const picked = String(w.title || '').trim();
+          if (!anchor || (picked && picked === anchor)) {
+            this._targetWindow = w;
+          } else {
+            this.logger.warn('target-window-mismatch', {
+              pickedTitle: picked.slice(0, 60),
+              anchorTitle: anchor.slice(0, 60),
+            });
+          }
+        }
       } catch (_) {}
     }
     return this._targetWindow;
@@ -831,6 +850,15 @@ class PredictController {
       const targetHwnd = target && target.hwnd ? target.hwnd : 0;
       if (targetHwnd) {
         this.logger.info('generate-deliver-target', { hwnd: String(targetHwnd), title: (target.title || '').slice(0, 80) });
+      } else if (this._targetCaptureAttempted) {
+        // v4.10.33：触发时发起过捕获却没拿到句柄——插入时刻的窗口已不可信
+        //（实测：用户点按钮后切回对话页看记录，兜底现抓抓到的是对话窗口，
+        // 内容会插错地方；注入脚本内的 Z 序回退同样会猜错）。绝不盲插：
+        // 只写剪贴板并通知用户手动 Ctrl+V。
+        this.logger.warn('generate-deliver-no-safe-target');
+        await this.actionExecutor.execute({ type: 'clipboard-keep', text: content });
+        this._notifyClipboardFallback(content.length);
+        return;
       } else {
         this.logger.warn('generate-deliver-target-unknown');
       }
@@ -851,6 +879,23 @@ class PredictController {
         const n = new Notification({
           title: 'Hermes Buddy',
           body: '已生成 ' + chars + ' 字并直接输入到当前窗体',
+          silent: true,
+        });
+        try { n.show(); } catch (_) {}
+      }
+    } catch (_) { /* node --test 环境无 electron */ }
+  }
+
+  /**
+   * v4.10.33：无法确定安全目标窗口时的通知——内容只在剪贴板，等用户手动粘贴。
+   */
+  _notifyClipboardFallback(chars) {
+    try {
+      const { Notification } = require('electron');
+      if (Notification && Notification.isSupported && Notification.isSupported()) {
+        const n = new Notification({
+          title: 'Hermes Buddy',
+          body: '无法确定要插入的窗口，已把 ' + chars + ' 字生成内容放入剪贴板，请到目标窗口按 Ctrl+V 粘贴。',
           silent: true,
         });
         try { n.show(); } catch (_) {}

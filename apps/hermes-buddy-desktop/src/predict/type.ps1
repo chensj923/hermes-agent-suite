@@ -1,4 +1,4 @@
-# v4.10.26: Direct keyboard input via Win32 SendInput (KEYEVENTF_UNICODE)
+﻿# v4.10.26: Direct keyboard input via Win32 SendInput (KEYEVENTF_UNICODE)
 # Reads UTF-8 text from stdin, types it into the TARGET window.
 # 关键：点「生成并插入」时前台是 Buddy 自己，所以先沿 Z 序找回用户真正
 # 在用的上一个窗口（排除 Buddy 进程自身的窗口），把键盘焦点交还给它再打字。
