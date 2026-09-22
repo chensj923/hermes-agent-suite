@@ -166,3 +166,46 @@ test('灵敏度放大更易触发', () => {
   const r = engine.handleEvent({ type: 'tick' });
   assert.strictEqual(r.shouldScreenshot, true); // sensitivity=2 降低阈值 → 命中
 });
+
+test('v4.10.31 上下文切换：切到工作应用且已在工作 → 触发 context_switch', () => {
+  const { engine, advance } = makeEngine();
+  engine.handleEvent({ type: 'window_change', windowClass: 'Chrome_WidgetWin_1' });
+  for (let i = 0; i < 10; i++) engine.handleEvent({ type: 'keypress' }); // 证明"正在工作"
+  advance(2000); // 切换前已停笔 >1.2s（真实 alt-tab 不会在打字中），护栏放行
+  const r = engine.handleEvent({ type: 'window_change', windowClass: 'OpusApp' }); // 切到 Word
+  assert.strictEqual(r.shouldScreenshot, true);
+  assert.strictEqual(r.rule, 'context_switch');
+});
+
+test('v4.10.31 上下文切换：切到非工作应用（桌面/资源管理器）不触发', () => {
+  const { engine } = makeEngine();
+  engine.handleEvent({ type: 'window_change', windowClass: 'Chrome_WidgetWin_1' });
+  const r = engine.handleEvent({ type: 'window_change', windowClass: 'Progman' }); // 桌面，非工作类
+  assert.strictEqual(r.shouldScreenshot, false);
+});
+
+test('v4.10.31 上下文切换：同一应用内反复轮询不重复触发', () => {
+  const { engine, advance } = makeEngine();
+  engine.handleEvent({ type: 'window_change', windowClass: 'OpusApp' });
+  for (let i = 0; i < 10; i++) engine.handleEvent({ type: 'keypress' });
+  advance(2000); // 停笔后再切，护栏放行
+  const r1 = engine.handleEvent({ type: 'window_change', windowClass: 'XLMainClient' }); // 切到 Excel（创作类）
+  assert.strictEqual(r1.rule, 'context_switch');
+  engine.screenshotTaken();
+  engine.modelResult({ intent: 'context_switch', confidence: 0.75 });
+  engine.userDecision(false); // 进入冷却
+  // 冷却期内再切回 Word 也不应触发
+  const r2 = engine.handleEvent({ type: 'window_change', windowClass: 'OpusApp' });
+  assert.strictEqual(r2.shouldScreenshot, false);
+});
+
+test('v4.10.31 护栏：正在打字（停顿<1.2s）时不触发任何规则', () => {
+  const { engine, advance } = makeEngine();
+  engine.handleEvent({ type: 'window_change', windowClass: 'OpusApp' });
+  for (let i = 0; i < 40; i++) engine.handleEvent({ type: 'keypress' });
+  advance(6000); // 满足 word_writing 的停顿阈值
+  // 此刻"又敲了一下" → 立刻处于打字中（停顿=0），护栏应压制
+  engine.handleEvent({ type: 'keypress' });
+  const r = engine.handleEvent({ type: 'tick' });
+  assert.strictEqual(r.shouldScreenshot, false);
+});

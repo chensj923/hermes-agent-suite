@@ -33,6 +33,21 @@ const RULE_BASE = {
  */
 const GENERIC_RULE = { pauseMs: 8000, typed: 40, clipboardLen: 1200 };
 
+/**
+ * v4.10.31 护栏：用户此刻正在打字 → 绝不触发。
+ * 以"距上次按键"这一可靠活跃信号为界；鼠标停留类规则（reading_or_thinking）
+ * 自身已要求 mouseIdleMs>3000，无需在此额外拦截。确保桌宠不会在用户
+ * 正打字时突然插话（"适当的时候才出言"的硬保证）。
+ */
+const GUARD_TYPING_MS = 1200;   // 距上次按键 < 此值视为"正在打字"
+/**
+ * v4.10.31 上下文切换轻提示：切到这些"创作/阅读类"应用即视为一个自然的开口时机
+ * （"我正要写/读"），比"等停顿"更早、更自然。刻意排除 browser/ide/terminal/vscode——
+ * 那类"浏览器↔IDE 反复横跳"由更具体的 api_lookup 规则接管，避免两者抢同一个首切。
+ * 配合全局冷却 + 每应用去重避免刷屏。
+ */
+const CONTEXT_SWITCH_WORK_APPS = ['word', 'ppt', 'im', 'pdf', 'excel'];
+
 function matchApp(windowClass, logicalNames, appClassMap) {
   if (!windowClass) return false;
   for (const name of logicalNames) {
@@ -53,6 +68,7 @@ class BehaviorEngine {
     this.cooldownUntil = 0;
     this.currentCooldownMs = config.get('cooldownInitialMs') || 5 * 60 * 1000;
     this._pending = null; // { rule, reason, context, intent }
+    this._lastContextNudgeClass = null; // 上下文切换轻提示：已提示过的应用类，避免重复
     this._resetContext();
   }
 
@@ -170,6 +186,11 @@ class BehaviorEngine {
     const typingPauseMs = this._typingPauseMs(now);
     const winChanges = this._windowChangesLast10s(now);
 
+    // 护栏：用户此刻正在打字 → 不打断。"正在打字"须有真实按键（lastKeyMs 非空）
+    // 且停顿 < 阈值；若本上下文从未按键（lastKeyMs=0），属"无打字信息"而非"刚打字"，
+    // 不拦截——否则复制/切窗/鼠标停留类规则会被误杀。确保"适当的时候才出言"。
+    if (this.ctx.lastKeyMs && typingPauseMs < GUARD_TYPING_MS) return null;
+
     // 结晶加成：接受率越高，规则越早弹（降低停顿阈值）。boost ∈ [0,1]，接受率>0.5 才起加成。
     const stats = this.db ? this.db.getCrystallization() : {};
     const boostFor = (rule) => {
@@ -218,6 +239,21 @@ class BehaviorEngine {
       const sawBrowser = recentClasses.some((wc) => matchApp(wc, ['browser', 'pdf'], apps));
       const sawCode = recentClasses.some((wc) => matchApp(wc, ['vscode', 'ide', 'terminal'], apps));
       if (sawBrowser && sawCode) return { rule: 'api_lookup', reason: 'api_lookup' };
+    }
+    // rule7（v4.10.31 事件驱动）：切到工作类应用 = 自然的开口时机，比"等停顿"更早更自然。
+    //   切换动作本身就是"用户在工作"的信号（typedSincePause 在 window_change 时已被重置，
+    //   故不依赖它判断）。"正在打字"由上方护栏拦截；每应用去重 + 全局冷却防刷屏。
+    //   放在 api_lookup 等具体场景规则之后，作为"没匹配到具体场景"时的兜底轻提示。
+    {
+      const recent = this.ctx.recentWindows.slice(-2);
+      if (recent.length >= 2 && recent[1].windowClass && recent[1].windowClass !== recent[0].windowClass) {
+        const entered = recent[1].windowClass;
+        if (matchApp(entered, CONTEXT_SWITCH_WORK_APPS, apps)
+            && entered !== this._lastContextNudgeClass) {
+          this._lastContextNudgeClass = entered;
+          return { rule: 'context_switch', reason: 'context_switch' };
+        }
+      }
     }
     // rule5: 鼠标编辑区停留
     if (this.ctx.mouseIdleMs > RULE_BASE.reading_or_thinking.mouseIdleMs / s

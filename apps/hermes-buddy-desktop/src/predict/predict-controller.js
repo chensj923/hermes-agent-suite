@@ -77,6 +77,7 @@ const RULE_TEMPLATE = {
   collecting_material: '复制的资料要我帮你整理成笔记吗？',
   api_lookup: '卡在接口/报错上了？把报错贴给我，我帮你查。',
   reading_or_thinking: '需要我帮你梳理思路或找资料吗？',
+  context_switch: '进入新窗口啦——需要我帮你做点什么吗？',
 };
 
 /** 主动预测（点桌宠/点按钮）且连窗口类型都推断不出来时的通用话术。 */
@@ -472,6 +473,33 @@ class PredictController {
       // 1) 进入 ANALYZING
       const r1 = this.engine.screenshotTaken();
       if (r1.state !== 'ANALYZING') return;
+
+      // 1.5) v4.10.31：context_switch = 切到工作应用的"开口时机"轻提示。
+      //   走本地模板即时弹出——跳过截图 + 远端 10–20s，让桌宠在切换瞬间就"出言"，
+      //   不等地远端想完才冒出来。这是"事件驱动"而非"等停顿"的流畅感来源。
+      if (triggerResult.rule === 'context_switch') {
+        const pendingCtx = this.engine.pending() ? this.engine.pending().context : null;
+        const suggestion = {
+          intent: 'context_switch',
+          suggestion: RULE_TEMPLATE.context_switch,
+          reason: '切到工作窗口，主动轻提示',
+          confidence: 0.75,
+          action: this._buildAction('context_switch', RULE_TEMPLATE.context_switch),
+        };
+        this.engine.modelResult({ intent: suggestion.intent, confidence: suggestion.confidence });
+        this.logger.info('predict-context-switch-instant', {
+          windowClass: (pendingCtx && pendingCtx.windowClass) || null,
+          exeName: (pendingCtx && pendingCtx.exeName) || null,
+        });
+        let choice = 'later';
+        if (this.panel) choice = await this.panel.show(this._decorateSuggestion(suggestion));
+        this._logEntry({
+          phase: 'decision', rule: 'context_switch',
+          intent: suggestion.intent, suggestion: suggestion.suggestion.slice(0, 200), choice,
+        });
+        this._applyDecision(choice, 'context_switch', suggestion);
+        return;
+      }
 
       // 1.5) v4.10.3：前台是本应用自己 → 整轮跳过（不截图、不调模型、不弹卡）
       try {
