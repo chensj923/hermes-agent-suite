@@ -58,6 +58,25 @@ const PANEL_INFLIGHT_SAFETY_MS = (() => {
  */
 const PANEL_GENERATE_SAFETY_MS = 180000;
 
+/**
+ * v4.10.39：挂起点自身的超时（关键修复）。
+ * 旧实现里两处 await 没有任何超时、且兜底用的安全定时器是在它们之后才安装：
+ *   - 场景规则路径 await panel.show()：其 10s 计时器在 setSize/ensureReady 之后才挂，
+ *     若创建窗口/setSize 卡住，10s 计时器永远挂不上 → 永久等待。
+ *   - 主动预测路径 await capture.captureActiveWindow()：内部直接 await
+ *     desktopCapturer.getSources()，完全无超时；两条路径并发取源时尤其容易挂住。
+ * 日志铁证：22:07:03 之后 35 分钟无任何落盘、进程却还在 = 永久挂起，不是超时丢弃。
+ * 因此不能只靠事后安全网，必须给等待操作本身加超时。
+ */
+const PANEL_SHOW_AWAIT_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HERMES_PANEL_SHOW_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 20000;
+})();   // 场景规则弹窗等待上限（含窗口创建）
+const CAPTURE_AWAIT_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HERMES_CAPTURE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15000;
+})();      // 取截图源等待上限（getSources 挂起保护）
+
 /** v4.8.8：_withTimeout 轨迹回调（由控制器构造时注入 logger），用于定位「30s 定时器未触发」问题。 */
 let _timeoutTrace = null;
 
@@ -334,7 +353,19 @@ class PredictController {
       // 场景规则路径没跑 VL，_lastObservation 常为空 → 这里几乎总会需要主题输入
       this._decorateSuggestion(suggestion);
       let choice = 'later';
-      try { choice = await this.panel.show(suggestion); } catch (_) {}
+      try {
+        choice = await _withTimeout(
+          this.panel.show(suggestion),
+          PANEL_SHOW_AWAIT_TIMEOUT_MS,
+          '场景浮窗等待超时'
+        );
+      } catch (e) {
+        // v4.10.39：窗口创建/setSize 卡住导致 show 永不返回时，按「稍后」收场并收窗，
+        // 绝不永久挂在 await 上（否则后续所有触发都因协程卡死而无推理）。
+        this.logger.warn('scene-panel-show-timeout', { error: e.message });
+        try { this.panel.dismissAwaiting(); } catch (_) {}
+        choice = 'later';
+      }
       this._applyDecision(choice, 'scene:' + rule.id, suggestion);
     } catch (e) {
       this.logger.warn('scene-rule-error', { error: e.message });
@@ -559,10 +590,14 @@ class PredictController {
             wi = await this.resolveWindow();
           } catch (_) {}
           const fgTitle = (wi && wi.title) || '';
-          const shot = await this.capture.captureActiveWindow({
-            skipName: /hermes buddy|hermes-buddy|桌宠|buddy/i,
-            fgTitle,
-          });
+          const shot = await _withTimeout(
+            this.capture.captureActiveWindow({
+              skipName: /hermes buddy|hermes-buddy|桌宠|buddy/i,
+              fgTitle,
+            }),
+            CAPTURE_AWAIT_TIMEOUT_MS,
+            '截图取源超时'
+          );
           imageBase64 = shot && shot.base64;
           shotSource = shot && shot.source;
         } catch (e) {
@@ -1441,10 +1476,14 @@ class PredictController {
       let shotSource = null;
       if (this.capture) {
         try {
-          const shot = await this.capture.captureActiveWindow({
-            skipName: /hermes buddy|hermes-buddy|桌宠|buddy/i,
-            fgTitle,
-          });
+          const shot = await _withTimeout(
+            this.capture.captureActiveWindow({
+              skipName: /hermes buddy|hermes-buddy|桌宠|buddy/i,
+              fgTitle,
+            }),
+            CAPTURE_AWAIT_TIMEOUT_MS,
+            '截图取源超时'
+          );
           imageBase64 = shot && shot.base64;
           shotSource = shot && shot.source;
         } catch (e) {

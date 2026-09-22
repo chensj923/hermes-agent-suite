@@ -240,6 +240,21 @@ class PredictPanel {
     if (!this._pending) this._hide();
   }
 
+  /**
+   * v4.10.39：强制了结当前等待中的用户决策（按「稍后」），并隐藏窗口。
+   * 场景路径的 panel.show() 因窗口创建/setSize 卡住被外层超时丢弃后，内部的
+   * _pending 仍挂着——不清理会泄漏，且下一次 show() 会覆盖它，迟到的 settle
+   * 还可能误关新窗口。这里统一收口；无等待时仅隐藏。
+   */
+  dismissAwaiting() {
+    if (this._timeout) { clearTimeout(this._timeout); this._timeout = null; }
+    if (this._thinkingTimeout) { clearTimeout(this._thinkingTimeout); this._thinkingTimeout = null; }
+    const p = this._pending;
+    this._pending = null;
+    if (p) { try { p.resolve('later'); } catch (_) {} }
+    this._hide();
+  }
+
   _hide() {
     if (this.win) { try { this.win.hide(); } catch (_) {} }
   }

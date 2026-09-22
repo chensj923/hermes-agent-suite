@@ -6,6 +6,11 @@ const path = require('path');
 const fs = require('fs');
 const { test } = require('node:test');
 
+// v4.10.39：把两处「等待操作自身超时」压到几十毫秒，便于用永不返回的 fake
+// 验证挂起点会被超时打破（正常立即返回的 fake 不受影响）。必须在 require 控制器前设置。
+process.env.HERMES_PANEL_SHOW_TIMEOUT_MS = '30';
+process.env.HERMES_CAPTURE_TIMEOUT_MS = '50';
+
 const { PredictController, hasUsableSourceContent } = require('../src/predict/predict-controller');
 
 function tmpDir() {
@@ -284,4 +289,60 @@ test('未授权时 enable() 抛错（无降级）', async () => {
   const { ctrl } = makeController({ model: 'none' });
   ctrl.config.set({ authorized: false, enabled: true });
   await assert.rejects(() => ctrl.enable(), /未授权/);
+});
+
+// ---------------------------------------------------------------------------
+// v4.10.39：永久挂起回归。线上 22:06:57 场景规则、22:07:01 主动预测两次触发后
+// 35 分钟无任何日志、进程却还在——根因是 await panel.show() / await getSources()
+// 无超时、且兜底安全定时器在它们之后才安装。这里用「永不返回」的 fake 锁定：
+// 两处挂起点都必须被自身超时打破，调用方能返回，不永久卡死。
+// ---------------------------------------------------------------------------
+
+test('v4.10.39：场景浮窗 show 永不返回 → 超时打破、强制了结，onWindowChange 能返回', async () => {
+  let dismissed = 0;
+  const hangPanel = {
+    available: true,
+    show: () => new Promise(() => {}),          // 模拟窗口创建/setSize 卡死，永不返回
+    dismissAwaiting() { dismissed += 1; },
+    cancelThinking() {},
+    destroy() {},
+  };
+  const appDir = tmpDir();
+  const ctrl = new PredictController({
+    appDir,
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    capture: { captureActiveWindow: async () => ({ base64: 'X', width: 800, height: 600 }) },
+    panel: hangPanel,
+    actionExecutor: { execute: async (a) => ({ ok: true, type: a.type }) },
+  });
+  ctrl.config.set({ enabled: true, authorized: true });
+  ctrl._enabled = true;   // isEnabled() 依赖运行态标志
+  // 命中内置场景规则 scene-wps-new（exeName=wps）
+  await ctrl.onWindowChange({ exeName: 'wps', title: '文档1 - WPS Office' });
+  assert.strictEqual(dismissed, 1, '浮窗挂起超时后应强制了结内部等待并收窗');
+});
+
+test('v4.10.39：截图 getSources 永不返回 → 超时后主动预测仍降级给建议，不卡死', async () => {
+  let shown = null;
+  const immediatePanel = {
+    available: true,
+    show: async (s) => { shown = s; return 'later'; },
+    showThinking: async () => {},
+    cancelThinking() {},
+    destroy() {},
+  };
+  const appDir = tmpDir();
+  const ctrl = new PredictController({
+    appDir,
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    capture: { captureActiveWindow: () => new Promise(() => {}) },  // 模拟 getSources 挂死
+    panel: immediatePanel,
+    actionExecutor: { execute: async (a) => ({ ok: true, type: a.type }) },
+  });
+  // remote 但无通道：截图超时只记 warn（imageBase64 保持 null），analyze 再因无通道
+  // 降级为规则模板，最终仍弹窗——关键是整个 predictNow 能返回而非永久 await。
+  ctrl.config.set({ model: 'remote', enabled: true, authorized: true });
+  const result = await ctrl.predictNow();
+  assert.strictEqual(result.shown, true, '截图挂起超时后也应降级给出可见建议');
+  assert.ok(shown, '应展示降级建议浮窗');
 });
