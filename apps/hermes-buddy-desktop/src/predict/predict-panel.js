@@ -166,22 +166,36 @@ class PredictPanel {
     }
     // 保险：分析卡死时不要让转圈窗口一直挂着。
     // v4.8.5：不再直接 hide，而是通知控制器降级为规则模板弹窗，确保用户能看到输出。
+    this.armThinkingTimeout(THINKING_TIMEOUT_MS);
+  }
+
+  /**
+   * v4.10.37：（重新）启动「思考安全网」。
+   * 关键修复：showThinking() 在流水线一开始就按 45s 计时，但本机 VL 读图本身要
+   * 14~27s，等请求真正发出时安全网只剩 18~31s，而服务端分析实测要 37~72s
+   * → 正确结果总在最后一刻判超时丢弃。控制器在「服务端请求真正发出」那一刻
+   * 用对齐 90s 的时长重新 arm，安全网就只覆盖真正的在途请求，不含本地 VL。
+   */
+  armThinkingTimeout(ms) {
     if (this._thinkingTimeout) clearTimeout(this._thinkingTimeout);
-    this._thinkingTimeout = setTimeout(() => {
-      this._thinkingTimeout = null;
-      if (this._pending) return;        // 已经在等用户决策，别误关
-      this.logger.warn('predict-panel-thinking-timeout');
-      if (typeof this.onThinkingTimeout === 'function') {
-        try {
-          const maybePromise = this.onThinkingTimeout();
-          if (maybePromise && typeof maybePromise.then === 'function') maybePromise.catch(() => {});
-        } catch (_) {}
-      }
-      // 给控制器 2s 时间切换成规则建议；若仍未进入建议态则兜底隐藏
-      setTimeout(() => {
-        if (!this._pending && !this._thinkingTimeout) this._hide();
-      }, 2000);
-    }, THINKING_TIMEOUT_MS);
+    const delay = Number.isFinite(ms) && ms > 0 ? ms : THINKING_TIMEOUT_MS;
+    this._thinkingTimeout = setTimeout(() => this._fireThinkingTimeout(), delay);
+  }
+
+  _fireThinkingTimeout() {
+    this._thinkingTimeout = null;
+    if (this._pending) return;        // 已经在等用户决策，别误关
+    this.logger.warn('predict-panel-thinking-timeout');
+    if (typeof this.onThinkingTimeout === 'function') {
+      try {
+        const maybePromise = this.onThinkingTimeout();
+        if (maybePromise && typeof maybePromise.then === 'function') maybePromise.catch(() => {});
+      } catch (_) {}
+    }
+    // 给控制器 2s 时间切换成规则建议；若仍未进入建议态则兜底隐藏
+    setTimeout(() => {
+      if (!this._pending && !this._thinkingTimeout) this._hide();
+    }, 2000);
   }
 
   /**

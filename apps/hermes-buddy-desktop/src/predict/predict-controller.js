@@ -41,6 +41,16 @@ const LOCAL_ANALYZE_TIMEOUT_MS = 300000; // 5 分钟看门狗
 /** v4.10.11：远端模型推断超时升级为 5 分钟看门狗，与本地对齐，避免远端慢推理被掐。 */
 const REMOTE_ANALYZE_TIMEOUT_MS = 300000;
 
+/**
+ * v4.10.37：思考安全网在「服务端请求真正发出」后重新计时的时长。
+ * 必须与 channel.js 的 PREDICT_TIMEOUT_MS（默认 90s，可用 HERMES_PREDICT_TIMEOUT_MS
+ * 覆盖）对齐，略加余量让客户端自身的 reject 先发生，安全网只兜底窗口卡死。
+ */
+const PANEL_INFLIGHT_SAFETY_MS = (() => {
+  const raw = Number(process.env.HERMES_PREDICT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw + 3000 : 93000;
+})();
+
 /** v4.8.8：_withTimeout 轨迹回调（由控制器构造时注入 logger），用于定位「30s 定时器未触发」问题。 */
 let _timeoutTrace = null;
 
@@ -1080,6 +1090,9 @@ class PredictController {
       }
       this._remoteInFlight = true;
       this._remotePromise = ch.predict(ctx, image);
+      // v4.10.37：请求此刻才真正在途。重置思考安全网，只覆盖在途请求（对齐 90s），
+      // 不含前面本机 VL 的 14~27s，避免正确结果在最后一刻被判超时丢弃。
+      this._rearmPanelSafety();
       try {
         const result = await this._remotePromise;
         // v4.10.3：服务端 JSON 解析失败时可能把 ```json 围栏原文塞进 suggestion
@@ -1241,6 +1254,17 @@ class PredictController {
   _showThinking(text) {
     if (!this.panel || typeof this.panel.showThinking !== 'function') return;
     try { this.panel.showThinking(text || '思考中…'); } catch (_) {}
+  }
+
+  /**
+   * v4.10.37：服务端请求真正发出后，把思考安全网重新计时为「只覆盖在途请求」。
+   * 旧逻辑安全网从 showThinking 起按 45s 计时，本机 VL 的 14~27s 被计入，导致
+   * 服务端 37~72s 的正常结果总被判超时。无 panel / 无 arm 方法时静默跳过。
+   */
+  _rearmPanelSafety() {
+    if (!this.panel || typeof this.panel.armThinkingTimeout !== 'function') return;
+    try { this.panel.armThinkingTimeout(PANEL_INFLIGHT_SAFETY_MS); } catch (_) {}
+    this.logger.info('predict-panel-safety-rearmed', { ms: PANEL_INFLIGHT_SAFETY_MS });
   }
 
   // ---------------- 配置 / 状态 ----------------

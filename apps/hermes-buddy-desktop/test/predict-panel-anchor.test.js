@@ -90,3 +90,31 @@ test('anchorProvider 抛错不影响定位（回退鼠标旁）', () => {
   assert.strictEqual(positions.length, 1);
   assert.strictEqual(positions[0].x, 516);
 });
+
+test('v4.10.37：armThinkingTimeout 重新计时会取消上一个安全网（旧的短定时器不再误触发）', async () => {
+  let fired = 0;
+  const panel = new PredictPanel({
+    logger: { info() {}, warn() {}, error() {} },
+    onThinkingTimeout: () => { fired += 1; },
+  });
+  // 先 arm 一个 40ms 后就会触发的定时器（模拟旧的 45s 安全网，已快到点）
+  panel.armThinkingTimeout(40);
+  // 20ms 后（旧定时器还没触发）用 5s 重新 arm —— 旧的必须被取消
+  await new Promise((r) => setTimeout(r, 20));
+  panel.armThinkingTimeout(5000);
+  await new Promise((r) => setTimeout(r, 80));
+  assert.strictEqual(fired, 0, '重新 arm 后旧安全网应被取消，不能按旧时间点误降级');
+});
+
+test('v4.10.37：已进入建议态（_pending 有值）时安全网到点不误关、不降级', async () => {
+  let fired = 0;
+  const panel = new PredictPanel({
+    logger: { info() {}, warn() {}, error() {} },
+    onThinkingTimeout: () => { fired += 1; },
+  });
+  panel._pending = { resolve() {} };   // 用户正在看建议
+  panel.armThinkingTimeout(30);
+  await new Promise((r) => setTimeout(r, 90));
+  assert.strictEqual(fired, 0, '等待用户决策期间安全网不应触发');
+});
+
