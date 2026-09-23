@@ -973,15 +973,30 @@ class PredictController {
           });
           this._step('gen', { title: '已生成内容', status: 'done', detail: '共 ' + content.length + ' 字' });
         } else {
-          this.logger.warn('predict-generate-no-content', { keys: res ? Object.keys(res) : null });
+          // v4.10.42：透传服务端 error/reason，不再把建议文案当内容插入。
+          const errCode = res && res.error;
+          const errReason = res && res.reason;
+          const detail = errCode
+            ? ('服务端返回错误：' + errCode + (errReason ? '（' + errReason + '）' : ''))
+            : '服务端未返回正文';
+          this.logger.warn('predict-generate-no-content', {
+            keys: res ? Object.keys(res) : null,
+            error: errCode,
+            reason: errReason,
+          });
           // v4.10.18：记录无内容
           this._logEntry({
             phase: 'generated',
             status: 'no-content',
             intent: (suggestion && suggestion.intent) || '',
             responseKeys: res ? Object.keys(res) : null,
+            error: errCode,
+            reason: errReason,
           });
-          this._step('gen', { title: '生成未返回内容', status: 'fail', detail: '服务端未返回正文，将退回建议文案' });
+          this._step('gen', { title: '生成未返回内容', status: 'fail', detail });
+          this._notifyGenerateFailed(detail);
+          if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
+          return;
         }
       } catch (e) {
         this.logger.warn('predict-generate-failed', { error: e.message });
@@ -993,14 +1008,19 @@ class PredictController {
           error: e.message,
         });
         this._step('gen', { title: '生成失败', status: 'fail', detail: String(e.message || '生成异常') });
+        this._notifyGenerateFailed(String(e.message || '生成异常'));
+        if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
+        return;
       }
     } else {
+      // v4.10.42：没有远端生成函数时（旧服务端/测试环境），退化为插入建议文案。
       this.logger.warn('predict-generate-no-fn');
+      this._step('gen', { title: '生成通道未配置', status: 'warn', detail: '服务端不支持内容生成，将插入建议文案' });
+      content = (suggestion && suggestion.suggestion) || '';
     }
-    // 兜底：生成不出真内容时退回建议文案（旧行为）
-    if (!content) content = (suggestion && suggestion.suggestion) || '';
+    // v4.10.42：远端生成失败时不插入任何内容；只有旧环境无生成函数时才退化为建议文案。
     if (!content) {
-      this._step('gen', { title: '无内容可插入', status: 'warn', detail: '生成与建议文案均为空' });
+      this._step('gen', { title: '无内容可插入', status: 'warn', detail: '生成返回为空，已停止插入' });
       if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
       return;
     }
@@ -1064,6 +1084,24 @@ class PredictController {
         const n = new Notification({
           title: 'Hermes Buddy',
           body: '已生成 ' + chars + ' 字并直接输入到当前窗体',
+          silent: true,
+        });
+        try { n.show(); } catch (_) {}
+      }
+    } catch (_) { /* node --test 环境无 electron */ }
+  }
+
+  /**
+   * v4.10.42：生成失败时明确通知用户，而不是把建议文案当内容塞进去。
+   */
+  _notifyGenerateFailed(detail) {
+    this.logger.info('predict-notify-generate-failed', { detail: String(detail || '').slice(0, 200) });
+    try {
+      const { Notification } = require('electron');
+      if (Notification && Notification.isSupported && Notification.isSupported()) {
+        const n = new Notification({
+          title: 'Hermes Buddy',
+          body: '生成失败：' + String(detail || '远端未返回正文').slice(0, 120) + '。建议检查服务端模型配置或稍后再试。',
           silent: true,
         });
         try { n.show(); } catch (_) {}

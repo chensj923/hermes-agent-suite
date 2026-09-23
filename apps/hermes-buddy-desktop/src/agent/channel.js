@@ -41,7 +41,7 @@ const REQUIRED_CHANNEL_VERSION = '2.3';
  * 并提示重新部署（老用户装新客户端后服务端仍是旧脚本 -> 功能静默缺失）。
  * 服务端 CHANNEL_BUILD < 此值 -> "服务端脚本过旧，请重新部署"。
  */
-const REQUIRED_CHANNEL_BUILD = 12;
+const REQUIRED_CHANNEL_BUILD = 13;
 
 /**
  * v4.10.30：predict_request 的等待上限。
@@ -378,6 +378,9 @@ class ChannelClient {
       };
       // v4.10.2 generate_content 分支返回的正文内容
       if (msg.content !== undefined) resp.content = msg.content;
+      // v4.10.42：把服务端 generate_content 的失败原因透传给调用方
+      if (msg.error !== undefined) resp.error = msg.error;
+      if (msg.reason !== undefined) resp.reason = msg.reason;
       let p = null;
       if (msg.req_id !== undefined && this.pendingPredictMap.has(String(msg.req_id))) {
         p = this.pendingPredictMap.get(String(msg.req_id));

@@ -59,7 +59,7 @@ CHANNEL_VERSION = "2.3"
 #   10 = v4.10.2x 结晶记忆注入 / 预测兜底
 #   11 = v4.10.30 pong 帧不再被二次编码成文本帧（修 channel-bad-json）
 #   12 = v4.10.35 predict_request/response 携带 req_id（支持并发请求按 ID 匹配）
-CHANNEL_BUILD = "12"
+CHANNEL_BUILD = "13"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -870,9 +870,15 @@ def generate_content(behavior, model=None):
         r = call_llm(messages, [], lambda: False, model, timeout=PREDICT_UPSTREAM_TIMEOUT)
         content = (r.get("content") or "").strip()
     except UpstreamError as exc:
-        return {"content": "", "intent": rule, "error": "upstream_%s" % exc.code}
+        sys.stderr.write("[channel] generate_content upstream error: %s\n" % exc.code)
+        return {"content": "", "intent": rule,
+                "error": "upstream_%s" % exc.code,
+                "reason": str(exc)[:400]}
     if not content:
-        return {"content": "", "intent": rule, "error": "empty"}
+        sys.stderr.write("[channel] generate_content empty: model returned no content (rule=%s title=%s)\n"
+                         % (rule, window_title[:60] or "(无)"))
+        return {"content": "", "intent": rule, "error": "empty",
+                "reason": "模型返回空内容"}
     # 防御：模型若仍输出了 JSON 围栏，剥掉
     if content.startswith("```"):
         content = content.strip("`").lstrip("json").strip()
@@ -1405,8 +1411,13 @@ class WSConnection:
                     resp["req_id"] = req_id
                 # v4.10.15：generate_content 分支返回的 {content} 要带给客户端，
                 # 否则「生成并插入」拿不到正文，只能兜底粘贴建议问句。
+                # v4.10.42：同时把 error/reason 带回去，让客户端知道具体失败原因。
                 if "content" in result:
                     resp["content"] = result["content"]
+                if result.get("error"):
+                    resp["error"] = result["error"]
+                if result.get("reason"):
+                    resp["reason"] = result["reason"]
                 self.send_json(resp)
 
             threading.Thread(target=_run_predict, daemon=True).start()

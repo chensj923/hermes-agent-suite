@@ -167,6 +167,34 @@ test('predict() 发出 predict_request 并在收到 predict_response 后 resolve
   }
 });
 
+// v4.10.42：generate_content 分支的 error/reason 必须透传到 predict 结果。
+test('predict() 收到 generate_content 空 content + error 时一并透传', async () => {
+  const { server, port } = await startMockServer((msg, socket) => {
+    if (msg.type === 'predict_request') {
+      sendRaw(socket, JSON.stringify({
+        type: 'predict_response',
+        session: msg.session || 'sess-predict',
+        intent: 'word_writing',
+        confidence: 0.92,
+        suggestion: '要不要我帮你续写这段文字？',
+        reason: '检测到在 Word 中停顿超过 5 秒',
+        content: '',
+        error: 'empty',
+      }));
+    }
+  });
+  const client = makeClient(port);
+  try {
+    await client.connect();
+    const result = await client.predict({ rule: 'word_writing', stage: 'generate_content' }, null);
+    assert.equal(result.content, '');
+    assert.equal(result.error, 'empty');
+  } finally {
+    client.close();
+    server.close();
+  }
+});
+
 test('不支持 predict 的服务端 -> predict() 抛 channel_no_predict', async () => {
   const { server, port } = await startLegacyServer();
   const client = makeClient(port);

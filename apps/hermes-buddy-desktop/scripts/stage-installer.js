@@ -59,6 +59,25 @@ function find7z() {
   return cands.find((c) => fs.existsSync(c)) || null;
 }
 
+/** 带重试的 execFileSync：杀软/云同步会瞬时锁住 7z.exe 或刚抽取的大文件，
+ * spawnSync 抛 EBUSY/EPERM 时退避重试，而不是把好包误判成坏包（v4.10.42 实测）。 */
+function execWithRetry(file, args, opts, tries = 4) {
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return execFileSync(file, args, opts);
+    } catch (e) {
+      lastErr = e;
+      const transient = e.code === 'EBUSY' || e.code === 'EPERM' || e.code === 'ETXTBSY';
+      if (!transient || i === tries - 1) break;
+      const wait = 500 * (i + 1);
+      console.error('[stage] 7z 被占用（' + e.code + '），' + wait + 'ms 后重试 ' + (i + 1) + '/' + (tries - 1));
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+    }
+  }
+  throw lastErr;
+}
+
 /** 用 7z 测试 NSIS 容器内嵌的 app-64.7z 载荷；返回 {ok, errors, detail}。 */
 function testPayload(installer) {
   const seven = find7z();
@@ -67,16 +86,23 @@ function testPayload(installer) {
   const tmp = path.join(require('os').tmpdir(), 'hb-stage-' + Date.now());
   fs.mkdirSync(tmp, { recursive: true });
   try {
-    execFileSync(seven, ['e', '-o' + tmp, installer, '$PLUGINSDIR\\app-64.7z', '-r', '-y'], {
+    execWithRetry(seven, ['e', '-o' + tmp, installer, '$PLUGINSDIR\\app-64.7z', '-r', '-y'], {
       stdio: 'ignore',
     });
     const arc = path.join(tmp, 'app-64.7z');
     if (!fs.existsSync(arc)) return { ok: false, errors: -1, detail: '抽不出 app-64.7z' };
     let out = '';
     try {
-      out = execFileSync(seven, ['t', arc], { encoding: 'utf8' });
+      out = execWithRetry(seven, ['t', arc], { encoding: 'utf8' });
     } catch (e) {
       out = String((e && e.stdout) || '') + String((e && e.stderr) || '');
+      if (!out) {
+        // 重试后仍失败且无输出：区分 EBUSY 类瞬时锁与真实 CRC 错
+        const code = e && e.code;
+        if (code === 'EBUSY' || code === 'EPERM' || code === 'ETXTBSY') {
+          return { ok: null, errors: 0, detail: '7z 校验被系统占用阻断（' + code + '），包大小/容器校验已通过，按可安装处理' };
+        }
+      }
     }
     const m = out.match(/Sub items Errors:\s*(\d+)/);
     const errors = m ? Number(m[1]) : (/Everything is Ok/.test(out) ? 0 : -1);

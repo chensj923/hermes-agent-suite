@@ -394,3 +394,24 @@ test('截图失败且前台非 Word → 保持远端意图不兜底', async () =
   await ctrl.triggerRule('reading_or_thinking');
   assert.strictEqual(generated, false, '非写作应用不应强制生成');
 });
+
+// v4.10.42 回归：远端生成返回空 content / error 时，不能把建议文案当正文插入。
+test('远端生成返回空 content → 不插入任何内容', async () => {
+  const { ctrl, captured } = makeController({ model: 'none', choice: 'generate' });
+  ctrl._generateContentFn = async () => ({ content: '', error: 'empty', reason: '模型返回空内容' });
+  await ctrl.triggerRule('word_writing');
+  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste' || a.type === 'type-input');
+  assert.strictEqual(clip, undefined, '生成失败时不应写剪贴板/粘贴');
+  const entries = ctrl.getLog ? ctrl.getLog() : [];
+  const failed = entries.find((e) => e.status === 'no-content');
+  assert.ok(failed, '推理记录应记 no-content');
+  assert.strictEqual(failed.error, 'empty', '应透传服务端 error 字段');
+});
+
+test('远端生成抛异常 → 不插入任何内容', async () => {
+  const { ctrl, captured } = makeController({ model: 'none', choice: 'generate' });
+  ctrl._generateContentFn = async () => { throw new Error('上游请求超时'); };
+  await ctrl.triggerRule('word_writing');
+  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste' || a.type === 'type-input');
+  assert.strictEqual(clip, undefined, '生成失败时不应写剪贴板/粘贴');
+});
