@@ -74,8 +74,8 @@ const PANEL_SHOW_AWAIT_TIMEOUT_MS = (() => {
 })();   // 场景规则弹窗等待上限（含窗口创建）
 const CAPTURE_AWAIT_TIMEOUT_MS = (() => {
   const raw = Number(process.env.HERMES_CAPTURE_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 15000;
-})();      // 取截图源等待上限（getSources 挂起保护）
+  return Number.isFinite(raw) && raw > 0 ? raw : 30000;
+})();      // 取截图源等待上限（getSources 挂起保护，v4.10.41 从 15s 提至 30s）
 
 /** v4.8.8：_withTimeout 轨迹回调（由控制器构造时注入 logger），用于定位「30s 定时器未触发」问题。 */
 let _timeoutTrace = null;
@@ -487,6 +487,22 @@ class PredictController {
   }
 
   /**
+   * v4.10.41：判断前台窗口是否为文字处理类应用（WPS/Word）。
+   * 截图失败时，不能仅凭行为元数据让远端猜成 reading_or_thinking；
+   * 只要用户在 Word/WPS 里，就按写作兜底。
+   */
+  _isWordLikeApp(wi) {
+    if (!wi) return false;
+    const exe = String(wi.exeName || '').toLowerCase();
+    const title = String(wi.title || '').toLowerCase();
+    const wc = String(wi.windowClass || '').toLowerCase();
+    if (/\b(winword|wps)\b/.test(exe)) return true;
+    if (/wps\s*文字|wps文字|金山|microsoft word|\bword\b/.test(title)) return true;
+    if (wc === 'wps_application' || wc === 'opusapp' || wc === 'wwlib' || /wps/i.test(wc)) return true;
+    return false;
+  }
+
+  /**
    * v4.10.12：主动预测时确定「用户正在用的应用」身份，写进行为上下文。
    *
    * 根因：主动点猫 → OS 前台窗口是桌宠自己，resolveWindow() 返回的 wi 是桌宠身份
@@ -587,9 +603,17 @@ class PredictController {
         }
       } catch (_) { /* 前台解析失败不拦截，继续原流程 */ }
 
-      // 2) 截图（仅内存 buffer，不落盘）
-      //    v4.10.2：带上前台窗口标题，截图源优先匹配它（避免拿到后台/空白窗口）；
-      //    capture 内部还会隐藏本应用窗口，防止桌宠猫污染画面。
+      // 2) 准备行为上下文（只元数据，绝不带文本/标题内容）
+      //    v4.10.41：提前定义，让截图失败时也能写入兜底标记。
+      const ctx = this.engine.pending() ? this.engine.pending().context : this.engine._snapshot();
+      const rule = triggerResult.rule;
+      // v4.8.9：记住最近一次触发的规则，供超时降级兜底
+      if (rule) this._lastRule = rule;
+      const behaviorContext = Object.assign({ rule }, ctx);
+
+      // 2.5) 截图（仅内存 buffer，不落盘）
+      //      v4.10.2：带上前台窗口标题，截图源优先匹配它（避免拿到后台/空白窗口）；
+      //      capture 内部还会隐藏本应用窗口，防止桌宠猫污染画面。
       let imageBase64 = null;
       let shotSource = null;
       let wi = null;
@@ -610,27 +634,25 @@ class PredictController {
           imageBase64 = shot && shot.base64;
           shotSource = shot && shot.source;
         } catch (e) {
-          this.logger.warn('predict-capture-failed', { error: e.message });
+          this.logger.warn('predict-capture-failed', { error: e.message, code: e.code });
         }
         // v4.10.40：截图步骤实时反馈
+        // v4.10.41：截图失败但前台是 WPS/Word 时，按写作意图兜底，避免远端盲猜 reading_or_thinking
         if (imageBase64) {
           this._step('shot', { title: '已截图', status: 'done', detail: (shotSource || '当前窗口') });
+        } else if (this._isWordLikeApp(wi)) {
+          behaviorContext._forceWriting = true;
+          this._step('shot', { title: '截图失败', status: 'warn', detail: '未取到 WPS/Word 画面，已按写作意图继续' });
         } else {
           this._step('shot', { title: '截图', status: 'warn', detail: '未取到画面（将不带视觉信息继续）' });
         }
       }
 
-      // 3) 行为上下文（只元数据，绝不带文本/标题内容）
-      const ctx = this.engine.pending() ? this.engine.pending().context : this.engine._snapshot();
-      const rule = triggerResult.rule;
-      // v4.8.9：记住最近一次触发的规则，供超时降级兜底（engine.pending() 在
-      // 超时回调里常已清空，导致降级弹窗 intent 退化成 unknown、建议泛化）。
-      if (rule) this._lastRule = rule;
+      // 3) 行为上下文身份纠正（截图后才能拿到真实窗口身份）
       // v4.10.13：自动触发也要纠正「桌宠被当成前台应用」的身份误判。
       // 否则远端拿到 exeName="Hermes Buddy自身" 会回低置信度「不打扰」，
       // 被 0.6 门槛拦下后思考气泡闪一下就消失，用户观感是「推理弹没了、没反应」。
-      this._applyScreenIdentity(ctx, shotSource, wi);
-      const behaviorContext = Object.assign({ rule }, ctx);
+      this._applyScreenIdentity(behaviorContext, shotSource, wi);
 
       // 4) 模型判断意图（本地 / 远端 / 本地+远端）
       //    注意：三种模式都走 _analyze；只有模型真的拿不到结果时才降级为规则模板。
@@ -684,23 +706,8 @@ class PredictController {
         return;
       }
 
-      // 5) 引擎按置信度门槛决定是否弹窗
+      // 5) 构造建议对象，并允许客户端在特定场景下修正远端误判
       _ungenericServerDegrade(result);   // v4.9.3：服务端降级话术 → 场景规则模板
-      const r2 = this.engine.modelResult({
-        intent: result.intent,
-        confidence: result.confidence,
-      });
-      // v4.10.18：记录分析结果
-      this._logEntry({
-        phase: 'analyzed',
-        rule: rule || '',
-        intent: result.intent || '',
-        confidence: result.confidence || 0,
-        suggestion: (result.suggestion || '').slice(0, 200),
-        reason: (result.reason || '').slice(0, 200),
-        mode: this.config.get('model'),
-        suggest: r2.suggest,
-      });
       const suggestion = {
         intent: result.intent,
         suggestion: result.suggestion || RULE_TEMPLATE[result.intent] || '需要我帮你做点什么吗？',
@@ -708,6 +715,32 @@ class PredictController {
         confidence: result.confidence,
         action: this._buildAction(result.intent, result.suggestion),
       };
+      // v4.10.41：截图失败但前台是 WPS/Word 时，远端盲猜 reading_or_thinking 不可靠，
+      // 直接按写作意图兜底，避免「明明在写文档却问要不要梳理思路」且黑盒不自动写。
+      if (behaviorContext._forceWriting && result.intent === 'reading_or_thinking') {
+        suggestion.intent = 'word_writing';
+        suggestion.suggestion = RULE_TEMPLATE.word_writing;
+        suggestion.reason = (result.reason ? result.reason + '；' : '') + '截图失败，已按 WPS/Word 写作意图兜底';
+        suggestion.confidence = Math.max(Number(result.confidence) || 0, 0.8);
+        this._step('analyze', { title: '意图已兜底修正', status: 'warn', detail: '无截图，按 WPS/Word 写作处理' });
+      }
+
+      // 6) 引擎按置信度门槛决定是否弹窗
+      const r2 = this.engine.modelResult({
+        intent: suggestion.intent,
+        confidence: suggestion.confidence,
+      });
+      // v4.10.18：记录分析结果
+      this._logEntry({
+        phase: 'analyzed',
+        rule: rule || '',
+        intent: suggestion.intent || '',
+        confidence: suggestion.confidence || 0,
+        suggestion: (suggestion.suggestion || '').slice(0, 200),
+        reason: (suggestion.reason || '').slice(0, 200),
+        mode: this.config.get('model'),
+        suggest: r2.suggest,
+      });
       // v4.10.13：自动触发复用主动预测的兜底——行为规则已命中（用户在写字/查资料
       // 等明确场景），却因身份误判导致远端回低置信度「不打扰」时，退回场景规则模板，
       // 避免「思考中闪一下就消失、毫无反应」。仅当连场景规则都没有（真的不明确）
@@ -745,7 +778,9 @@ class PredictController {
         this._showThinking('正在生成…（可能需要约 1 分钟）');
         this._rearmPanelSafety(PANEL_GENERATE_SAFETY_MS);
         try {
-          await this._generateAndDeliver(suggestion, '');
+          // v4.10.41：截图失败但前台是 WPS/Word 时，没有视觉观察，用窗口标题作为生成主题兜底
+          const topic = behaviorContext._forceWriting ? String(behaviorContext.title || '').trim() : '';
+          await this._generateAndDeliver(suggestion, topic);
         } catch (e) {
           this.logger.warn('predict-auto-insert-failed', { error: e.message });
         }

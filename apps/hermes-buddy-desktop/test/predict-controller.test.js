@@ -346,3 +346,51 @@ test('v4.10.39：截图 getSources 永不返回 → 超时后主动预测仍降�
   assert.strictEqual(result.shown, true, '截图挂起超时后也应降级给出可见建议');
   assert.ok(shown, '应展示降级建议浮窗');
 });
+
+// v4.10.41 回归：截图失败但前台是 WPS/Word 时，远端盲猜 reading_or_thinking 不可靠，
+// 应把意图修正为 word_writing 并触发自动生成。
+test('截图失败但前台是 WPS → 修正为写作意图并自动生成', async () => {
+  let analyzedIntent = '';
+  let generatedIntent = '';
+  let generatedTopic = '';
+  const predictFn = async (ctx) => {
+    analyzedIntent = ctx._forceWriting ? 'reading_or_thinking' : 'word_writing';
+    return {
+      intent: 'reading_or_thinking',
+      confidence: 0.25,
+      suggestion: '需要我帮你梳理思路或找资料吗？',
+      reason: '无截图，行为元数据偏阅读',
+    };
+  };
+  const { ctrl } = makeController({ model: 'local', predictFn });
+  ctrl.config.set({ autoInsert: true });
+  ctrl.resolveWindow = async () => ({ exeName: 'wps', title: '标题 2 - WPS 文字', windowClass: 'Wps_Application' });
+  ctrl.capture = { captureActiveWindow: async () => { throw new Error('截图超时'); } };
+  ctrl._generateContentFn = async (req) => {
+    generatedIntent = req.rule;
+    generatedTopic = req.topic || '';
+    return { content: '这是根据标题生成的正文内容。' };
+  };
+  await ctrl.triggerRule('word_writing');
+  assert.strictEqual(analyzedIntent, 'reading_or_thinking', '预测函数仍被调用且看到 _forceWriting 标记');
+  assert.strictEqual(generatedIntent, 'word_writing', '最终生成时应按 word_writing 意图');
+  assert.ok(generatedTopic.includes('标题 2') || generatedTopic.includes('WPS'), '应用窗口标题应作为生成主题兜底');
+});
+
+// v4.10.41 回归：截图失败但前台不是 WPS/Word 时，不强制修正意图。
+test('截图失败且前台非 Word → 保持远端意图不兜底', async () => {
+  let generated = false;
+  const predictFn = async () => ({
+    intent: 'reading_or_thinking',
+    confidence: 0.25,
+    suggestion: '需要我帮你梳理思路或找资料吗？',
+    reason: '无截图',
+  });
+  const { ctrl } = makeController({ model: 'local', predictFn });
+  ctrl.config.set({ autoInsert: true });
+  ctrl.resolveWindow = async () => ({ exeName: 'chrome', title: '哔哩哔哩 - 个人主页', windowClass: 'Chrome_WidgetWin_1' });
+  ctrl.capture = { captureActiveWindow: async () => { throw new Error('截图超时'); } };
+  ctrl._generateContentFn = async () => { generated = true; return { content: 'x' }; };
+  await ctrl.triggerRule('reading_or_thinking');
+  assert.strictEqual(generated, false, '非写作应用不应强制生成');
+});
