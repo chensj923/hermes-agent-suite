@@ -5,6 +5,10 @@
   --text-dim: #9aa6bd;
   --accent: #4cc4a0;
   --border: #313a52;
+  --ok: #4cc4a0;
+  --fail: #ff6b6b;
+  --warn: #ffc24b;
+  --info: #6aa9ff;
 }
 
 * { box-sizing: border-box; }
@@ -22,18 +26,22 @@ html, body {
 
 body {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
 }
 
 .bubble {
-  width: 360px;
+  width: 384px;
+  max-height: 560px;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 14px;
-  padding: 14px 16px 12px;
+  padding: 12px 14px 12px;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
 }
 
 .bubble-head {
@@ -41,6 +49,7 @@ body {
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+  flex: 0 0 auto;
 }
 
 .dot {
@@ -55,35 +64,97 @@ body {
   font-size: 12px;
   color: var(--text-dim);
   letter-spacing: 0.3px;
+  flex: 1 1 auto;
 }
 
-.suggestion {
-  font-size: 15px;
-  line-height: 1.5;
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-
-.reason {
-  font-size: 12px;
+.close {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-soft);
   color: var(--text-dim);
-  line-height: 1.45;
-  margin-bottom: 12px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
 }
+.close:hover { color: var(--text); border-color: var(--accent); }
 
-/* v4.4 思考中：转圈 loading + 文案，出现在建议区域同一位置 */
+/* v4.10.40：步骤列表，可滚动、聊天小框风格 */
+.steps {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 120px;
+  margin: 0 -2px 8px;
+  padding: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.steps::-webkit-scrollbar { width: 6px; }
+.steps::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.step {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.step-ico {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #06231c;
+  background: var(--border);
+}
+.step-body { flex: 1 1 auto; min-width: 0; }
+.step-title { font-weight: 600; color: var(--text); word-break: break-word; }
+.step-detail { color: var(--text-dim); margin-top: 1px; word-break: break-word; white-space: pre-wrap; }
+.step-time { color: #6b7690; font-size: 10.5px; margin-top: 1px; }
+
+/* 状态着色 */
+.step.status-pending .step-ico { background: var(--info); }
+.step.status-pending .step-ico::after { content: '…'; }
+.step.status-done .step-ico { background: var(--ok); }
+.step.status-done .step-ico::after { content: '✓'; }
+.step.status-fail .step-ico { background: var(--fail); color: #2a0d0d; }
+.step.status-fail .step-ico::after { content: '✕'; }
+.step.status-warn .step-ico { background: var(--warn); color: #2a1d00; }
+.step.status-warn .step-ico::after { content: '!'; }
+.step.status-info .step-ico { background: var(--info); color: #06231c; }
+.step.status-info .step-ico::after { content: '•'; }
+
+.step.status-fail .step-title { color: #ffb4b4; }
+.step.status-warn .step-title { color: #ffd98a; }
+
+/* 分隔步骤（新一轮） */
+.step.status-info { opacity: 0.85; }
+.step.status-info .step-title { color: var(--info); font-size: 11.5px; }
+
 .thinking {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 62px;
-  font-size: 14px;
+  min-height: 34px;
+  font-size: 13.5px;
   color: var(--text-dim);
+  flex: 0 0 auto;
 }
 
 .spinner {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border: 2px solid var(--border);
   border-top-color: var(--accent);
   border-radius: 50%;
@@ -99,21 +170,14 @@ body {
 }
 
 /* v4.10.27 主题输入：屏幕上没有正文素材时，让用户直接告诉我们要写什么 */
-.topic-box {
-  margin: 2px 0 10px;
-}
-
+.topic-box { margin: 2px 0 10px; }
 .topic-hint {
   font-size: 11.5px;
   color: var(--text-dim);
   line-height: 1.4;
   margin-bottom: 6px;
 }
-
-.topic-hint.warn {
-  color: #ffb4a2;
-}
-
+.topic-hint.warn { color: #ffb4a2; }
 .topic-input {
   width: 100%;
   box-sizing: border-box;
@@ -126,20 +190,35 @@ body {
   padding: 8px 10px;
   outline: none;
 }
+.topic-input:focus { border-color: var(--accent); }
+.topic-input::placeholder { color: #6b7690; }
 
-.topic-input:focus {
-  border-color: var(--accent);
+/* v4.10.40：确认卡片（覆盖在步骤列表底部，薄边框区分） */
+.card {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  margin-top: 2px;
 }
+.card[hidden] { display: none !important; }
 
-.topic-input::placeholder {
-  color: #6b7690;
+.suggestion {
+  font-size: 14.5px;
+  line-height: 1.5;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.reason {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.45;
+  margin-bottom: 10px;
 }
 
 .actions {
   display: flex;
   gap: 8px;
 }
-
 button {
   flex: 1;
   border: 1px solid var(--border);
@@ -150,19 +229,12 @@ button {
   font-family: inherit;
   transition: background 0.15s, border-color 0.15s;
 }
-
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
   color: #06231c;
   font-weight: 700;
 }
-
 button.primary:hover { filter: brightness(1.08); }
-
-button.ghost {
-  background: var(--bg-soft);
-  color: var(--text);
-}
-
+button.ghost { background: var(--bg-soft); color: var(--text); }
 button.ghost:hover { border-color: var(--accent); }

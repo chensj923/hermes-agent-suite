@@ -334,6 +334,10 @@ class PredictController {
       if (this.config.get('sceneRulesEnabled') === false) return;
       const rule = this._sceneWatcher.feed(wi);
       if (!rule || !this.panel) return;
+      // v4.10.40：开一轮步骤面板，实时展示场景规则触发进度
+      this._beginFlowStep('场景规则：' + rule.name);
+      this._step('trigger', { title: '场景规则已触发', status: 'done', detail: (wi && wi.exeName) ? ('窗口：' + wi.exeName) : rule.name });
+      this._step('target', { title: '捕获目标窗口', status: 'pending', detail: '准备把内容写进当前窗口' });
       // v4.10.27：前台刚切到目标窗口，此时抓句柄最准（晚一点浮窗就抢焦点了）
       this._startTargetCapture();
       this.logger.info('scene-rule-hit', { id: rule.id, exeName: wi && wi.exeName, title: wi && wi.title });
@@ -528,6 +532,10 @@ class PredictController {
     this._processing = true;
     this._degraded = false;                 // v4.8.5：每次新触发重置降级标记
     const mySeq = ++this._pipelineSeq;      // v4.8.8：标记本流水线所有权
+    // v4.10.40：开一轮步骤面板，实时展示预测进度
+    this._beginFlowStep('主动预测' + (triggerResult.rule ? '：' + triggerResult.rule : ''));
+    this._step('trigger', { title: '已触发预测', status: 'done', detail: (triggerResult.rule || '') + (triggerResult.reason ? '｜' + triggerResult.reason : '') });
+    this._step('target', { title: '捕获目标窗口', status: 'pending', detail: '准备把内容写进当前窗口' });
     // v4.10.27：趁前台还是用户窗口，异步抓下目标句柄（不 await，与截图并行）
     this._startTargetCapture();
     // v4.10.18：记录触发
@@ -553,6 +561,7 @@ class PredictController {
           confidence: 0.75,
           action: this._buildAction('context_switch', RULE_TEMPLATE.context_switch),
         };
+        this._step('analyze', { title: '轻提示（免远端）', status: 'done', detail: '切到工作窗口即时提示' });
         this.engine.modelResult({ intent: suggestion.intent, confidence: suggestion.confidence });
         this.logger.info('predict-context-switch-instant', {
           windowClass: (pendingCtx && pendingCtx.windowClass) || null,
@@ -603,6 +612,12 @@ class PredictController {
         } catch (e) {
           this.logger.warn('predict-capture-failed', { error: e.message });
         }
+        // v4.10.40：截图步骤实时反馈
+        if (imageBase64) {
+          this._step('shot', { title: '已截图', status: 'done', detail: (shotSource || '当前窗口') });
+        } else {
+          this._step('shot', { title: '截图', status: 'warn', detail: '未取到画面（将不带视觉信息继续）' });
+        }
       }
 
       // 3) 行为上下文（只元数据，绝不带文本/标题内容）
@@ -629,10 +644,18 @@ class PredictController {
           suggestion: (RULE_TEMPLATE[rule] || '需要我帮你做点什么吗？'),
           reason: '基于行为规则的本地预判',
         };
+        this._step('analyze', { title: '基于规则预判', status: 'done', detail: '本地未走模型（mode=none）' });
       } else {
         this._showThinking('思考中…');
+        this._step('analyze', { title: '分析意图中', status: 'pending', detail: '本机读图 + 远端推理' });
         try {
           result = await this._analyze(behaviorContext, imageBase64);
+          const conf = result && Number(result.confidence);
+          this._step('analyze', {
+            title: '意图分析完成',
+            status: 'done',
+            detail: '意图：' + ((result && result.intent) || '未知') + (Number.isFinite(conf) ? '（置信度 ' + conf.toFixed(2) + '）' : ''),
+          });
         } catch (e) {
           // v4.10.3：黑屏观察（截图拿不到有效画面）→ 静默放弃本轮，别降级弹卡
           // 瞎给建议——那正是「在写文档却被推荐查接口」的来源之一。
@@ -644,6 +667,7 @@ class PredictController {
           // v4.8.5：模型不可用（本地引擎未安装/推理超时、远端通道未连）→ 降级为规则模板弹窗。
           // 旧行为是 modelTimeout()+return 静默丢弃，导致用户只看到转圈；现在必须给出可见输出。
           this.logger.warn('predict-analyze-failed, degrade to rule template', { error: e.message });
+          this._step('analyze', { title: '模型未就绪', status: 'fail', detail: String(e.message || '分析失败') + '，已降级为规则模板' });
           await this._degradeToRule(behaviorContext, '模型未就绪，已降级为行为规则预判：' + e.message);
           return;
         }
@@ -715,6 +739,8 @@ class PredictController {
           choice: 'auto-generate',
         });
         this.engine.userDecision(true);
+        // v4.10.40：自动插入也推一条「决策」步骤，保持面板可见
+        this._step('decide', { title: '已自动生成并插入', status: 'pending', detail: '远端回馈后直接写入目标窗口（不再等待点击）' });
         // 浮窗换成「正在生成…」并重新计时安全网（生成窗口最长 300s）
         this._showThinking('正在生成…（可能需要约 1 分钟）');
         this._rearmPanelSafety(PANEL_GENERATE_SAFETY_MS);
@@ -776,6 +802,8 @@ class PredictController {
     };
     // 推进引擎状态到 SUGGESTING，让后续 userDecision 能正确记录接受/拒绝并回到 IDLE
     this.engine.modelResult({ intent: suggestion.intent, confidence: suggestion.confidence });
+    // v4.10.40：降级步骤实时反馈
+    this._step('suggestion', { title: '已降级为规则模板', status: 'warn', detail: suggestion.reason });
     if (!this.panel) { this.logger.warn('predict-degrade-no-panel'); return 'later'; }
     this.logger.info('predict-degrade-show', { intent: suggestion.intent, reason: suggestion.reason });
     const choice = await this.panel.show(this._decorateSuggestion(suggestion));
@@ -829,6 +857,8 @@ class PredictController {
    */
   async _generateAndDeliver(suggestion, topic) {
     let content = '';
+    // v4.10.40：生成步骤开始（实时反馈到持久化步骤面板）
+    this._step('gen', { title: '正在生成内容', status: 'pending' });
     // v4.10.22 守卫：屏幕上没有可识别的正文内容时，不生成、不写剪贴板、不粘贴。
     // 这是「生成并插入总是粘贴模板」的真正根因——源素材为空，远端只能吐模板兜底。
     // 与其继续调 prompt 求模型别出模板，不如源头拦截并明确告诉用户原因。
@@ -847,6 +877,7 @@ class PredictController {
         observationPreview: _obs.slice(0, 200),
       });
       this._notifyNoSourceContent();
+      this._step('gen', { title: '未识别到正文', status: 'warn', detail: '屏幕没有可编辑的正文，已跳过生成' });
       return;
     }
     // v4.10.34：VL 输出太泛（长度 < 50 且不含"正在文档中写作"）→ 视为无效观察，不生成。
@@ -863,6 +894,7 @@ class PredictController {
         observationPreview: _obs.slice(0, 200),
       });
       this._notifyVagueObservation();
+      this._step('gen', { title: '视觉描述太泛', status: 'warn', detail: '本机视觉未读到有效正文，已跳过生成' });
       return;
     }
     if (_topic) {
@@ -904,6 +936,7 @@ class PredictController {
             contentPreview: content.slice(0, 300),
             chars: content.length,
           });
+          this._step('gen', { title: '已生成内容', status: 'done', detail: '共 ' + content.length + ' 字' });
         } else {
           this.logger.warn('predict-generate-no-content', { keys: res ? Object.keys(res) : null });
           // v4.10.18：记录无内容
@@ -913,6 +946,7 @@ class PredictController {
             intent: (suggestion && suggestion.intent) || '',
             responseKeys: res ? Object.keys(res) : null,
           });
+          this._step('gen', { title: '生成未返回内容', status: 'fail', detail: '服务端未返回正文，将退回建议文案' });
         }
       } catch (e) {
         this.logger.warn('predict-generate-failed', { error: e.message });
@@ -923,6 +957,7 @@ class PredictController {
           intent: (suggestion && suggestion.intent) || '',
           error: e.message,
         });
+        this._step('gen', { title: '生成失败', status: 'fail', detail: String(e.message || '生成异常') });
       }
     } else {
       this.logger.warn('predict-generate-no-fn');
@@ -930,6 +965,7 @@ class PredictController {
     // 兜底：生成不出真内容时退回建议文案（旧行为）
     if (!content) content = (suggestion && suggestion.suggestion) || '';
     if (!content) {
+      this._step('gen', { title: '无内容可插入', status: 'warn', detail: '生成与建议文案均为空' });
       if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
       return;
     }
@@ -944,19 +980,24 @@ class PredictController {
       const targetHwnd = target && target.hwnd ? target.hwnd : 0;
       if (targetHwnd) {
         this.logger.info('generate-deliver-target', { hwnd: String(targetHwnd), title: (target.title || '').slice(0, 80) });
+        this._step('target', { title: '目标窗口已锁定', status: 'done', detail: (target.title || '当前窗口') });
       } else if (this._targetCaptureAttempted) {
         // v4.10.33：触发时发起过捕获却没拿到句柄——插入时刻的窗口已不可信
         //（实测：用户点按钮后切回对话页看记录，兜底现抓抓到的是对话窗口，
         // 内容会插错地方；注入脚本内的 Z 序回退同样会猜错）。绝不盲插：
         // 只写剪贴板并通知用户手动 Ctrl+V。
         this.logger.warn('generate-deliver-no-safe-target');
+        this._step('target', { title: '未确定安全目标窗口', status: 'warn', detail: '插入时刻窗口已不可信，不盲插' });
+        this._step('deliver', { title: '已放入剪贴板', status: 'warn', detail: '无法确定要插入的窗口，请到目标窗口按 Ctrl+V 粘贴（' + content.length + ' 字）' });
         await this.actionExecutor.execute({ type: 'clipboard-keep', text: content });
         this._notifyClipboardFallback(content.length);
         if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
         return;
       } else {
         this.logger.warn('generate-deliver-target-unknown');
+        this._step('target', { title: '未捕获到目标窗口', status: 'warn', detail: '将尝试写入剪贴板' });
       }
+      this._step('deliver', { title: '正在插入到目标窗口', status: 'pending', detail: (targetHwnd ? (target.title || '当前窗口') : '未锁定，将走剪贴板兜底') });
       const result = await this.actionExecutor.execute({
         type: mode === 'paste' ? 'clipboard-paste' : 'type-input',
         text: content,
@@ -967,11 +1008,14 @@ class PredictController {
       // 不再像旧版那样静默"成功"、结果文档里什么都没有。
       if (result && result.ok === false && result.delivered === false) {
         this.logger.warn('generate-deliver-manual-paste', { chars: content.length });
+        this._step('deliver', { title: '已生成但未自动送达', status: 'warn', detail: '内容已在剪贴板，请到目标窗口按 Ctrl+V 粘贴（' + content.length + ' 字）' });
         this._notifyClipboardFallback(content.length);
         return;
       }
     }
     this._notifyGenerated(content.length);
+    // v4.10.40：插入成功步骤
+    this._step('deliver', { title: '已直接输入到目标窗口', status: 'done', detail: '内容已写入当前窗体（' + content.length + ' 字）' });
     // v4.10.38：自动插入路径在 _onTrigger 中提前 return、不走其 finally，
     // 由这里收走「正在生成…」浮窗（手动点击路径的 finally 也会再收一次，幂等）。
     if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
@@ -1130,6 +1174,7 @@ class PredictController {
       let image = imageBase64;
       let observation = '';
       if (imageBase64 && !allowImage) {
+        this._step('vl', { title: '本机视觉模型读图中', status: 'pending', detail: '把截图读成文字描述' });
         observation = await this._localVisionToText(behaviorContext, imageBase64, localJudgment);
         image = null;
         // v4.10.1：把描述内容截断进日志——出了「建议驴唇不对马嘴」的问题时
@@ -1139,6 +1184,15 @@ class PredictController {
           observationPreview: observation.slice(0, 120),
           imageSent: false,
         });
+        if (observation) {
+          this._step('vl', { title: '本机视觉读图完成', status: 'done', detail: '已读图（' + observation.length + ' 字）' });
+        } else {
+          this._step('vl', { title: '本机视觉未响应', status: 'warn', detail: '视觉模型未就绪/超时，已不带视觉信息继续' });
+        }
+      } else if (allowImage) {
+        this._step('vl', { title: '视觉', status: 'info', detail: '已开启发送原图，直接上传服务端' });
+      } else {
+        this._step('vl', { title: '视觉', status: 'warn', detail: '无截图，未做视觉读图' });
       }
 
       const ctx = Object.assign({}, behaviorContext);
@@ -1148,6 +1202,7 @@ class PredictController {
       // 直接放弃本轮，上层静默处理，不弹卡。
       if (observation && /(黑屏|全黑|纯黑|漆黑|没有可见|没有显示任何|black\s*screen|blank)/i.test(observation.slice(0, 100))) {
         this.logger.warn('predict-vision-blank', { observationPreview: observation.slice(0, 60) });
+        this._step('vl', { title: '本机视觉读图失败', status: 'fail', detail: '黑屏/无可见内容，本轮已跳过' });
         throw new Error('blank-screen-observation');
       }
       if (observation) ctx.screenObservation = observation;
@@ -1162,6 +1217,8 @@ class PredictController {
       }
       this._remoteInFlight = true;
       this._remotePromise = ch.predict(ctx, image);
+      // v4.10.40：远端推理步骤实时反馈
+      this._step('remote', { title: '已发送远端推理', status: 'pending', detail: '等待 Hermes 服务端回馈…' });
       // v4.10.37：请求此刻才真正在途。重置思考安全网，只覆盖在途请求（对齐 90s），
       // 不含前面本机 VL 的 14~27s，避免正确结果在最后一刻被判超时丢弃。
       this._rearmPanelSafety();
@@ -1178,7 +1235,16 @@ class PredictController {
           suggestion: result && result.suggestion ? String(result.suggestion).slice(0, 80) : '',
           reason: result && result.reason ? String(result.reason).slice(0, 80) : '',
         });
+        const rc = result && Number(result.confidence);
+        this._step('remote', {
+          title: '远端已回馈',
+          status: 'done',
+          detail: '意图：' + ((result && result.intent) || '未知') + (Number.isFinite(rc) ? '（置信度 ' + rc.toFixed(2) + '）' : ''),
+        });
         return result;
+      } catch (e) {
+        this._step('remote', { title: '远端未回馈', status: 'fail', detail: String(e.message || '远端推理失败') + '，将降级处理' });
+        throw e;
       } finally {
         this._remoteInFlight = false;
         this._remotePromise = null;
@@ -1326,6 +1392,26 @@ class PredictController {
   _showThinking(text) {
     if (!this.panel || typeof this.panel.showThinking !== 'function') return;
     try { this.panel.showThinking(text || '思考中…'); } catch (_) {}
+  }
+
+  /**
+   * v4.10.40：开一轮流水线，推一条分隔步骤（步骤面板聊天小框观感）。
+   */
+  _beginFlowStep(label) {
+    if (this.panel && typeof this.panel.beginFlow === 'function') {
+      try { this.panel.beginFlow(label); } catch (_) {}
+    }
+  }
+
+  /**
+   * v4.10.40：向持久化步骤面板推送/更新一条步骤。
+   * @param {string} id 同轮内用于去重更新
+   * @param {{title?:string,status?:string,detail?:string}} opts
+   */
+  _step(id, opts = {}) {
+    if (this.panel && typeof this.panel.pushStep === 'function') {
+      try { this.panel.pushStep(id, opts); } catch (_) {}
+    }
   }
 
   /**

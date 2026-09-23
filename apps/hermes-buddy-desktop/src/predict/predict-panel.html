@@ -5,32 +5,41 @@
   <!-- 浮窗极简，且只接收主进程推送的建议、回传决策；无网络、无外部脚本。 -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
-  <title>预测建议</title>
+  <title>预测进度</title>
   <link rel="stylesheet" href="predict-panel.css">
 </head>
 <body>
   <div class="bubble" id="bubble">
     <div class="bubble-head">
       <span class="dot" aria-hidden="true"></span>
-      <span class="title">Hermes 觉得你可能需要</span>
+      <span class="title">Hermes 预测进度</span>
+      <button class="close" id="btn-close" type="button" title="收起面板" aria-label="收起">×</button>
     </div>
-    <div class="suggestion" id="suggestion">…</div>
-    <div class="reason" id="reason"></div>
-    <!-- v4.10.27：没识别到正文（空白文档 / 只写了标题）时让用户直接给主题 -->
-    <div class="topic-box" id="topic-box" hidden>
-      <div class="topic-hint" id="topic-hint">没有识别到正文，输入你想写的主题</div>
-      <input class="topic-input" id="topic-input" type="text" maxlength="200"
-             placeholder="例如：2026 年数据安全治理方案" autocomplete="off" spellcheck="false" />
-    </div>
-    <!-- v4.4 思考中：模型分析期间显示转圈，分析完切回建议 -->
+
+    <!-- v4.10.40：可滚动步骤列表（聊天小框），实时显示流水线每一步状态 -->
+    <div class="steps" id="steps"></div>
+
+    <!-- v4.4 思考中横幅：模型分析期间显示转圈，分析完切回建议 -->
     <div class="thinking" id="thinking" hidden>
       <span class="spinner" aria-hidden="true"></span>
       <span class="thinking-text" id="thinking-text">思考中…</span>
     </div>
-    <div class="actions" id="actions">
-      <button class="primary" id="btn-generate" type="button">生成并插入</button>
-      <button class="ghost" id="btn-later" type="button">稍后</button>
-      <button class="ghost" id="btn-never" type="button">不再提示</button>
+
+    <!-- v4.10.40：确认卡片（仅需要用户决策时出现），步骤列表之上叠加 -->
+    <div class="card" id="card" hidden>
+      <div class="suggestion" id="suggestion">…</div>
+      <div class="reason" id="reason"></div>
+      <!-- v4.10.27：没识别到正文（空白文档 / 只写了标题）时让用户直接给主题 -->
+      <div class="topic-box" id="topic-box" hidden>
+        <div class="topic-hint" id="topic-hint">没有识别到正文，输入你想写的主题</div>
+        <input class="topic-input" id="topic-input" type="text" maxlength="200"
+               placeholder="例如：2026 年数据安全治理方案" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="actions" id="actions">
+        <button class="primary" id="btn-generate" type="button">生成并插入</button>
+        <button class="ghost" id="btn-later" type="button">稍后</button>
+        <button class="ghost" id="btn-never" type="button">不再提示</button>
+      </div>
     </div>
   </div>
   <script src="predict-panel-ui.js"></script>
