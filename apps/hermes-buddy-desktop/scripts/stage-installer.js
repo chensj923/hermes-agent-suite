@@ -19,7 +19,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..');
 // v4.10.30：构建产物实际落在非同步目录 C:\HermesBuild\dist（build:win:local / -c.directories.output）。
@@ -112,15 +112,44 @@ function testPayload(installer) {
   }
 }
 
+/**
+ * v4.11.1：交付前校验内嵌部署包与仓库事实源一致。
+ * 返回 true 表示通过（或脚本不存在，按跳过处理）。
+ */
+function checkBundle() {
+  const script = path.join(__dirname, 'check-deploy-bundle.js');
+  if (!fs.existsSync(script)) return true;
+  const args = [script];
+  // 真实交付位置：<dist>/win-unpacked/resources/server-deploy/*.tar.gz
+  const srcDir = path.dirname(arg('src', DEFAULT_SRC) || DEFAULT_SRC);
+  const resDir = path.join(srcDir, 'win-unpacked', 'resources');
+  if (fs.existsSync(resDir)) args.push('--resources', resDir);
+  // 顺带看看 asar 内有没有（没有属正常，脚本会提示跳过）
+  const asar = path.join(resDir, 'app.asar');
+  if (fs.existsSync(asar)) args.push('--asar', asar);
+  const r = spawnSync(process.execPath, args, { stdio: 'inherit' });
+  if (r.status === 0) return true;
+  console.error('[stage] 失败：服务端部署包与仓库不一致 —— 请先重建 bundle 再重新构建安装包');
+  console.error('[stage]   node scripts/build-server-deploy-bundle.js  然后重新构建');
+  return false;
+}
+
 function main() {
   const src = arg('src', DEFAULT_SRC) || DEFAULT_SRC;
   const outDir = arg('out', DEFAULT_OUT_DIR) || DEFAULT_OUT_DIR;
   const checkOnly = process.argv.includes('--check-only');
+  const skipBundle = process.argv.includes('--skip-bundle-check');
 
   if (!fs.existsSync(src)) {
     console.error('[stage] 源安装包不存在: ' + src);
     process.exit(1);
   }
+
+  // v4.11.1：交付前强制校验内嵌的服务端部署包与仓库事实源一致。
+  // 真实事故：改了 buddy-channel.py 却直接调 electron-builder（绕过
+  // build-server-deploy-bundle.js），包内脚本停在 build 12，客户端「一键部署」
+  // 显示成功但服务端版本永远不变。这里把这道关固化在交付链路上。
+  if (!skipBundle && !checkBundle()) process.exit(6);
 
   console.log('[stage] 源: ' + src);
   console.log('[stage]   大小 ' + fs.statSync(src).size + ' B  云端占位: ' + isCloudPlaceholder(src));
