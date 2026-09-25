@@ -956,7 +956,6 @@ function registerIpc() {
   handle('buddy:predict:enable', async () => getPredict().enable());
   handle('buddy:predict:disable', async () => getPredict().disable());
   handle('buddy:predict:one-click-off', async () => getPredict().oneClickOff());
-  handle('buddy:predict:set-model', (_event, model) => getPredict().setModel(model));
   handle('buddy:predict:set-sensitivity', (_event, s) => getPredict().setSensitivity(s));
   handle('buddy:predict:set-authorized', (_event, v) => getPredict().setAuthorized(v));
   handle('buddy:predict:crystallization', () => getPredict().getCrystallization());

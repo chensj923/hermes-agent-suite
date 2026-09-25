@@ -909,45 +909,34 @@ class PredictController {
       // 被 0.6 门槛拦下后思考气泡闪一下就消失，用户观感是「推理弹没了、没反应」。
       this._applyScreenIdentity(behaviorContext, shotSource, wi);
 
-      // 4) 模型判断意图（本地 / 远端 / 本地+远端）
-      //    注意：三种模式都走 _analyze；只有模型真的拿不到结果时才降级为规则模板。
-      //    （旧实现把 remote 也判成「没有模型路径」，远端模式其实从未真正调用过通道。）
-      const mode = this.config.get('model');
+      // 4) 模型判断意图（远端优先，断线自动退回本机）
+      //    v4.12.0：运行模式已移除，不再有 local/remote/hybrid 之分。
+      //    连着远端就远端思考，远端不可用自动本机兜底；都拿不到才降级为规则模板。
       let result;
-      if (mode === 'none') {
-        result = {
-          intent: rule,
-          confidence: 0.7,
-          suggestion: (RULE_TEMPLATE[rule] || '需要我帮你做点什么吗？'),
-          reason: '基于行为规则的本地预判',
-        };
-        this._step('analyze', { title: '基于规则预判', status: 'done', detail: '本地未走模型（mode=none）' });
-      } else {
-        this._showThinking('思考中…');
-        this._step('analyze', { title: '分析意图中', status: 'pending', detail: '本机读图 + 远端推理' });
-        try {
-          result = await this._analyze(behaviorContext, imageBase64);
-          const conf = result && Number(result.confidence);
-          this._step('analyze', {
-            title: '意图分析完成',
-            status: 'done',
-            detail: '意图：' + ((result && result.intent) || '未知') + (Number.isFinite(conf) ? '（置信度 ' + conf.toFixed(2) + '）' : ''),
-          });
-        } catch (e) {
-          // v4.10.3：黑屏观察（截图拿不到有效画面）→ 静默放弃本轮，别降级弹卡
-          // 瞎给建议——那正是「在写文档却被推荐查接口」的来源之一。
-          if (/blank-screen/.test(e.message)) {
-            this.logger.warn('predict-skip-blank-observation');
-            this.engine.modelTimeout();
-            return;
-          }
-          // v4.8.5：模型不可用（本地引擎未安装/推理超时、远端通道未连）→ 降级为规则模板弹窗。
-          // 旧行为是 modelTimeout()+return 静默丢弃，导致用户只看到转圈；现在必须给出可见输出。
-          this.logger.warn('predict-analyze-failed, degrade to rule template', { error: e.message });
-          this._step('analyze', { title: '模型未就绪', status: 'fail', detail: String(e.message || '分析失败') + '，已降级为规则模板' });
-          await this._degradeToRule(behaviorContext, '模型未就绪，已降级为行为规则预判：' + e.message);
+      this._showThinking('思考中…');
+      this._step('analyze', { title: '分析意图中', status: 'pending', detail: '远端优先，断线退回本机' });
+      try {
+        result = await this._analyze(behaviorContext, imageBase64);
+        const conf = result && Number(result.confidence);
+        this._step('analyze', {
+          title: '意图分析完成',
+          status: 'done',
+          detail: '意图：' + ((result && result.intent) || '未知') + (Number.isFinite(conf) ? '（置信度 ' + conf.toFixed(2) + '）' : ''),
+        });
+      } catch (e) {
+        // v4.10.3：黑屏观察（截图拿不到有效画面）→ 静默放弃本轮，别降级弹卡
+        // 瞎给建议——那正是「在写文档却被推荐查接口」的来源之一。
+        if (/blank-screen/.test(e.message)) {
+          this.logger.warn('predict-skip-blank-observation');
+          this.engine.modelTimeout();
           return;
         }
+        // v4.8.5：模型不可用（本地引擎未安装/推理超时、远端通道未连）→ 降级为规则模板弹窗。
+        // 旧行为是 modelTimeout()+return 静默丢弃，导致用户只看到转圈；现在必须给出可见输出。
+        this.logger.warn('predict-analyze-failed, degrade to rule template', { error: e.message });
+        this._step('analyze', { title: '模型未就绪', status: 'fail', detail: String(e.message || '分析失败') + '，已降级为规则模板' });
+        await this._degradeToRule(behaviorContext, '模型未就绪，已降级为行为规则预判：' + e.message);
+        return;
       }
       if (!result) { this.engine.modelTimeout(); return; }
       // v4.8.5：若 analyze 失败分支已降级弹窗，后续不再重复展示
@@ -993,7 +982,6 @@ class PredictController {
         confidence: suggestion.confidence || 0,
         suggestion: (suggestion.suggestion || '').slice(0, 200),
         reason: (suggestion.reason || '').slice(0, 200),
-        mode: this.config.get('model'),
         suggest: r2.suggest,
       });
       // v4.10.13：自动触发复用主动预测的兜底——行为规则已命中（用户在写字/查资料
@@ -1161,6 +1149,7 @@ class PredictController {
    */
   async _generateAndDeliver(suggestion, topic) {
     let content = '';
+    let remoteFailDetail = '';   // v4.12.0：远端失败原因，供本机兜底/最终报错
     // v4.10.40：生成步骤开始（实时反馈到持久化步骤面板）
     this._step('gen', { title: '正在生成内容', status: 'pending' });
     // v4.10.22 守卫：屏幕上没有可识别的正文内容时，不生成、不写剪贴板、不粘贴。
@@ -1246,10 +1235,10 @@ class PredictController {
           });
           this._step('gen', { title: '已生成内容', status: 'done', detail: '共 ' + content.length + ' 字' });
         } else {
-          // v4.10.42：透传服务端 error/reason，不再把建议文案当内容插入。
+          // v4.10.42：透传服务端 error/reason；v4.12.0 不立即报错，先记原因走本机兜底。
           const errCode = res && res.error;
           const errReason = res && res.reason;
-          const detail = errCode
+          remoteFailDetail = errCode
             ? ('服务端返回错误：' + errCode + (errReason ? '（' + errReason + '）' : ''))
             : '服务端未返回正文';
           this.logger.warn('predict-generate-no-content', {
@@ -1257,7 +1246,6 @@ class PredictController {
             error: errCode,
             reason: errReason,
           });
-          // v4.10.18：记录无内容
           this._logEntry({
             phase: 'generated',
             status: 'no-content',
@@ -1266,10 +1254,6 @@ class PredictController {
             error: errCode,
             reason: errReason,
           });
-          this._step('gen', { title: '生成未返回内容', status: 'fail', detail });
-          this._notifyGenerateFailed(detail);
-          if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
-          return;
         }
       } catch (e) {
         this.logger.warn('predict-generate-failed', { error: e.message });
@@ -1280,20 +1264,21 @@ class PredictController {
           intent: (suggestion && suggestion.intent) || '',
           error: e.message,
         });
-        this._step('gen', { title: '生成失败', status: 'fail', detail: String(e.message || '生成异常') });
-        this._notifyGenerateFailed(String(e.message || '生成异常'));
-        if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
-        return;
+        remoteFailDetail = String(e.message || '生成异常');
       }
     } else {
-      // v4.10.42：没有远端生成函数时（旧服务端/测试环境），退化为插入建议文案。
+      // 没有远端生成函数（未连接/旧环境）：直接走本机兜底，不再退建议文案。
       this.logger.warn('predict-generate-no-fn');
-      this._step('gen', { title: '生成通道未配置', status: 'warn', detail: '服务端不支持内容生成，将插入建议文案' });
-      content = (suggestion && suggestion.suggestion) || '';
+      remoteFailDetail = '远端生成通道不可用';
     }
-    // v4.10.42：远端生成失败时不插入任何内容；只有旧环境无生成函数时才退化为建议文案。
+    // v4.12.0：远端未生成正文时，用本机模型离线兜底；本机也不行才明确报错，
+    // 绝不再把"需要我帮你做点什么吗"这类建议文案当正文插入。
+    if (!content && remoteFailDetail) {
+      content = await this._fallbackGenerate(suggestion, remoteFailDetail);
+    }
     if (!content) {
-      this._step('gen', { title: '无内容可插入', status: 'warn', detail: '生成返回为空，已停止插入' });
+      this._step('gen', { title: '生成失败', status: 'fail', detail: remoteFailDetail || '远端与本机均未生成内容' });
+      this._notifyGenerateFailed(remoteFailDetail || '远端与本机均未生成内容');
       if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
       return;
     }
@@ -1448,28 +1433,47 @@ class PredictController {
     } catch (_) { /* node --test 环境无 electron */ }
   }
 
-  /** 本地或远端模型推断。mode: local | remote | hybrid */
+  /**
+   * v4.12.0 统一分析：远端优先，断线/失败自动退回本机。
+   *
+   * 触发已由本地确定性规则决定，模型只负责触发后的「思考/解答」：
+   *   - 远端通道可用（connected + supportsPredict）→ 走远端大模型，质量高；
+   *   - 远端未连 / 不支持 predict / 超时 / 拒图 → 自动退回本机模型，全程无感；
+   *   - 两者都不可用 → 抛错，由上层降级为规则模板。
+   */
   async _analyze(behaviorContext, imageBase64) {
-    // v4.11.0：留一份最新截图——生成阶段可带图上行，让服务端多模态直接看画面
     if (imageBase64) this._lastImageBase64 = imageBase64;
-    const mode = this.config.get('model');
-    let analyzePromise;
-    let timeoutMs;
-    let timeoutMsg;
-    if (mode === 'remote') {
-      analyzePromise = this._remoteAnalyze(behaviorContext, imageBase64, null);
-      timeoutMs = REMOTE_ANALYZE_TIMEOUT_MS;
-      timeoutMsg = '远端模型响应超时';
-    } else if (mode === 'hybrid') {
-      analyzePromise = this._hybridAnalyze(behaviorContext, imageBase64);
-      timeoutMs = REMOTE_ANALYZE_TIMEOUT_MS;
-      timeoutMsg = '模型响应超时';
-    } else {
-      analyzePromise = this._localAnalyze(behaviorContext, imageBase64);
-      timeoutMs = LOCAL_ANALYZE_TIMEOUT_MS;
-      timeoutMsg = '本地模型推理超时';
+    if (this._remoteUsable()) {
+      try {
+        return await _withTimeout(
+          this._remoteAnalyze(behaviorContext, imageBase64, null),
+          REMOTE_ANALYZE_TIMEOUT_MS,
+          '远端模型响应超时'
+        );
+      } catch (e) {
+        // 黑屏观察是截图本身无效，不该退回本机瞎猜，直接上抛静默处理
+        if (/blank-screen/.test(e.message)) throw e;
+        this.logger.warn('predict-remote-failed, fallback to local', { error: e.message });
+        this._step('remote', { title: '远端不可用，退回本机', status: 'warn', detail: String(e.message || '远端失败') });
+      }
     }
-    return _withTimeout(analyzePromise, timeoutMs, timeoutMsg);
+    return _withTimeout(
+      this._localAnalyze(behaviorContext, imageBase64),
+      LOCAL_ANALYZE_TIMEOUT_MS,
+      '本地模型推理超时'
+    );
+  }
+
+  /**
+   * 远端通道是否可用：对象存在 + connected + supportsPredict。
+   * 仅做预判；真正调用 reject（channel_no_predict/超时/拒图）仍由 _analyze 兜底。
+   */
+  _remoteUsable() {
+    let ch = this.channel;
+    if (!ch && this._resolveChannel) {
+      try { ch = this._resolveChannel(); } catch (_) { ch = null; }
+    }
+    return !!(ch && ch.connected && ch.supportsPredict !== false);
   }
 
   /**
@@ -1510,6 +1514,55 @@ class PredictController {
     const runner = this._runner();
     if (!runner) throw new Error('本地模型未就绪（请先安装 VLM 引擎）');
     return runner.analyze({ imageBase64, behaviorContext });
+  }
+
+  /**
+   * v4.12.0：本机正文生成（远端断线/生成失败时的兜底）。
+   * 调本机 runner.generate；测试可注入 this._localGenerateFn。
+   */
+  async _localGenerate({ topic, direction, observation }) {
+    if (typeof this._localGenerateFn === 'function') {
+      return this._localGenerateFn({ topic, direction, observation });
+    }
+    const runner = this._runner();
+    if (!runner || typeof runner.generate !== 'function') return '';
+    return runner.generate({
+      topic: topic || '',
+      direction: direction || '',
+      observation: observation || '',
+      imageBase64: this._lastImageBase64 || '',
+    });
+  }
+
+  /**
+   * v4.12.0：远端生成失败/未返回时的本机离线兜底。
+   * @returns {Promise<string>} 本机生成的正文；不可用返回空串（调用方决定报错）。
+   */
+  async _fallbackGenerate(suggestion, remoteDetail) {
+    this._step('gen', { title: '远端未生成，本机离线生成中', status: 'pending', detail: String(remoteDetail || '改用本机模型') });
+    const topic = (suggestion && suggestion.topic) || this._lastWindowTitle || '';
+    const direction = (suggestion && suggestion.behaviorPrompt) || '';
+    let text = '';
+    try {
+      text = await this._localGenerate({ topic, direction, observation: this._lastObservation || '' });
+    } catch (e) {
+      this.logger.warn('predict-generate-local-failed', { error: e.message });
+      text = '';
+    }
+    if (text && text.trim()) {
+      text = text.trim();
+      this.logger.info('predict-generate-local-ok', { chars: text.length });
+      this._logEntry({
+        phase: 'generated',
+        status: 'ok-local',
+        intent: (suggestion && suggestion.intent) || '',
+        chars: text.length,
+        contentPreview: text.slice(0, 300),
+      });
+      this._step('gen', { title: '本机已离线生成内容', status: 'done', detail: '共 ' + text.length + ' 字' });
+      return text;
+    }
+    return '';
   }
 
   /** 远端大模型推断（思考 + 解答）。localJudgment 可选：混合模式下把本地判断作为提示带上。 */
@@ -1711,58 +1764,6 @@ class PredictController {
     return (r && r.observation) || '';
   }
 
-  /**
-   * 混合模式（v4.4 / v4.8.2）：本地小模型只负责判断「该不该触发」，
-   * 判定值得打扰后再把上下文交给远端大模型做真正的思考与解答。
-   *
-   * v4.8.2 关键修正：本地模型只当「热缓存」用。默认 hybrid 模式下若本地 2GB VLM
-   * 还没启动，冷启动会拖慢首条预测数十秒；因此未热启/推理超时时直接跳过筛选，
-   * 先走远端，同时后台默默预热本地模型供下次触发使用。
-   */
-  async _hybridAnalyze(behaviorContext, imageBase64) {
-    const threshold = Number(this.config.get('confidenceThreshold')) || 0.6;
-    let localResult = null;
-    if (this._isLocalWarm()) {
-      try {
-        localResult = await _withTimeout(
-          this._localAnalyze(behaviorContext, imageBase64),
-          LOCAL_SCREEN_TIMEOUT_MS,
-          '本地筛选模型超时'
-        );
-      } catch (e) {
-        // 本地筛选模型推理失败/超时：不经筛选，直接交给远端思考
-        this.logger.warn('hybrid-local-screen-skipped', { error: e.message });
-      }
-    } else {
-      this.logger.info('hybrid-local-cold, skip to remote');
-    }
-    if (localResult && Number(localResult.confidence) < threshold) {
-      // 本地小模型判断「此刻不该打扰」：到此为止，不再惊动远端
-      return Object.assign({}, localResult, { reason: '本地模型判断：此刻无需打扰', source: 'local' });
-    }
-    try {
-      const remoteResult = await this._remoteAnalyze(behaviorContext, imageBase64, localResult);
-      if (remoteResult) {
-        return Object.assign({}, remoteResult, {
-          reason: '本地判断触发 + 远端思考解答' + (remoteResult.reason ? '｜' + remoteResult.reason : ''),
-          source: 'hybrid',
-        });
-      }
-    } catch (e) {
-      // v4.10.3：黑屏观察 → 本轮整体放弃（本地结论也是黑屏图的产物，不能退回它弹卡）
-      if (/blank-screen/.test(e.message)) throw e;
-      this.logger.warn('hybrid-remote-failed', { error: e.message });
-    }
-    // 远端不可用：退回本地结论
-    if (localResult) {
-      return Object.assign({}, localResult, {
-        reason: '远端不可用，已退回本地结论' + (localResult.reason ? '｜' + localResult.reason : ''),
-        source: 'local',
-      });
-    }
-    throw new Error('本地模型未就绪且远端通道未连接');
-  }
-
   /** 懒建 LocalModelRunner（默认按 llama-engine 查找）；测试可注入 this.modelRunner。 */
   _runner() {
     if (this.modelRunner) return this.modelRunner;
@@ -1771,7 +1772,7 @@ class PredictController {
     return this.modelRunner;
   }
 
-  /** 本地模型是否已热启（hybrid 模式用它决定是否参与筛选）。 */
+  /** 本机模型是否已热启（决定读图描述是否复用，避免为描述而冷启动）。 */
   _isLocalWarm() {
     // 测试注入 predictFn 时视为「已就绪」，否则看真实 runner 是否已启动
     if (typeof this._predictFn === 'function') return true;
@@ -1788,11 +1789,6 @@ class PredictController {
     }
     this.modelRunner = null;
     return { ok: true };
-  }
-
-  /** 当前选择的模式是否要走模型（remote 模式本身没有本地路径）。 */
-  _hasModelPath() {
-    return this.config.get('model') !== 'remote';
   }
 
   /**
@@ -1858,37 +1854,25 @@ class PredictController {
     return {
       enabled: this._enabled,
       authorized: this.config.get('authorized'),
-      model: this.config.get('model'),
       sensitivity: this.config.get('sensitivity'),
       state: this.engine.state,
       cooldownRemainingMs,
       processing: this._processing,
       av: detectAntivirus().map((a) => a.name),
       crystallization: this.db.getCrystallization(),
+      // v4.12.0：远端通道当前是否可用（供 UI 展示解答来源）
+      remoteUsable: this._remoteUsable(),
       // v4.2
       proactivePatrolMinutes: Number(this.config.get('proactivePatrolMinutes')) || 0,
       genericWritingFallback: this.config.get('genericWritingFallback') !== false,
     };
   }
 
-  setModel(model) {
-    this.config.set({ model });
-    // 切换模型后释放旧 runner，下次触发重新懒建
-    if (this.modelRunner) { try { this.modelRunner.stop(); } catch (_) {} this.modelRunner = null; }
-    // v4.8.2：切到 local/hybrid 时后台预热本地模型，避免首条触发被冷启动拖慢
-    if (model !== 'remote') {
-      this.warmLocalModel().catch(() => {});
-    }
-    return this.getStatus();
-  }
-
   /**
-   * v4.8.2：后台预热本地模型。启用 / 切到 local/hybrid 时调用，不阻塞主流程。
-   * 只有本地模型已安装且未启动时才拉起；remote 模式不预热。
+   * v4.12.0：后台预热本机模型。启用时调用，不阻塞主流程。
+   * 远端断线时需要本机模型立即顶上，因此始终预热（已安装且未启动才拉起）。
    */
   async warmLocalModel() {
-    const mode = this.config.get('model');
-    if (mode === 'remote') return { ok: false, reason: 'remote 模式无需预热本地模型' };
     const runner = this._runner();
     if (!runner) return { ok: false, reason: '本地模型未安装' };
     if (runner.started) return { ok: true, reason: '本地模型已就绪' };
@@ -2007,34 +1991,25 @@ class PredictController {
       }
       const behaviorContext = Object.assign({ rule, proactive: true }, ctx);
 
-      const mode = this.config.get('model');
+      this._showThinking('思考中…');
       let result;
-      if (mode === 'none') {
+      try {
+        result = await this._analyze(behaviorContext, imageBase64);
+      } catch (e) {
+        // v4.10.3：黑屏观察 → 静默放弃（与 _onTrigger 同理，别瞎弹卡）
+        if (/blank-screen/.test(e.message)) {
+          this.logger.warn('predict-skip-blank-observation');
+          this.engine.modelTimeout();
+          return { shown: false, reason: '截图为黑帧，跳过本轮预测' };
+        }
+        // v4.12.0：远端与本机模型都不可用 → 降级为窗口类型推断
+        this.logger.warn('predict-now-analyze-failed, degrade', { error: e.message });
         result = {
           intent: rule || 'none',
           confidence: 0.7,
           suggestion: (rule && RULE_TEMPLATE[rule]) || PROACTIVE_TEMPLATE,
-          reason: '主动预测：根据当前窗口与操作节奏推断（未启用模型）',
+          reason: '主动预测：模型未就绪，已降级为窗口类型推断（' + e.message + '）',
         };
-      } else {
-        this._showThinking('思考中…');
-        try {
-          result = await this._analyze(behaviorContext, imageBase64);
-        } catch (e) {
-          // v4.10.3：黑屏观察 → 静默放弃（与 _onTrigger 同理，别瞎弹卡）
-          if (/blank-screen/.test(e.message)) {
-            this.logger.warn('predict-skip-blank-observation');
-            this.engine.modelTimeout();
-            return { shown: false, reason: '截图为黑帧，跳过本轮预测' };
-          }
-          this.logger.warn('predict-now-analyze-failed, degrade', { error: e.message });
-          result = {
-            intent: rule || 'none',
-            confidence: 0.7,
-            suggestion: (rule && RULE_TEMPLATE[rule]) || PROACTIVE_TEMPLATE,
-            reason: '主动预测：模型未就绪，已降级为窗口类型推断（' + e.message + '）',
-          };
-        }
       }
       if (!result) { this.engine.modelTimeout(); return { shown: false, reason: '没有拿到模型结果' }; }
       _ungenericServerDegrade(result);   // v4.9.3：服务端降级话术 → 场景规则模板
@@ -2057,7 +2032,6 @@ class PredictController {
         confidence: result.confidence || 0,
         suggestion: (result.suggestion || '').slice(0, 200),
         reason: (result.reason || '').slice(0, 200),
-        mode: this.config.get('model'),
         suggest: r2.suggest,
         proactive: true,
       });

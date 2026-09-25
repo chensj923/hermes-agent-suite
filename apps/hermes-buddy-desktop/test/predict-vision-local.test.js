@@ -62,6 +62,8 @@ function makeController({ model = 'hybrid', channel = null, predictFn = null, de
 
 function okChannel(sink) {
   return {
+    connected: true,      // v4.12.0：远端可用性三重判断要求
+    supportsPredict: true,
     predict: async (ctx, img) => {
       sink.push({ ctx, img });
       return { intent: 'word_writing', confidence: 0.9, suggestion: '帮你续写', reason: '远端分析' };
@@ -80,16 +82,13 @@ test('默认配置：sendImageToServer=true + remoteVision=true（v4.11.0 远程
   assert.ok(ctrl, 'controller 构造成功');
 });
 
-test('hybrid：本机 VL 已给出 observation → 远端只收文字，不带原图', async () => {
+test('remoteVision=false：本机 VL 读图成文字 → 远端只收文字，不带原图', async () => {
+  // v4.12.0 远端优先：本地判定不再先跑，remoteVision 关闭时由本机 VL 直接
+  // describe 出一段 screenObservation，再随纯文本请求发给远端。
   const calls = [];
   const { ctrl, captured } = makeController({
-    model: 'hybrid',
     channel: okChannel(calls),
-    predictFn: async () => ({
-      intent: 'word_writing', confidence: 0.8,
-      suggestion: '本地初判', reason: '停笔',
-      observation: 'Word 文档，标题「Hermes4.5 使用报告：」，光标停在标题行末尾',
-    }),
+    describeFn: async () => 'Word 文档，标题「Hermes4.5 使用报告：」，光标停在标题行末尾',
     modelRunner: { started: true },
   });
   await ctrl.triggerRule('word_writing');

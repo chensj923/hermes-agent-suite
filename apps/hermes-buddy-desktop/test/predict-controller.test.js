@@ -19,7 +19,9 @@ function tmpDir() {
 }
 
 /** 构造一个带注入 fake 的控制器（不碰真实 electron / 模型 / 杀软）。 */
-function makeController({ model = 'none', choice = 'generate', predictFn = null } = {}) {
+// v4.12.0：运行模式已移除，不再接收 model；远端通道未注入即视为断线，
+// 思考/解答由本机模型（predictFn / localGenerate）兜底。
+function makeController({ choice = 'generate', predictFn = null, localGenerate = null } = {}) {
   const appDir = tmpDir();
   const captured = { suggestion: null, analyzeCalls: 0, actionCalls: [] };
   const fakeCapture = {
@@ -41,25 +43,36 @@ function makeController({ model = 'none', choice = 'generate', predictFn = null 
     actionExecutor: fakeAction,
     predictFn: predictFn || null,
   });
-  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6 });
+  if (typeof localGenerate === 'function') ctrl._localGenerateFn = localGenerate;
+  ctrl.config.set({ enabled: true, authorized: true, confidenceThreshold: 0.6 });
   return { ctrl, captured, appDir };
 }
 
-test('model=none + 用户点「生成并插入」→ 剪贴板动作执行 + 引擎记接受', async () => {
-  const { ctrl, captured } = makeController({ model: 'none', choice: 'generate' });
+// v4.12.0：远端断线、本机分析引擎也未安装 → 先降级为规则模板弹窗；
+// 用户点「生成」后不再把建议话术塞进剪贴板，而是用本机离线生文兜底投递。
+const CLIPBOARD_ACTIONS = ['clipboard', 'clipboard-keep', 'clipboard-paste', 'type-input'];
+
+test('远端断线 + 本机分析未就绪 → 降级弹窗记接受，本机离线生文兜底投递', async () => {
+  const { ctrl, captured } = makeController({ choice: 'generate' });
+  // 本机离线生文兜底（v4.12.0 新增能力）
+  ctrl._localGenerateFn = async () => '本机离线生成的正文内容。';
+  // 用「动作执行信号」接住 fire-and-forget 的生成投递，避免时序竞态
+  let resolveAction;
+  const actionPromise = new Promise((r) => { resolveAction = r; });
+  ctrl.actionExecutor = {
+    execute: async (a) => { captured.actionCalls.push(a); resolveAction(); return { ok: true, type: a.type }; },
+  };
   await ctrl.triggerRule('word_writing');
-  assert.ok(captured.suggestion, '应展示建议');
+  assert.ok(captured.suggestion, '应展示降级建议');
   assert.strictEqual(captured.suggestion.intent, 'word_writing');
-  assert.ok(captured.actionCalls.length >= 1, '应执行至少一个动作');
-  // v4.10.2：「生成并插入」走真生成，无生成函数时兜底回填也改为 clipboard-keep
-  //（不被 8 秒恢复机制冲掉）
-  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste' || a.type === 'type-input');
-  assert.ok(clip, '应触发剪贴板回填');
-  assert.ok(clip.text && clip.text.length > 0, '回填文本非空');
   // 引擎回到 IDLE，且 word_writing 记了一次接受
   assert.strictEqual(ctrl.engine.state, 'IDLE');
-  const stats = ctrl.db.getStats('word_writing');
-  assert.strictEqual(stats.accepts, 1);
+  assert.strictEqual(ctrl.db.getStats('word_writing').accepts, 1);
+  // 等待后台投递真正完成
+  await actionPromise;
+  const clip = captured.actionCalls.find((a) => CLIPBOARD_ACTIONS.includes(a.type));
+  assert.ok(clip, '本机离线生文应触发投递动作');
+  assert.strictEqual(clip.text, '本机离线生成的正文内容。', '投递的必须是本机生成正文，而非建议话术');
 });
 
 test('用户点「不再提示」→ 规则退休并存盘', async () => {
@@ -84,32 +97,49 @@ test('predictFn 低置信度 → 不弹窗、不计入拒绝，回到 IDLE', asy
   assert.strictEqual(captured.actionCalls.length, 0);
 });
 
-test('predictFn 高置信度 + 用户生成 → 经 capture 截图并回填', async () => {
+test('predictFn 高置信度 + 用户生成 → 经 capture 截图分析，本机离线生文投递', async () => {
   const { ctrl, captured } = makeController({
-    model: 'qwen2.5-vl-3b',
     choice: 'generate',
     predictFn: async (ctx, img) => {
       captured.analyzeCalls += 1;
-      assert.ok(img === 'BASE64FAKE', '应把截图 base64 传给模型');
+      assert.ok(img === 'BASE64FAKE', '应把截图 base64 传给本机模型');
       return { intent: 'api_lookup', confidence: 0.9, suggestion: '把这段报错贴给我', reason: '反复切窗查文档' };
     },
   });
+  // 远端断线：生成阶段用本机离线生文兜底（产出含报错线索的正文）
+  ctrl._localGenerateFn = async () => '排查步骤：先把这段完整报错复制下来再定位。';
+  let resolveAction;
+  const actionPromise = new Promise((r) => { resolveAction = r; });
+  ctrl.actionExecutor = {
+    execute: async (a) => { captured.actionCalls.push(a); resolveAction(); return { ok: true, type: a.type }; },
+  };
   await ctrl.triggerRule('api_lookup');
-  assert.strictEqual(captured.analyzeCalls, 1, '应调用一次模型');
-  assert.ok(captured.actionCalls.find((a) => (a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste' || a.type === 'type-input') && /报错/.test(a.text)), '应回填模型生成的建议');
+  assert.strictEqual(captured.analyzeCalls, 1, '应调用一次本机分析模型');
+  await actionPromise;
+  const clip = captured.actionCalls.find((a) => CLIPBOARD_ACTIONS.includes(a.type));
+  assert.ok(clip, '本机离线正文应触发投递');
+  assert.ok(/报错/.test(clip.text), '投递正文应围绕报错线索，而非把建议问句当正文');
 });
 
-test('本地模型未就绪（无 predictFn/buildRunner）→ 降级规则模板仍弹窗，不静默丢弃', async () => {
-  // 复现线上 bug：选了本地 VLM 但引擎未安装，_analyze 抛「本地模型未就绪」，
-  // 旧行为 modelTimeout()+return 导致一次都不弹；修复后必须降级为规则模板弹窗。
-  const { ctrl, captured } = makeController({ model: 'qwen2.5-vl-3b', choice: 'generate' });
+test('远端断线 + 本机分析与生成都未就绪 → 降级弹窗且明确报错，绝不盲插建议话术', async () => {
+  // 复现线上 bug：本机 VLM 引擎未安装，_analyze 抛「本地模型未就绪」，
+  // 旧行为 modelTimeout()+return 导致一次都不弹；v4.8.5 起降级为规则模板弹窗，
+  // v4.12.0 进一步规定：点生成后远端与本机都生不出正文时明确报错、零投递，
+  // 绝不把「需要我帮你做点什么吗」这类话术当正文插进文档。
+  const { ctrl, captured } = makeController({ choice: 'generate' });
+  let resolveFail;
+  const failPromise = new Promise((r) => { resolveFail = r; });
+  ctrl._notifyGenerateFailed = (d) => { resolveFail(String(d || '')); };
   await ctrl.triggerRule('api_lookup');
   assert.ok(captured.suggestion, '模型失败也必须弹窗（降级模板）');
   assert.strictEqual(captured.suggestion.intent, 'api_lookup');
   assert.ok(/降级/.test(captured.suggestion.reason), 'reason 应注明降级原因');
   assert.ok(/未就绪/.test(captured.suggestion.reason), 'reason 应包含引擎未就绪信息');
-  const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste' || a.type === 'type-input');
-  assert.ok(clip, '降级模板也应走剪贴板动作');
+  // 确定性等待后台生文兜底的最终失败通知
+  const notifiedFail = await failPromise;
+  const clip = captured.actionCalls.find((a) => CLIPBOARD_ACTIONS.includes(a.type));
+  assert.strictEqual(clip, undefined, '本机也生不出正文时不应有任何投递动作');
+  assert.ok(notifiedFail, '必须明确通知生成失败，而非静默或谎报成功');
 });
 
 // ---------------------------------------------------------------------------

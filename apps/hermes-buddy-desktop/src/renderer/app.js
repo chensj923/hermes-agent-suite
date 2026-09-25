@@ -2306,11 +2306,6 @@ const PREDICT_RULE_LABEL = {
   api_lookup: '查接口 / 报错排查',
   reading_or_thinking: '阅读 / 思考停顿'
 };
-const PREDICT_MODEL_OPTIONS = [
-  { value: 'local', label: '本地（本机小模型判断 + 思考，完全离线）' },
-  { value: 'remote', label: '远端（246 服务端大模型思考 + 解答）' },
-  { value: 'hybrid', label: '本地 + 远端（本地小模型判断触发，远端大模型思考解答）' }
-];
 
 async function renderPredictTab() {
   const status = await api.predictStatus().catch(() => null);
@@ -2329,13 +2324,10 @@ async function renderPredictTab() {
 
     <section id="predict-config" hidden>
       <h3>模型与灵敏度</h3>
-      <label class="settings-field">运行模式
-        <select id="predict-model"></select>
-      </label>
       <p class="hint">
-        <b>本地</b>：本机小模型既判断触发、也思考解答，全程离线。<br>
-        <b>远端</b>：截图与行为上下文发给 246 服务端大模型，本机不跑模型。<br>
-        <b>本地 + 远端</b>（推荐）：本地小模型只判断「该不该打扰」，判定值得触发后交给远端大模型思考解答 —— 触发判断快、解答质量高。
+        触发永远在本机完成（应用画像 + 行为节奏 + 结晶判断），不会把屏幕内容外发。<br>
+        连着 Hermes 服务端时，思考与解答由远端大模型完成（截图仅在此时随请求上传）；
+        断线时自动切换为本机模型离线作答，全程无需手动选择。
       </p>
       <label class="settings-field">灵敏度（数值越小越容易触发）
         <input id="predict-sensitivity" type="number" min="0.1" step="0.1">
@@ -2468,25 +2460,6 @@ async function renderPredictTab() {
   const config = $('predict-config');
   if (on || auth) config.hidden = false;
 
-  // 模型下拉
-  const modelSel = $('predict-model');
-  for (const o of PREDICT_MODEL_OPTIONS) {
-    const opt = document.createElement('option');
-    opt.value = o.value;
-    opt.textContent = o.label;
-    modelSel.appendChild(opt);
-  }
-  if (status && status.model && PREDICT_MODEL_OPTIONS.some((o) => o.value === status.model)) {
-    modelSel.value = status.model;
-  }
-  modelSel.addEventListener('change', async () => {
-    modelSel.disabled = true;
-    const r = await api.predictSetModel(modelSel.value).catch((e) => ({ error: e.message }));
-    if (r && r.error) { $('predict-model-status').textContent = '切换失败：' + r.error; $('predict-model-status').dataset.tone = 'error'; }
-    else { $('predict-model-status').textContent = '模型已切换'; $('predict-model-status').dataset.tone = 'ok'; }
-    modelSel.disabled = false;
-  });
-
   // 灵敏度
   const sens = $('predict-sensitivity');
   sens.value = (status && status.sensitivity) || 1;
@@ -2516,9 +2489,9 @@ async function renderPredictTab() {
   // 场景规则编辑器（v4.10.24 结晶场景）
   setupSceneRulesEditor();
 
-  // 引擎现状提示 + 一键安装引导（v4.1）
-  // v4.4：三档模式里 local / hybrid 都需要本地小模型，缺引擎时给安装入口
-  if (engine && status && (status.model === 'local' || status.model === 'hybrid')) {
+  // 引擎现状提示 + 一键安装引导（v4.1 / v4.12.0）
+  // 运行模式已移除：本机模型始终作为远端断线时的离线兜底，缺引擎就给安装入口
+  if (engine && status) {
     const ready = engine.llamaServer && engine.llamaServer.ok && engine.model && engine.model.ok;
     if (!ready) {
       const sec = document.createElement('section');
@@ -2531,12 +2504,9 @@ async function renderPredictTab() {
         'llama-server: ' + (engine.llamaServer && engine.llamaServer.ok ? '已安装' : '未安装'),
         '模型 GGUF: ' + (engine.model && engine.model.ok ? '已安装' : '未安装')
       ];
-      const need = status.model === 'hybrid'
-        ? '混合模式下本地小模型负责「判断该不该触发」，没装引擎会跳过筛选、直接交给远端思考'
-        : '本地模式下判断与思考都在本机完成，引擎是必需的';
-      tip.textContent = '当前模式需要本地小模型，但引擎未就绪（' + bits.join('，') + '）。' +
-        need + '。引擎约 18MB（llama.cpp）+ 2GB（Qwen2.5-VL-3B GGUF）；' +
-        '也可以先改用「远端」模式（由 246 服务端全权思考）。';
+      tip.textContent = '本机模型作为远端断线时的离线兜底，但引擎未就绪（' + bits.join('，') + '）。' +
+        '连着 Hermes 服务端时不影响使用，断线时才需要它。' +
+        '引擎约 18MB（llama.cpp）+ 2GB（Qwen2.5-VL-3B GGUF）。';
       const actions = document.createElement('div');
       actions.className = 'settings-actions';
       const btn = document.createElement('button');

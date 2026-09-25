@@ -102,6 +102,21 @@ const DESCRIBE_PROMPT = [
   '8. 涉及隐私（密码框、私人聊天内容）时只写类型不写具体内容。',
 ].join('\n');
 
+/**
+ * v4.12.0：本机正文生成的系统提示词（远端断线兜底用）。
+ * 小模型不做华丽发挥，要求围绕主题、条理清楚、篇幅适中、不编造事实。
+ */
+const LOCAL_GENERATE_PROMPT = [
+  '你是运行在用户本机上的写作助手，在远端服务不可用时由你离线生成内容。',
+  '你会收到主题、写作方向和（可能的）屏幕观察。请严格围绕给定主题撰写可直接使用的正文。',
+  '要求：',
+  '1. 直接输出正文，不要任何解释、标题前缀或"以下是"之类的话术；',
+  '2. 结构清楚：正文较长时用若干自然段或简短小标题组织，但不要写成提纲；',
+  '3. 只写能合理支撑主题的内容，不要编造数据、名称、链接或事实；',
+  '4. 篇幅控制在 200~500 字，语言简洁、口语自然；',
+  '5. 如果信息不足以写出有意义的正文，只输出一句话点明需要补充的信息。',
+].join('\n');
+
 class LocalModelRunner {
   constructor({
     llamaServerPath, modelPath, mmprojPath,
@@ -322,6 +337,68 @@ class LocalModelRunner {
       observation: typeof obj.observation === 'string' ? obj.observation : '',
       behaviorContext,
     };
+  }
+
+  /**
+   * v4.12.0：本机正文生成（远端断线时的兜底）。
+   *
+   * 与 analyze 的区别：不要 JSON、不要意图判断，直接围绕主题/方向写出可粘贴的正文段落。
+   * 小模型能力有限，prompt 要求结构清晰、不编造、篇幅适中。
+   *
+   * @param {object} opts
+   * @param {string} [opts.topic]     主题（用户手填或窗口标题）
+   * @param {string} [opts.direction] 行为方向（画像行为 prompt）
+   * @param {string} [opts.observation] 屏幕观察
+   * @param {string} [opts.imageBase64] 截图
+   * @returns {Promise<string>} 正文文本；无法生成返回空串。
+   */
+  async generate({
+    topic, direction, observation, imageBase64,
+    temperature = 0.5, maxTokens = 900, inferTimeoutMs = 60000,
+  } = {}) {
+    if (!this.started) await this.start();
+
+    const parts = [];
+    if (topic) parts.push('主题：' + topic);
+    if (direction) parts.push('写作方向：' + direction);
+    if (observation) parts.push('屏幕观察：' + observation);
+    const userText = (parts.length ? parts.join('\n') : '请基于当前情境给出内容')
+      + '\n\n请直接输出正文内容，不要解释、不要前后缀。';
+
+    const content = [{ type: 'text', text: userText }];
+    if (imageBase64) {
+      content.push({ type: 'image_url', image_url: { url: 'data:image/png;base64,' + imageBase64 } });
+    }
+    const body = {
+      model: 'local-vlm',
+      messages: [
+        { role: 'system', content: LOCAL_GENERATE_PROMPT },
+        { role: 'user', content },
+      ],
+      temperature,
+      max_tokens: maxTokens,
+    };
+    try {
+      const res = await this._http('POST', '/v1/chat/completions', body, inferTimeoutMs);
+      const payload = (res && res.body) || {};
+      const raw = payload.choices && payload.choices[0] && payload.choices[0].message &&
+        payload.choices[0].message.content;
+      return this._cleanGenerated(raw);
+    } catch (e) {
+      (this.logger.warn || this.logger.error || function () {}).call(
+        this.logger, '[runner] 本机生文失败: ' + (e && e.message)
+      );
+      return '';
+    }
+  }
+
+  /** 清洗生文：剥代码围栏，限长。 */
+  _cleanGenerated(raw) {
+    if (typeof raw !== 'string') return '';
+    let t = raw.trim();
+    const fence = t.match(/```(?:text|md|markdown)?\s*([\s\S]*?)```/i);
+    if (fence) t = fence[1].trim();
+    return t.slice(0, 4000).trim();
   }
 
   /** 终止子进程（SIGTERM → 宽限 → SIGKILL）。 */

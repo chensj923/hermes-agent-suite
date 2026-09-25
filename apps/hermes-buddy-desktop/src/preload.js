@@ -114,7 +114,6 @@ const api = {
   predictEnable: () => invoke('buddy:predict:enable'),
   predictDisable: () => invoke('buddy:predict:disable'),
   predictOneClickOff: () => invoke('buddy:predict:one-click-off'),
-  predictSetModel: (model) => invoke('buddy:predict:set-model', model),
   predictSetSensitivity: (s) => invoke('buddy:predict:set-sensitivity', s),
   predictSetAuthorized: (v) => invoke('buddy:predict:set-authorized', v),
   predictCrystallization: () => invoke('buddy:predict:crystallization'),

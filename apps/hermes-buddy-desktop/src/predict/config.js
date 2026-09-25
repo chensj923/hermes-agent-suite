@@ -14,13 +14,10 @@ const path = require('path');
 const DEFAULT_CONFIG = {
   // 总开关。安装向导里用户授权后才置 true。
   enabled: false,
-  // 运行模式（v4.4）：
-  //   local   = 本地小模型全流程（判断触发 + 思考解答都在本机，隐私最好）
-  //   remote  = 远端全流程（行为上下文 + 截图的「文字描述」发给服务端大模型思考解答）
-  //   hybrid  = 本地 + 远端（本地小模型只负责判断「该不该触发」，触发后交给远端大模型思考解答）
-  // 已移除旧的「纯规则兜底」档位：规则仍作为模型不可用时的静默降级，但不再是用户可选模式。
-  model: 'hybrid',
-  // 本地 VLM 具体用哪个（v4.4：从 model 里拆出来，model 只表示运行模式）
+  // v4.12.0：运行模式已彻底移除，用户不再选择 local/remote/hybrid。
+  // 触发永远由本地确定性规则（app-profiles 画像 + 行为引擎 + 结晶）判断；
+  // 连着远端通道时思考/解答走远端大模型，断线自动退回本机模型，全程无感。
+  // 本地 VLM 具体用哪个
   vlmModel: 'qwen2.5-vl-3b',
   // v4.7：用户指定本地 GGUF 模型/视觉投影文件的绝对路径（空 = 用 userData/vlm 目录里自动下载的那份）
   vlmModelPath: '',
@@ -89,15 +86,6 @@ const DEFAULT_CONFIG = {
   authorized: false
 };
 
-/** v4.4 之前 model 同时表示「模式」和「本地模型 id」，这里把旧值迁移到新语义。 */
-const LEGACY_LOCAL_MODELS = ['qwen2.5-vl-3b', 'smolvlm2'];
-function normalizeModel(m) {
-  if (m === 'remote' || m === 'hybrid') return m;
-  if (LEGACY_LOCAL_MODELS.includes(m)) return 'local';   // 旧的本地模型 id → 本地模式
-  if (m === 'none') return 'local';                      // 旧的纯规则档 → 本地模式（规则降级仍在）
-  return 'local';
-}
-
 class PredictConfig {
   constructor({ dataDir, defaults } = {}) {
     if (!dataDir) throw new Error('PredictConfig 需要 dataDir');
@@ -138,15 +126,16 @@ class PredictConfig {
       // 文件不存在或损坏 → 用默认。注意：不写盘，等 set() 才落盘。
       this._cache = JSON.parse(JSON.stringify(this._defaults));
     }
-    // v4.4 迁移：旧 model 值（纯规则 / 本地模型 id）→ 新模式语义，并把本地模型 id 拆到 vlmModel
-    const raw = this._cache.model;
-    const norm = normalizeModel(raw);
-    if (norm !== raw) {
-      if (LEGACY_LOCAL_MODELS.includes(raw)) this._cache.vlmModel = raw;
-      this._cache.model = norm;
+    // v4.12.0 迁移：彻底移除运行模式。老用户落盘里可能残留 model 键，
+    // 显式删除避免旧值造成困惑；若旧值是本地模型 id，先保留到 vlmModel。
+    const legacyModels = ['qwen2.5-vl-3b', 'smolvlm2'];
+    if (Object.prototype.hasOwnProperty.call(this._cache, 'model')) {
+      const old = this._cache.model;
+      if (legacyModels.includes(old)) this._cache.vlmModel = old;
+      delete this._cache.model;
       dirty = true;
     }
-    if (!LEGACY_LOCAL_MODELS.includes(this._cache.vlmModel)) {
+    if (!legacyModels.includes(this._cache.vlmModel)) {
       this._cache.vlmModel = this._defaults.vlmModel || 'qwen2.5-vl-3b';
       dirty = true;
     }
@@ -177,7 +166,8 @@ class PredictConfig {
   /** 局部合并并落盘。patch 只能包含 config 已知字段。 */
   set(patch) {
     const p = Object.assign({}, patch || {});
-    if (p.model !== undefined) p.model = normalizeModel(p.model);
+    // v4.12.0：运行模式已移除，即便外部（旧 UI/IPC）误传 model 也直接丢弃
+    delete p.model;
     const next = this._merge(this._all(), p);
     this._cache = next;
     this._ensureDir();
@@ -191,4 +181,4 @@ class PredictConfig {
   }
 }
 
-module.exports = { PredictConfig, DEFAULT_CONFIG, normalizeModel };
+module.exports = { PredictConfig, DEFAULT_CONFIG };

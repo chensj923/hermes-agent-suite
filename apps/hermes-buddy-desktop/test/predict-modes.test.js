@@ -1,12 +1,11 @@
 'use strict';
 
 /**
- * v4.4 三档运行模式回归测试：local / remote / hybrid
- * 重点锁住：
- *  1. 旧的 model 值（纯规则 / 本地模型 id）能迁移到新模式语义；
- *  2. remote 模式必须真正调用通道（旧实现被 _hasModelPath 误判成无模型，从未调用过）；
- *  3. hybrid：本地小模型判断「该不该触发」，值得打扰才交给远端思考解答；
- *     本地不可用跳过筛选、远端不可用退回本地结论——两条降级都不静默。
+ * v4.12.0 统一链路回归（运行模式已彻底移除）：
+ *  - 触发永远由本地确定性规则决定，模型只负责触发后的思考/解答；
+ *  - 远端通道可用 → 走远端大模型（默认带原图，远程视觉优先）；
+ *  - 远端未连 / 报错 → 自动退回本机模型，全程无感、不静默；
+ *  - 配置迁移：旧落盘里的 model 键被丢弃，旧本地模型 id 保留到 vlmModel。
  */
 const assert = require('assert');
 const os = require('os');
@@ -15,7 +14,7 @@ const fs = require('fs');
 const { test } = require('node:test');
 
 const { PredictController } = require('../src/predict/predict-controller');
-const { PredictConfig, normalizeModel } = require('../src/predict/config');
+const { PredictConfig } = require('../src/predict/config');
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'pred-mode-'));
@@ -27,11 +26,11 @@ function noopLogger() {
 
 /**
  * @param {object} opts
- * @param {string} opts.model     运行模式
- * @param {function} [opts.predictFn]   本地小模型 fake
+ * @param {function} [opts.predictFn]   本机分析 fake
  * @param {object|null} [opts.channel]  远端通道 fake（null = 通道未连）
+ * @param {object} [opts.modelRunner]   本机 runner fake
  */
-function makeController({ model = 'hybrid', predictFn = null, channel = null, modelRunner = null } = {}) {
+function makeController({ predictFn = null, channel = null, modelRunner = null } = {}) {
   const captured = { suggestion: null, analyzeCalls: 0, thinking: [] };
   const ctrl = new PredictController({
     appDir: tmpDir(),
@@ -48,211 +47,132 @@ function makeController({ model = 'hybrid', predictFn = null, channel = null, mo
     channel,
     modelRunner,
   });
-  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6, autoInsert: false });
+  ctrl.config.set({ enabled: true, authorized: true, confidenceThreshold: 0.6, autoInsert: false });
   return { ctrl, captured };
+}
+
+function channelThat(fn, extra = {}) {
+  return Object.assign({ connected: true, supportsPredict: true, predict: fn }, extra);
 }
 
 // ---------- 1. 配置迁移 ----------
 
-test('normalizeModel：纯规则 / 本地模型 id → local，remote / hybrid 保留', () => {
-  assert.strictEqual(normalizeModel('none'), 'local');
-  assert.strictEqual(normalizeModel('qwen2.5-vl-3b'), 'local');
-  assert.strictEqual(normalizeModel('smolvlm2'), 'local');
-  assert.strictEqual(normalizeModel('remote'), 'remote');
-  assert.strictEqual(normalizeModel('hybrid'), 'hybrid');
-  assert.strictEqual(normalizeModel(undefined), 'local');
-});
-
-test('旧落盘配置（model=qwen2.5-vl-3b）加载后迁移为 local + vlmModel', () => {
+test('旧落盘 model=qwen2.5-vl-3b：加载后丢弃 model 键，本地模型 id 保留到 vlmModel', () => {
   const dir = tmpDir();
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ model: 'qwen2.5-vl-3b' }), 'utf-8');
   const cfg = new PredictConfig({ dataDir: dir });
-  assert.strictEqual(cfg.get('model'), 'local');
+  assert.strictEqual(cfg.get('model'), undefined, 'model 字段应被移除');
   assert.strictEqual(cfg.get('vlmModel'), 'qwen2.5-vl-3b');
 });
 
-test('默认模式为 hybrid，且 vlmModel 默认 qwen2.5-vl-3b', () => {
+test('旧落盘 model=hybrid/remote/none：加载后丢弃 model 键，vlmModel 用默认', () => {
+  for (const m of ['hybrid', 'remote', 'none']) {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ model: m }), 'utf-8');
+    const cfg = new PredictConfig({ dataDir: dir });
+    assert.strictEqual(cfg.get('model'), undefined, m + ' 的 model 键应被丢弃');
+    assert.strictEqual(cfg.get('vlmModel'), 'qwen2.5-vl-3b');
+  }
+});
+
+test('set() 即便误传 model 也会被丢弃', () => {
   const cfg = new PredictConfig({ dataDir: tmpDir() });
-  assert.strictEqual(cfg.get('model'), 'hybrid');
-  assert.strictEqual(cfg.get('vlmModel'), 'qwen2.5-vl-3b');
+  cfg.set({ model: 'remote', sensitivity: 1.2 });
+  assert.strictEqual(cfg.get('model'), undefined);
+  assert.strictEqual(cfg.get('sensitivity'), 1.2);
 });
 
-// ---------- 2. remote 模式 ----------
+// ---------- 2. 远端在线：远端优先 ----------
 
-test('remote 模式：真正调用通道 predict（旧实现误判成无模型，从未调用）', async () => {
+test('远端通道可用：真正调用通道 predict，并默认带截图原图', async () => {
   const calls = [];
-  const channel = {
-    predict: async (ctx, img) => {
-      calls.push({ ctx, img });
-      return { intent: 'api_lookup', confidence: 0.9, suggestion: '把报错贴给我', reason: '远端判断' };
-    },
-  };
-  const { ctrl, captured } = makeController({ model: 'remote', channel });
+  const channel = channelThat(async (ctx, img) => {
+    calls.push({ ctx, img });
+    return { intent: 'api_lookup', confidence: 0.9, suggestion: '把报错贴给我', reason: '远端判断' };
+  });
+  const { ctrl, captured } = makeController({ channel });
   await ctrl.triggerRule('api_lookup');
   assert.strictEqual(calls.length, 1, '远端通道应被调用一次');
-  // v4.11.0：设计前提改为「服务端接的是多模态模型」——图形判断一律走远端，
-  // 默认把原图发给服务端；本机 3B VL 转述丢信息是过去判断不准的根因。
-  assert.strictEqual(calls[0].img, 'B64', '默认应把截图原图发给服务端（远程视觉优先）');
+  assert.strictEqual(calls[0].img, 'B64', '远程视觉优先：默认把原图发给服务端');
   assert.strictEqual(captured.suggestion.intent, 'api_lookup');
-  assert.ok(/远端/.test(captured.suggestion.reason), 'reason 应体现远端来源');
 });
 
-test('remote 模式 + 通道未连：降级为规则预判，仍然弹窗', async () => {
-  const { ctrl, captured } = makeController({ model: 'remote', channel: null });
-  await ctrl.triggerRule('word_writing');
-  assert.ok(captured.suggestion, '通道没连也要弹窗（降级）');
-  assert.ok(/远端通道未连接/.test(captured.suggestion.reason));
-});
-
-// ---------- 3. hybrid 模式 ----------
-
-test('hybrid：本地判断置信度不足 → 到此为止，不惊动远端', async () => {
-  let remoteCalls = 0;
-  const channel = { predict: async () => { remoteCalls += 1; return { intent: 'x', confidence: 0.9, suggestion: 'y' }; } };
+test('远端对象存在但 connected=false → 视为不可用，退回本机', async () => {
+  const channel = channelThat(
+    async () => { throw new Error('不应被调用'); },
+    { connected: false }
+  );
   const { ctrl, captured } = makeController({
-    model: 'hybrid',
     channel,
-    predictFn: async () => ({ intent: 'none', confidence: 0.2, suggestion: '', reason: '没啥事' }),
+    predictFn: async () => ({ intent: 'word_writing', confidence: 0.85, suggestion: '本机续写', reason: '本机判断' }),
   });
-  await ctrl.triggerRule('reading_or_thinking');
-  assert.strictEqual(remoteCalls, 0, '本地判断不该打扰时不应调用远端');
-  assert.strictEqual(captured.suggestion, null, '不该弹窗');
-});
-
-test('hybrid：本地判断值得触发 → 交给远端思考，并把本地判断作为提示带上', async () => {
-  const calls = [];
-  const channel = {
-    predict: async (ctx, img) => {
-      calls.push({ ctx, img });
-      return { intent: 'api_lookup', confidence: 0.95, suggestion: '这行报错的根因是…', reason: '远端分析' };
-    },
-  };
-  const { ctrl, captured } = makeController({
-    model: 'hybrid',
-    channel,
-    predictFn: async () => ({ intent: 'api_lookup', confidence: 0.8, suggestion: '本地初判', reason: '切窗频繁' }),
-  });
-  await ctrl.triggerRule('api_lookup');
-  assert.strictEqual(calls.length, 1, '应调用远端思考');
-  assert.strictEqual(calls[0].ctx.localJudgment.intent, 'api_lookup', '应把本地判断作为提示带上');
-  assert.strictEqual(calls[0].ctx.stage, 'deep_think');
-  assert.strictEqual(captured.suggestion.suggestion, '这行报错的根因是…');
-  assert.ok(/远端思考解答/.test(captured.suggestion.reason), 'reason 应写明 本地判断+远端思考');
-});
-
-test('hybrid：本地模型不可用（没装引擎）→ 跳过筛选，直接问远端', async () => {
-  const calls = [];
-  const channel = {
-    predict: async (ctx) => { calls.push(ctx); return { intent: 'word_writing', confidence: 0.9, suggestion: '帮你续写', reason: 'ok' }; },
-  };
-  const { ctrl, captured } = makeController({ model: 'hybrid', channel, predictFn: null });
   await ctrl.triggerRule('word_writing');
-  assert.strictEqual(calls.length, 1, '本地不可用时仍应走远端');
-  assert.strictEqual(captured.suggestion.suggestion, '帮你续写');
+  assert.strictEqual(captured.suggestion.suggestion, '本机续写', '断线应退回本机结论');
 });
 
-test('hybrid：远端不可用 → 退回本地结论，仍弹窗', async () => {
+// ---------- 3. 远端不可用/报错：退回本机 ----------
+
+test('远端通道未连：退回本机模型，仍然弹窗', async () => {
   const { ctrl, captured } = makeController({
-    model: 'hybrid',
-    channel: null,           // 通道未连 → 远端不可用
-    predictFn: async () => ({ intent: 'data_entry', confidence: 0.85, suggestion: '这个字段我帮你填', reason: '本地判断' }),
+    channel: null,
+    predictFn: async () => ({ intent: 'data_entry', confidence: 0.85, suggestion: '这个字段我帮你填', reason: '本机判断' }),
   });
   await ctrl.triggerRule('data_entry');
-  assert.ok(captured.suggestion, '远端不可用也要给结论');
+  assert.ok(captured.suggestion, '通道没连也要弹窗（本机兜底）');
   assert.strictEqual(captured.suggestion.suggestion, '这个字段我帮你填');
+});
+
+test('远端模型报错：快速退回本机结论（不无限等待、不卡死）', async () => {
+  const start = Date.now();
+  const channel = channelThat(async () => { throw new Error('模型推理失败'); });
+  const { ctrl, captured } = makeController({
+    channel,
+    predictFn: async () => ({ intent: 'word_writing', confidence: 0.8, suggestion: '本机初判', reason: '切窗' }),
+  });
+  await ctrl.triggerRule('word_writing');
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < 10000, `远端报错应快速退回本机，实际 ${elapsed}ms`);
+  assert.ok(captured.suggestion, '远端报错后应仍有本机建议');
+  assert.strictEqual(captured.suggestion.suggestion, '本机初判');
+});
+
+test('远端与本机都不可用：降级为规则模板弹窗，不静默丢弃', async () => {
+  const { ctrl, captured } = makeController({ channel: null, predictFn: null });
+  await ctrl.triggerRule('api_lookup');
+  assert.ok(captured.suggestion, '两层都挂也要降级弹窗');
 });
 
 // ---------- 4. 思考中 loading ----------
 
-test('走模型分析时先弹「思考中」加载态，再换成建议', async () => {
-  const { ctrl, captured } = makeController({
-    model: 'local',
-    predictFn: async () => ({ intent: 'word_writing', confidence: 0.9, suggestion: '帮你续写', reason: 'x' }),
-  });
+test('分析时先弹「思考中」加载态，再换成建议', async () => {
+  const channel = channelThat(async () => ({
+    intent: 'word_writing', confidence: 0.9, suggestion: '帮你续写', reason: 'x',
+  }));
+  const { ctrl, captured } = makeController({ channel });
   await ctrl.triggerRule('word_writing');
   assert.deepStrictEqual(captured.thinking, ['思考中…'], '分析前应先弹思考中');
   assert.ok(captured.suggestion, '分析完应换成建议');
 });
 
-// ---------- 5. v4.8.2 hybrid 冷启动优化 ----------
-
-test('hybrid：本地模型未热启 → 跳过筛选直接问远端', async () => {
-  const calls = [];
-  const channel = {
-    predict: async (ctx) => { calls.push(ctx); return { intent: 'word_writing', confidence: 0.9, suggestion: '帮你续写', reason: 'ok' }; },
-  };
-  const { ctrl, captured } = makeController({
-    model: 'hybrid',
-    channel,
-    predictFn: null,
-    modelRunner: { started: false },
-  });
-  await ctrl.triggerRule('word_writing');
-  assert.strictEqual(calls.length, 1, '本地未热启时应直接走远端');
-  assert.strictEqual(captured.suggestion.suggestion, '帮你续写');
-  assert.ok(!('localJudgment' in calls[0]), '跳过本地筛选时不应带 localJudgment');
-});
-
-test('hybrid：本地模型热启但报错 → 跳过筛选直接问远端', async () => {
-  const calls = [];
-  const channel = {
-    predict: async (ctx) => { calls.push(ctx); return { intent: 'word_writing', confidence: 0.9, suggestion: '帮你续写', reason: 'ok' }; },
-  };
-  const { ctrl, captured } = makeController({
-    model: 'hybrid',
-    channel,
-    predictFn: async () => { throw new Error('模型推理失败'); }, // 报错而非超时
-    modelRunner: { started: true },
-  });
-  await ctrl.triggerRule('word_writing');
-  assert.strictEqual(calls.length, 1, '本地筛选报错时应直接走远端');
-  assert.strictEqual(captured.suggestion.suggestion, '帮你续写');
-});
+// ---------- 5. 本机模型预热 ----------
 
 test('warmLocalModel：已热启时直接返回，未安装时返回未安装', async () => {
   const warm = { started: true, stop() {}, analyze() {} };
-  const { ctrl } = makeController({ model: 'hybrid', modelRunner: warm });
+  const { ctrl } = makeController({ modelRunner: warm });
   const r1 = await ctrl.warmLocalModel();
   assert.strictEqual(r1.ok, true, '已热启应直接返回 ok');
   assert.ok(/已就绪/.test(r1.reason));
 
-  const { ctrl: ctrl2 } = makeController({ model: 'hybrid', modelRunner: null, buildRunner: null });
+  const { ctrl: ctrl2 } = makeController({ modelRunner: null });
   const r2 = await ctrl2.warmLocalModel();
   assert.strictEqual(r2.ok, false, '无 runner 且无 buildRunner 应返回未安装');
   assert.ok(/未安装/.test(r2.reason));
 });
 
-// ---------- 6. v4.8.4 思考超时与弹窗前置 ----------
-
-test('hybrid：远端模型报错 → 快速退回本地结论（不无限等待、不卡死）', async () => {
-  const start = Date.now();
-  const channel = {
-    predict: async () => { throw new Error('模型推理失败'); }, // 报错而非超时：应快速退回本地结论
-  };
-  const { ctrl, captured } = makeController({
-    model: 'hybrid',
-    channel,
-    predictFn: async () => ({ intent: 'word_writing', confidence: 0.8, suggestion: '本地初判', reason: '切窗' }),
-  });
-  await ctrl.triggerRule('word_writing');
-  const elapsed = Date.now() - start;
-  assert.ok(elapsed < 10000, `远端报错应快速退回本地结论而非卡住，实际 ${elapsed}ms`);
-  assert.ok(captured.suggestion, '远端报错后应仍有建议（退回本地结论）');
-  assert.ok(/远端不可用，已退回本地结论/.test(captured.suggestion.reason), 'reason 应注明已退回本地结论');
-});
-
-test('remote：远端模型报错 → 降级为规则预判，不永久卡住', async () => {
-  const channel = {
-    predict: async () => { throw new Error('模型推理失败'); },
-  };
-  const { ctrl, captured } = makeController({ model: 'remote', channel });
-  await ctrl.triggerRule('api_lookup');
-  assert.ok(captured.suggestion, '远端报错应降级弹窗');
-  assert.ok(/模型未就绪，已降级为行为规则预判/.test(captured.suggestion.reason));
-});
+// ---------- 6. 思考安全网 ----------
 
 test('onThinkingTimeout：面板安全网触发时降级为规则模板弹窗', async () => {
-  const { ctrl, captured } = makeController({ model: 'hybrid' });
+  const { ctrl, captured } = makeController();
   ctrl.engine.state = 'ANALYZING';
   ctrl.engine._pending = { rule: 'word_writing', reason: 'generic_pause', context: ctrl.engine._snapshot() };
   ctrl._processing = true;
