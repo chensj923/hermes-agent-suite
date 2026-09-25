@@ -54,7 +54,9 @@ function makeController({ model = 'hybrid', channel = null, predictFn = null, de
     channel,
     modelRunner,
   });
-  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6, autoInsert: false });
+  // 本机 VL 链路回归：显式关掉远端视觉（v4.11.0 起默认是走远端视觉的，
+  // 这些用例测的是「服务端是纯文本模型」时的降级链路）。
+  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6, autoInsert: false, sendImageToServer: false, remoteVision: false });
   return { ctrl, captured };
 }
 
@@ -69,9 +71,13 @@ function okChannel(sink) {
 
 // ---------- 1. 默认不发原图 ----------
 
-test('默认配置：sendImageToServer=false（服务端不要求有多模态能力）', () => {
+test('默认配置：sendImageToServer=true + remoteVision=true（v4.11.0 远程视觉优先）', () => {
   const { ctrl } = makeController();
-  assert.strictEqual(ctrl.config.get('sendImageToServer'), false);
+  // 注意：makeController 为测本机 VL 链路显式关了远端视觉，这里直接读默认配置
+  const cfg = new (require('../src/predict/config').PredictConfig)({ dataDir: tmpDir() });
+  assert.strictEqual(cfg.get('sendImageToServer'), true);
+  assert.strictEqual(cfg.get('remoteVision'), true);
+  assert.ok(ctrl, 'controller 构造成功');
 });
 
 test('hybrid：本机 VL 已给出 observation → 远端只收文字，不带原图', async () => {
@@ -178,13 +184,14 @@ test('sendImageToServer=true：按旧行为把原图发给服务端（部署确�
     channel: okChannel(calls),
     describeFn: async () => { describeCalls += 1; return 'y'; },
   });
-  ctrl.config.set({ sendImageToServer: true });
+  // v4.11.0：发原图需要同时开 sendImageToServer 与 remoteVision
+  ctrl.config.set({ sendImageToServer: true, remoteVision: true });
   await ctrl.triggerRule('word_writing');
   assert.strictEqual(calls[0].img, 'B64', '显式开启时应发原图');
   assert.strictEqual(describeCalls, 0, '发原图时无需再本地描述');
 });
 
-test('remote 模式默认：不带图，服务端只收文字', async () => {
+test('remoteVision=false：退回本机 VL 描述，不带原图', async () => {
   const calls = [];
   const { ctrl } = makeController({
     model: 'remote',
@@ -193,7 +200,7 @@ test('remote 模式默认：不带图，服务端只收文字', async () => {
     modelRunner: { started: true },
   });
   await ctrl.triggerRule('api_lookup');
-  assert.ok(!calls[0].img, 'remote 模式默认也不发原图');
+  assert.ok(!calls[0].img, '关掉远端视觉时不发原图');
   assert.strictEqual(calls[0].ctx.screenObservation, 'IDE 里一段 Python 报错栈');
 });
 

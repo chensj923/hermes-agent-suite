@@ -721,7 +721,7 @@ function registerIpc() {
             const proxyEnv = result.proxy_env || 'no';
             // 与 src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION 保持一致
             const REQUIRED_CHANNEL_VERSION = '2.3';
-            const REQUIRED_CHANNEL_BUILD = 13;
+            const REQUIRED_CHANNEL_BUILD = 14;
             const verAtLeast = (v, req) => {
               if (!v || v === 'none') return false;
               const a = String(v).split('.').map((n) => parseInt(n, 10) || 0);
@@ -1218,10 +1218,11 @@ async function bootstrap() {
       captureTargetWindowFn: (o) => captureForegroundWindow(Object.assign({}, o, { logger })),
       // v4.10.2：「生成并插入」的内容生成——走同一条远端通道，
       // 服务端按 stage=generate_content 走生成分支返回 {content}
-      generateContentFn: (payload) => {
+      generateContentFn: (payload, image) => {
         const ch = manager && manager.channel ? manager.channel : null;
         if (!ch) return Promise.reject(new Error('远端通道未连接'));
-        return ch.predict(payload, null);
+        // v4.11.0：开启远端视觉时把截图一起发过去，服务端多模态直接看画面生成
+        return ch.predict(payload, image || null);
       },
       // 远端预测模式（model='remote'）需要通道客户端。manager.channel 在通道模式连接后才有值，
       // predict-controller._analyze 在运行时通过 resolveChannel 惰性取最新的，不锁死在构造时刻。

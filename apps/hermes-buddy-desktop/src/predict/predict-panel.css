@@ -215,6 +215,72 @@ body {
   margin-bottom: 10px;
 }
 
+/* v4.11.0：应用标签（识别到哪个应用、哪一类） */
+.app-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.app-tag .app-name { color: var(--text); font-weight: 600; }
+.app-tag .app-cat {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+}
+.app-tag .app-game {
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+}
+
+/* v4.11.0：应用画像的 3 个常用行为，点一下就照做 */
+.behaviors {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.behaviors[hidden] { display: none !important; }
+.behavior {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.behavior:hover { border-color: var(--accent); background: #2b3446; }
+.behavior .b-name { font-weight: 600; flex: 0 0 auto; }
+.behavior .b-hint {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.behavior .b-flag {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
 .actions {
   display: flex;
   gap: 8px;

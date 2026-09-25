@@ -27,6 +27,9 @@
   const elTopicBox = $('topic-box');
   const elTopicHint = $('topic-hint');
   const elTopicInput = $('topic-input');
+  // v4.11.0：应用标签 + 这个应用最常用的 3 个行为
+  const elAppTag = $('app-tag');
+  const elBehaviors = $('behaviors');
 
   // 不同意图给个轻量标签色，纯视觉
   const INTENT_LABEL = {
@@ -106,6 +109,79 @@
   // v4.10.27：当前是否处于「需要用户给主题」的状态
   let needTopic = false;
 
+  /**
+   * v4.11.0：渲染「这个应用最常用的 3 个行为」。
+   * 用户点哪个就按哪个直接做，不必再让模型猜现在在干嘛。
+   */
+  // v4.11.0：首选行为 id——主按钮「按「X」生成」回传它，保证与点该行为等价
+  let firstBehaviorId = '';
+  function renderBehaviors(d) {
+    firstBehaviorId = '';
+    while (elBehaviors.firstChild) elBehaviors.removeChild(elBehaviors.firstChild);
+    const list = Array.isArray(d && d.behaviors) ? d.behaviors : [];
+    if (!list.length) {
+      elBehaviors.hidden = true;
+      btnGenerate.textContent = '生成并插入';
+      return;
+    }
+    for (const b of list) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'behavior';
+      const name = document.createElement('span');
+      name.className = 'b-name';
+      name.textContent = b.name || '';
+      const hint = document.createElement('span');
+      hint.className = 'b-hint';
+      hint.textContent = b.hint || '';
+      btn.appendChild(name);
+      btn.appendChild(hint);
+      if (b.auto) {
+        const flag = document.createElement('span');
+        flag.className = 'b-flag';
+        flag.textContent = '常用';
+        btn.appendChild(flag);
+      }
+      btn.addEventListener('click', () => {
+        if (needTopic && !readTopic()) {
+          elTopicHint.textContent = '请先输入要写的主题（或点「稍后」跳过）';
+          elTopicHint.classList.add('warn');
+          try { elTopicInput.focus(); } catch (_) {}
+          return;
+        }
+        decide('behavior', readTopic(), b.id);
+      });
+      elBehaviors.appendChild(btn);
+    }
+    elBehaviors.hidden = false;
+    firstBehaviorId = String(list[0].id || '');
+    // 主按钮跟着首选行为走，避免「直接生成」和「点行为」两条路径给出不同结果
+    btnGenerate.textContent = '按「' + (list[0].name || '首选') + '」生成';
+  }
+
+  /** v4.11.0：渲染应用标签（识别到哪个应用 / 哪一类 / 是否游戏）。 */
+  function renderAppTag(d) {
+    while (elAppTag.firstChild) elAppTag.removeChild(elAppTag.firstChild);
+    const p = d && d.appProfile;
+    if (!p) { elAppTag.hidden = true; return; }
+    const name = document.createElement('span');
+    name.className = 'app-name';
+    name.textContent = p.name || '';
+    elAppTag.appendChild(name);
+    if (p.isGame) {
+      const g = document.createElement('span');
+      g.className = 'app-game';
+      g.textContent = '游戏';
+      elAppTag.appendChild(g);
+    } else if (p.categoryLabel) {
+      const c = document.createElement('span');
+      c.className = 'app-cat';
+      c.textContent = p.categoryLabel;
+      elAppTag.appendChild(c);
+    }
+    elAppTag.hidden = false;
+  }
+
   function showCard(data) {
     showThinking(false);
     const d = data || {};
@@ -113,6 +189,8 @@
     elSuggestion.textContent = (label ? '【' + label + '】' : '') + (d.suggestion || '这里或许可以帮到你');
     elReason.textContent = d.reason || '';
     elReason.hidden = !d.reason;
+    renderAppTag(d);
+    renderBehaviors(d);
 
     needTopic = Boolean(d.needTopic);
     elTopicBox.hidden = !needTopic;
@@ -138,8 +216,8 @@
   if (api && api.onCardHide) api.onCardHide(() => hideCard());
   if (api && api.onClose) api.onClose(() => { try { window.close(); } catch (_) {} });
 
-  function decide(choice, topic) {
-    if (api && api.decide) api.decide(choice, topic || '');
+  function decide(choice, topic, behaviorId) {
+    if (api && api.decide) api.decide(choice, topic || '', behaviorId || '');
   }
 
   function readTopic() {
@@ -153,7 +231,7 @@
       try { elTopicInput.focus(); } catch (_) {}
       return;
     }
-    decide('generate', readTopic());
+    decide('generate', readTopic(), firstBehaviorId);
   });
   btnLater.addEventListener('click', () => decide('later'));
   if (btnNever) btnNever.addEventListener('click', () => decide('never'));

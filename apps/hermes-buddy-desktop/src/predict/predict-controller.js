@@ -24,6 +24,9 @@ const { createBehaviorHooks, detectAntivirus } = require('./behavior-hooks');
 const { ActionExecutor } = require('./action-executor');
 const { titleToApp } = require('./win-info');
 const { createSceneWatcher, normalizeSceneRules } = require('./scene-rules');
+// v4.11.0：应用画像库（约 100 种软件 × 3 个常用行为）与结晶引擎（长期记忆）
+const { lookupApp, behaviorsOf, behaviorById, isGame, CATEGORY_LABEL } = require('./app-profiles');
+const { CrystalEngine } = require('./crystal-engine');
 
 /** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」。
 /**
@@ -76,6 +79,14 @@ const CAPTURE_AWAIT_TIMEOUT_MS = (() => {
   const raw = Number(process.env.HERMES_CAPTURE_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 30000;
 })();      // 取截图源等待上限（getSources 挂起保护，v4.10.41 从 15s 提至 30s）
+// v4.11.0：应用画像触发的每应用冷却——切回同一个应用不会反复弹行为卡片
+const APP_PROFILE_COOLDOWN_MS = (() => {
+  const raw = Number(process.env.HERMES_APP_COOLDOWN_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 10 * 60 * 1000;
+})();
+// v4.11.0：结晶自动放行门槛——该行为被接受过这么多次且接受率够高，就不再问，直接干
+const CRYSTAL_AUTO_ACCEPTS = 2;
+const CRYSTAL_AUTO_CONFIDENCE = 0.6;
 
 /** v4.8.8：_withTimeout 轨迹回调（由控制器构造时注入 logger），用于定位「30s 定时器未触发」问题。 */
 let _timeoutTrace = null;
@@ -104,6 +115,16 @@ function _withTimeout(promise, ms, message) {
       }, ms);
     }),
   ]);
+}
+
+/**
+ * v4.11.0：判断远端是否吃不下图片。
+ * 上游若是纯文本模型，收到 image_url 会直接报错（实测 volcengine-coding:
+ * 「Model only support text input」）。这种时候退回本机 VL 转文字的老链路。
+ */
+function _visionUnsupported(result, errMsg) {
+  const text = String((result && (result.error || result.reason)) || '') + ' ' + String(errMsg || '');
+  return /(only\s*support\s*text|does\s*not\s*support\s*(image|vision)|vision_unsupported|image_unsupported|不支持图|不支持图像|not\s*a\s*multimodal|multimodal\s*not\s*supported)/i.test(text);
 }
 
 /** 规则 → 无模型时的兜底建议模板（model='none' 时使用）。 */
@@ -237,6 +258,110 @@ class PredictController {
     // v4.10.24：场景规则（结晶场景）监视器。规则表存 config.sceneRules，
     // 未配置时用内置默认（WPS 写作/润色 + 微信/QQ 回复）。
     this._sceneWatcher = createSceneWatcher(this.config.get('sceneRules'));
+    // v4.11.0：结晶引擎（本地长期记忆）+ 应用画像触发的每应用冷却表
+    this.crystal = new CrystalEngine({ dataDir: path.join(this.appDir, 'predict'), logger: this.logger });
+    this._appLastFired = {};
+    this._lastProfile = null;   // 最近命中的应用画像（供生成阶段取行为 prompt）
+  }
+
+  // ---------------- 应用画像 + 结晶（v4.11.0） ----------------
+
+  /**
+   * 命中应用画像后，组装一张「这个应用最常用的 3 件事」卡片。
+   * 行为顺序按结晶置信度排（你常接受的行为自动排到第一个），
+   * 结晶足够强的行为会被标记 auto，面板阶段可直接放行不再问。
+   */
+  _profileSuggestion(hit, wi) {
+    const profile = hit.profile;
+    const behaviors = behaviorsOf(profile).map((b) => {
+      const s = this.crystal.scoreOf(profile.id, b.id);
+      return Object.assign({}, b, {
+        confidence: s.confidence,
+        hits: s.hits,
+        // 自动放行：接受过 ≥2 次且接受率 ≥0.6，且该行为是可以插进文档的（不是给建议的）
+        auto: b.insert && !s.retired && s.accepts >= CRYSTAL_AUTO_ACCEPTS && s.confidence >= CRYSTAL_AUTO_CONFIDENCE,
+      });
+    });
+    behaviors.sort((a, b) => {
+      if (a.auto !== b.auto) return a.auto ? -1 : 1;
+      return (b.confidence || 0) - (a.confidence || 0);
+    });
+    const top = behaviors[0];
+    return {
+      intent: top.intent,
+      suggestion: top.suggestion,
+      reason: '应用画像：' + profile.name + (isGame(profile) ? '（游戏）' : ''),
+      confidence: 1,
+      appProfile: {
+        id: profile.id,
+        name: profile.name,
+        category: profile.category,
+        categoryLabel: CATEGORY_LABEL[profile.category] || profile.category,
+        isGame: isGame(profile),
+        exeName: (wi && wi.exeName) || '',
+      },
+      behaviors: behaviors.map((b) => ({
+        id: b.id, name: b.name, intent: b.intent,
+        hint: b.suggestion, insert: b.insert, auto: b.auto,
+        confidence: b.confidence,
+      })),
+      // 默认方向：排第一的行为的 prompt，用户不点行为直接「生成」时用它
+      behaviorPrompt: top.prompt || '',
+      behaviorId: top.id,
+    };
+  }
+
+  /** 记录一次行为模式（命中应用画像 / 每次主动推测都记）。 */
+  _recordBehavior(profileId, behaviorId, intent, text, proactive) {
+    try {
+      this.crystal.record({ appId: profileId, behaviorId, intent, text, proactive: !!proactive });
+    } catch (e) {
+      this.logger.warn('crystal-record-failed', { error: e.message });
+    }
+  }
+
+  /** 记录用户对某行为接受/拒绝。 */
+  _recordOutcome(profileId, behaviorId, accepted) {
+    try {
+      return this.crystal.recordOutcome({ appId: profileId, behaviorId }, accepted);
+    } catch (e) {
+      this.logger.warn('crystal-outcome-failed', { error: e.message });
+      return null;
+    }
+  }
+
+  /**
+   * 后台结晶：第二次及以后打开应用时静默跑一次，淘汰过期/不爱用的预测，
+   * 固化新的高频高接受率行为。不阻塞主线程（纯本地 JSON 计算）。
+   */
+  async runBackgroundCrystal(force) {
+    try {
+      if (!force && !this.crystal.shouldCrystal()) return null;
+      const before = this.crystal.summary();
+      const result = this.crystal.crystallize();
+      this.logger.info('crystal-background', { before, result });
+      this._logEntry({
+        phase: 'crystal',
+        status: 'ok',
+        added: result.added.length,
+        retired: result.retired.length,
+        kept: result.kept,
+      });
+      return result;
+    } catch (e) {
+      this.logger.warn('crystal-background-failed', { error: e.message });
+      return null;
+    }
+  }
+
+  /** 结晶摘要（设置面板展示）。 */
+  getCrystalSummary() {
+    try { return this.crystal.summary(); } catch (_) { return { patterns: 0, predictions: 0, events: 0, lastCrystalAt: 0, runs: 0 }; }
+  }
+
+  /** 某应用当前结晶出的预测（设置面板 / 调试用）。 */
+  getCrystalPredictions(appId) {
+    try { return this.crystal.predictionsFor(appId); } catch (_) { return []; }
   }
 
   // ---------------- 目标窗口捕获（v4.10.27） ----------------
@@ -331,6 +456,16 @@ class PredictController {
   async onWindowChange(wi) {
     try {
       if (!this.isEnabled() || this._processing) return;
+      // v4.11.0：应用画像优先——命中就把这个应用最常用的 3 件事直接摆出来，
+      // 不再让远端模型从零猜「用户现在在干嘛」（过去触发率和准确度都差在这一步）。
+      if (this.config.get('appProfilesEnabled') !== false) {
+        const hit = lookupApp(wi);
+        if (hit && this._profileCooldownOk(hit.profile.id)) {
+          this._appLastFired[hit.profile.id] = Date.now();
+          await this._onProfileHit(hit, wi);
+          return;
+        }
+      }
       if (this.config.get('sceneRulesEnabled') === false) return;
       const rule = this._sceneWatcher.feed(wi);
       if (!rule || !this.panel) return;
@@ -373,6 +508,123 @@ class PredictController {
       this._applyDecision(choice, 'scene:' + rule.id, suggestion);
     } catch (e) {
       this.logger.warn('scene-rule-error', { error: e.message });
+    }
+  }
+
+  /** 每应用冷却：切回同一个应用不会反复弹行为卡片。 */
+  _profileCooldownOk(profileId) {
+    const last = this._appLastFired[profileId] || 0;
+    return Date.now() - last >= APP_PROFILE_COOLDOWN_MS;
+  }
+
+  /**
+   * 应用画像命中：展示该应用最常用的 3 个行为，让用户点一下就走。
+   * 结晶里接受率足够高的行为（auto）直接放行，不再打扰用户确认。
+   */
+  async _onProfileHit(hit, wi) {
+    const profile = hit.profile;
+    this._lastProfile = profile;
+    const suggestion = this._profileSuggestion(hit, wi);
+    const game = isGame(profile);
+    this._beginFlowStep('应用画像：' + profile.name + (game ? '（游戏）' : ''));
+    this._step('trigger', {
+      title: '识别到应用',
+      status: 'done',
+      detail: profile.name + '（' + (CATEGORY_LABEL[profile.category] || profile.category) + '）',
+    });
+    // 画像路径不截图也不跑 VL——直接给行为，命中即达
+    this._lastObservation = '';
+    this._lastWindowTitle = String((wi && wi.title) || '');
+    this.logger.info('app-profile-hit', {
+      id: profile.id, exeName: wi && wi.exeName, category: profile.category, game,
+    });
+    this._logEntry({
+      phase: 'trigger',
+      rule: 'app:' + profile.id,
+      reason: '应用画像: ' + profile.name,
+      appProfile: profile.id,
+    });
+    // 每次命中都把行为模式记下来（供结晶判断哪些行为是真需求）
+    for (const b of suggestion.behaviors) {
+      this._recordBehavior(profile.id, b.id, b.intent, b.hint, false);
+    }
+
+    // 结晶出的常用行为：直接执行，不再问
+    const auto = suggestion.behaviors.find((b) => b.auto);
+    if (auto && this.config.get('autoInsert') === true) {
+      this._step('decide', { title: '按你的习惯直接执行', status: 'done', detail: '「' + auto.name + '」你常用，已自动执行' });
+      this._runBehavior(profile, auto.id, suggestion, '');
+      return;
+    }
+
+    this._decorateSuggestion(suggestion);
+    if (game) {
+      // 游戏不需要手填主题：看画面给建议就行
+      suggestion.needTopic = false;
+      suggestion.topicHint = '';
+    }
+    let choice = 'later';
+    try {
+      choice = await _withTimeout(
+        this.panel.show(suggestion),
+        PANEL_SHOW_AWAIT_TIMEOUT_MS,
+        '应用画像浮窗等待超时'
+      );
+    } catch (e) {
+      this.logger.warn('app-profile-panel-show-timeout', { error: e.message });
+      try { this.panel.dismissAwaiting(); } catch (_) {}
+      choice = 'later';
+    }
+    await this._applyProfileDecision(choice, profile, suggestion);
+  }
+
+  /**
+   * 处理画像卡片上的用户决策。
+   * choice 可能是字符串（旧协议）或 {choice, topic, behaviorId}（v4.11.0 行为选择）。
+   */
+  async _applyProfileDecision(choice, profile, suggestion) {
+    let c = 'later';
+    let topic = '';
+    let behaviorId = '';
+    if (choice && typeof choice === 'object') {
+      c = String(choice.choice || 'later');
+      topic = String(choice.topic || '');
+      behaviorId = String(choice.behaviorId || '');
+    } else {
+      c = String(choice || 'later');
+    }
+    const accepted = c === 'generate' || c === 'behavior';
+    const targetId = behaviorId || (suggestion && suggestion.behaviorId) || '';
+    this._recordOutcome(profile.id, targetId, accepted);
+    this.logger.info('app-profile-decision', { appId: profile.id, behaviorId: targetId, choice: c, accepted });
+    if (!accepted) return;
+    await this._runBehavior(profile, targetId, suggestion, topic);
+  }
+
+  /**
+   * 执行一个画像行为：生成内容 → 可插入的行为打进窗口，建议类（游戏等）只展示+剪贴板。
+   */
+  async _runBehavior(profile, behaviorId, suggestion, topic) {
+    const b = behaviorById(profile, behaviorId) || (suggestion && suggestion.behaviors && suggestion.behaviors.find((x) => x.id === behaviorId)) || null;
+    const exec = Object.assign({}, suggestion || {}, {
+      intent: (b && b.intent) || (suggestion && suggestion.intent) || 'generic_help',
+      behaviorPrompt: (b && b.prompt) || (suggestion && suggestion.behaviorPrompt) || '',
+      behaviorId: behaviorId,
+      behaviorName: (b && b.name) || '',
+      // 建议类行为不往窗口里打字（游戏里打字 = 事故），只展示 + 写剪贴板
+      noInsert: b ? !b.insert : true,
+      appProfile: (suggestion && suggestion.appProfile) || { id: profile.id, name: profile.name },
+    });
+    this._step('deliver', {
+      title: '执行：' + ((b && b.name) || behaviorId),
+      status: 'pending',
+      detail: b && b.insert ? '生成后将写入当前窗口' : '生成后只展示（不写入窗口）',
+    });
+    try {
+      await this._generateAndDeliver(exec, topic || '');
+    } catch (e) {
+      this.logger.warn('app-profile-behavior-failed', { error: e.message });
+      this._step('deliver', { title: '执行失败', status: 'fail', detail: String(e.message || '生成异常') });
     }
   }
 
@@ -446,6 +698,9 @@ class PredictController {
     this._enabled = true;
     // v4.8.2：后台预热本地模型，让 local/hybrid 的下次触发不走冷启动
     this.warmLocalModel().catch(() => {});
+    // v4.11.0：后台结晶——第二次及以后打开应用时静默跑一次：
+    // 淘汰过期/不爱用的预测，固化新的高频高接受率行为（纯本地计算，不阻塞启用）
+    this.runBackgroundCrystal().catch(() => {});
     this.logger.info('predict-enabled');
     return this.getStatus();
   }
@@ -856,12 +1111,26 @@ class PredictController {
   _applyDecision(choice, rule, suggestion) {
     let picked = choice;
     let topic = '';
+    let behaviorId = '';
     if (choice && typeof choice === 'object') {
-      picked = choice.choice;
+      picked = choice.choice || 'later';
       topic = String(choice.topic || '').trim();
+      behaviorId = String(choice.behaviorId || '').trim();
     }
-    if (picked === 'generate') {
+    // v4.11.0：应用画像路径——把接受/拒绝记进结晶，下次就更懂你
+    const prof = suggestion && suggestion.appProfile;
+    if (prof && prof.id) {
+      const bid = behaviorId || (suggestion && suggestion.behaviorId) || '';
+      this._recordOutcome(prof.id, bid, picked === 'generate' || picked === 'behavior');
+    }
+    if (picked === 'generate' || picked === 'behavior') {
       this.engine.userDecision(true);
+      // v4.11.0：点了某个具体行为 → 按该行为的方向生成（游戏类只展示不插入）
+      if (picked === 'behavior' && prof && prof.id && this._lastProfile) {
+        this._runBehavior(this._lastProfile, behaviorId || (suggestion && suggestion.behaviorId) || '', suggestion, topic)
+          .catch((e) => this.logger.warn('app-profile-behavior-failed', { error: e.message }));
+        return;
+      }
       // v4.10.2：「生成并插入」不再把建议问句填进剪贴板（旧实现把
       // "需要我帮你总结吗？"这种话术当成了"内容"，8 秒后还会被恢复机制
       // 冲掉，用户点了等于没点）。改为真正调远端生成一段可粘贴的内容，
@@ -946,6 +1215,9 @@ class PredictController {
     // 计数，测试断言「远端只被调一次」；且生成失败也不该影响主流程。
     if (typeof this._generateContentFn === 'function') {
       try {
+        // v4.11.0：开启远端视觉时把截图一并上行——生成阶段也直接看图，
+        // 不再依赖本机 VL 那句「光标在文档中」的转述。
+        const _genImage = this._allowRemoteImage() ? (this._lastImageBase64 || null) : null;
         const res = await this._generateContentFn({
           stage: 'generate_content',
           rule: (suggestion && suggestion.intent) || '',
@@ -955,11 +1227,12 @@ class PredictController {
           windowTitle: this._lastWindowTitle || '',   // v4.10.23：文档名主题锚点
           // v4.10.24：场景规则自定义提示词方向（用户在设定框里写的推测方向）
           // v4.10.27：浮窗里手填的主题优先级最高——空白文档场景下它是唯一素材
+          // v4.11.0：应用画像行为的 prompt 作为方向（用户点了某个具体行为）
           direction: _topic
             ? ('用户指定主题：' + _topic + '。请围绕该主题撰写正文内容。')
-            : ((suggestion && suggestion.sceneRule && suggestion.sceneRule.prompt) || ''),
+            : ((suggestion && suggestion.behaviorPrompt) || (suggestion && suggestion.sceneRule && suggestion.sceneRule.prompt) || ''),
           topic: _topic,   // 结构化透传（老服务端忽略该字段也不影响）
-        });
+        }, _genImage);
         if (res && typeof res.content === 'string' && res.content.trim()) {
           content = res.content.trim();
           this.logger.info('predict-generate-ok', { chars: content.length, content_preview: content.slice(0, 500) });
@@ -1023,6 +1296,20 @@ class PredictController {
       this._step('gen', { title: '无内容可插入', status: 'warn', detail: '生成返回为空，已停止插入' });
       if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
       return;
+    }
+    // v4.11.0：建议类行为（游戏攻略/过程推荐等）只展示 + 写剪贴板，
+    // 绝不往当前窗口里打字——在游戏里模拟输入是事故。
+    if (suggestion && suggestion.noInsert) {
+      try {
+        if (this.actionExecutor) await this.actionExecutor.execute({ type: 'clipboard-keep', text: content });
+      } catch (_) {}
+      this._step('deliver', {
+        title: '已生成建议',
+        status: 'done',
+        detail: content.length > 180 ? content.slice(0, 180) + '…' : content,
+      });
+      if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
+      return content;
     }
     if (this.actionExecutor) {
       // v4.10.24：insertMode 配置决定回填方式。
@@ -1163,6 +1450,8 @@ class PredictController {
 
   /** 本地或远端模型推断。mode: local | remote | hybrid */
   async _analyze(behaviorContext, imageBase64) {
+    // v4.11.0：留一份最新截图——生成阶段可带图上行，让服务端多模态直接看画面
+    if (imageBase64) this._lastImageBase64 = imageBase64;
     const mode = this.config.get('model');
     let analyzePromise;
     let timeoutMs;
@@ -1238,16 +1527,23 @@ class PredictController {
         this.logger.info('predict-remote-reuse-inflight');
         return this._remotePromise;
       }
-      // v4.10.0：截图本地消化。
-      // 不能假设服务端有视觉模型——纯文本 LLM / coding 模型收到图片会直接报错
-      // （实测 volcengine-coding: 「Model only support text input」）。
-      // 因此默认把截图交给本机 VL 模型读成一段文字描述（screenObservation），
-      // 服务端只收到文字。只有用户明确开启 sendImageToServer 才发原图。
-      const allowImage = this.config.get('sendImageToServer') === true;
+      // v4.11.0：远程视觉优先。
+      // 设计前提改成「服务端接的是多模态模型」——图形判断一律交给远端，
+      // 本机 3B VL 只读屏转述会丢信息（实测只输出"光标在文档中"这类空话），
+      // 是过去意图判断不准的根因之一。只有远端明确吃不下图片时，才退回本机 VL。
+      const remoteVision = this.config.get('remoteVision') !== false;
+      const allowImage = this.config.get('sendImageToServer') !== false && remoteVision;
       let image = imageBase64;
       let observation = '';
-      if (imageBase64 && !allowImage) {
-        this._step('vl', { title: '本机视觉模型读图中', status: 'pending', detail: '把截图读成文字描述' });
+      if (imageBase64 && allowImage) {
+        this._step('vl', { title: '远端视觉模型看图', status: 'pending', detail: '截图已随请求上传，由服务端多模态模型判断' });
+        this.logger.info('predict-vision-remote', { imageChars: imageBase64.length, remoteVision: true });
+        // 本地筛选阶段若顺带产出了 observation，一并带上（多一路线索，不冲突）
+        if (localJudgment && typeof localJudgment.observation === 'string' && localJudgment.observation.trim()) {
+          observation = localJudgment.observation.trim();
+        }
+      } else if (imageBase64) {
+        this._step('vl', { title: '本机视觉模型读图中', status: 'pending', detail: '把截图读成文字描述（未开启远端视觉）' });
         observation = await this._localVisionToText(behaviorContext, imageBase64, localJudgment);
         image = null;
         // v4.10.1：把描述内容截断进日志——出了「建议驴唇不对马嘴」的问题时
@@ -1299,6 +1595,15 @@ class PredictController {
         const result = await this._remotePromise;
         // v4.10.3：服务端 JSON 解析失败时可能把 ```json 围栏原文塞进 suggestion
         this._cleanRemoteResult(result);
+        // v4.11.0：远端吃不下图片（上游是纯文本模型）→ 退回本机 VL 转文字再问一次
+        if (image && _visionUnsupported(result)) {
+          this._step('vl', { title: '远端不支持图片', status: 'warn', detail: '改用本机视觉模型读图后重试' });
+          try {
+            return await this._retryWithLocalVision(ch, ctx, imageBase64, localJudgment);
+          } catch (e2) {
+            this.logger.warn('predict-vision-fallback-failed', { error: e2.message });
+          }
+        }
         // v4.10.1：远端结论落日志——suggestion/reason 是排查「提示不对」的第一现场。
         this.logger.info('predict-remote-result', {
           windowClass: ctx.windowClass || null,
@@ -1316,6 +1621,14 @@ class PredictController {
         });
         return result;
       } catch (e) {
+        // v4.11.0：带图的远端请求直接失败（上游拒图/超时）→ 用本机 VL 描述再试一次
+        if (image) {
+          try {
+            return await this._retryWithLocalVision(ch, ctx, imageBase64, localJudgment);
+          } catch (e2) {
+            this.logger.warn('predict-vision-fallback-failed', { error: e2.message });
+          }
+        }
         this._step('remote', { title: '远端未回馈', status: 'fail', detail: String(e.message || '远端推理失败') + '，将降级处理' });
         throw e;
       } finally {
@@ -1326,6 +1639,30 @@ class PredictController {
     // 通道还没连上：抛错交给上层——remote 模式降级为规则预判，hybrid 模式退回本地结论。
     // （早期版本在这里直接返回兜底模板，导致混合模式下本地结论被通用话术覆盖。）
     throw new Error('远端通道未连接');
+  }
+
+  /**
+   * v4.11.0：远端吃不下图片时的退路——把截图交给本机 VL 读成文字，再问一次（不带图）。
+   * 本机 VL 冷启动/不可用时抛错，由调用方决定继续降级还是放弃。
+   */
+  async _retryWithLocalVision(ch, ctx, imageBase64, localJudgment) {
+    this._step('vl', { title: '改用本机视觉模型读图', status: 'pending', detail: '把截图读成文字描述后重新提问' });
+    const observation = await this._localVisionToText(ctx, imageBase64, localJudgment);
+    if (!observation) throw new Error('本机视觉模型不可用，无法降级');
+    const ctx2 = Object.assign({}, ctx);
+    ctx2.screenObservation = observation;
+    ctx2.visionFallback = true;   // 让服务端知道这次是文字描述，不再是原图
+    this._lastObservation = observation;
+    this.logger.info('predict-vision-fallback', { observationPreview: observation.slice(0, 120) });
+    this._step('vl', { title: '本机视觉读图完成', status: 'done', detail: '已读图（' + observation.length + ' 字），重新提问中' });
+    const result = await ch.predict(ctx2, null);
+    this._cleanRemoteResult(result);
+    this._step('remote', {
+      title: '远端已回馈（本机视觉降级）',
+      status: 'done',
+      detail: '意图：' + ((result && result.intent) || '未知'),
+    });
+    return result;
   }
 
   /**
@@ -1509,6 +1846,11 @@ class PredictController {
     return intent === 'word_writing';
   }
 
+  /** v4.11.0：是否允许把截图原图发往服务端（判断与生成两个阶段共用）。 */
+  _allowRemoteImage() {
+    return this.config.get('sendImageToServer') !== false && this.config.get('remoteVision') !== false;
+  }
+
   // ---------------- 配置 / 状态 ----------------
 
   getStatus() {
@@ -1654,6 +1996,15 @@ class PredictController {
       const ctx = this.engine._snapshot();
       this._applyScreenIdentity(ctx, shotSource, wi);
       const rule = this._inferRuleFromContext(ctx);
+      // v4.11.0：主动推测同样记录行为模式（供结晶判断哪些行为是真需求）
+      const pHit = lookupApp({ exeName: ctx.exeName, windowClass: ctx.windowClass, title: ctx.title })
+        || lookupApp(wi || {});
+      if (pHit && this.config.get('appProfilesEnabled') !== false) {
+        this._lastProfile = pHit.profile;
+        for (const b of behaviorsOf(pHit.profile)) {
+          this._recordBehavior(pHit.profile.id, b.id, b.intent, b.suggestion, true);
+        }
+      }
       const behaviorContext = Object.assign({ rule, proactive: true }, ctx);
 
       const mode = this.config.get('model');
@@ -1728,8 +2079,22 @@ class PredictController {
         // 不再 return：用户主动要的预测，哪怕低置信度也把建议摆出来
       }
 
+      // v4.11.0：主动预测也带上应用画像的行为按钮（用户可直接点某个行为）
+      if (pHit) {
+        const ps = this._profileSuggestion(pHit, wi || {});
+        suggestion.behaviors = ps.behaviors;
+        suggestion.appProfile = ps.appProfile;
+        suggestion.behaviorPrompt = ps.behaviorPrompt;
+        suggestion.behaviorId = ps.behaviorId;
+      }
+
       let choice = 'later';
-      if (this.panel) choice = await this.panel.show(this._decorateSuggestion(suggestion));
+      if (this.panel) {
+        const shown = this._decorateSuggestion(suggestion);
+        // 游戏里看画面给建议即可，不该让用户手填主题
+        if (pHit && isGame(pHit.profile)) { shown.needTopic = false; shown.topicHint = ''; }
+        choice = await this.panel.show(shown);
+      }
       // v4.10.18：记录用户决策（带主题时只记长度，避免整段主题进日志）
       this._logEntry({
         phase: 'decision',

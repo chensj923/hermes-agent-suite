@@ -65,7 +65,10 @@ class PredictPanel {
       // v4.10.27：浮窗带主题输入框时把用户输入一并回传。
       // 没有 topic（旧协议/普通场景）就 resolve 字符串，保持向后兼容。
       const topic = (payload && typeof payload.topic === 'string') ? payload.topic.trim() : '';
-      this._resolve(topic ? { choice, topic } : choice);
+      // v4.11.0：用户点了应用画像里的某个具体行为时一并回传 behaviorId
+      const behaviorId = (payload && typeof payload.behaviorId === 'string') ? payload.behaviorId.trim() : '';
+      if (topic || behaviorId) this._resolve({ choice, topic, behaviorId });
+      else this._resolve(choice);
     });
     // v4.10.40：用户点 × 主动关闭浮窗（只隐藏，不重置流水线状态；流水线仍在跑，
     // 后续步骤仍会推回——但窗口已关，用户可重新触发再开）。
@@ -270,9 +273,11 @@ class PredictPanel {
     if (!_electron) return 'later';
     const win = await this._ensureReady();
     if (this._thinkingTimeout) { clearTimeout(this._thinkingTimeout); this._thinkingTimeout = null; }
-    // v4.10.27：需要手填主题时窗口更高，且给用户充足的填写时间
+    // v4.10.27：需要手填主题时窗口更高
+    // v4.11.0：带应用画像行为列表时同样需要更高（3 个行为按钮）
     const needTopic = Boolean(suggestion && suggestion.needTopic);
-    const height = needTopic ? PANEL_STEP_HEIGHT_TOPIC : PANEL_STEP_HEIGHT;
+    const hasBehaviors = Boolean(suggestion && Array.isArray(suggestion.behaviors) && suggestion.behaviors.length);
+    const height = (needTopic || hasBehaviors) ? PANEL_STEP_HEIGHT_TOPIC : PANEL_STEP_HEIGHT;
     try { win.setSize(PANEL_STEP_WIDTH, height); } catch (_) {}
     return new Promise((resolve) => {
       this._pending = { resolve };

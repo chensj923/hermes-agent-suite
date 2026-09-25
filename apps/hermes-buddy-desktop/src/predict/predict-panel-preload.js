@@ -43,10 +43,15 @@ const api = {
     if (typeof callback !== 'function') return;
     ipcRenderer.on('predict-panel:close', () => callback());
   },
-  // 用户点击决策（generate / later / never）
+  // 用户点击决策（generate / later / never / behavior）
   // v4.10.27：带主题输入框时，把用户输入一起回传（topic 可为空串）
-  decide: (choice, topic) => {
-    ipcRenderer.send('predict-panel:decision', { choice, topic: String(topic || '').trim() });
+  // v4.11.0：behaviorId —— 用户点了应用画像里的某个具体行为
+  decide: (choice, topic, behaviorId) => {
+    ipcRenderer.send('predict-panel:decision', {
+      choice,
+      topic: String(topic || '').trim(),
+      behaviorId: String(behaviorId || '').trim(),
+    });
   },
   // v4.10.40：用户点 × 主动关闭浮窗
   close: () => {

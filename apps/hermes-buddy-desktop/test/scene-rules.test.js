@@ -20,7 +20,9 @@ function makeController({ choice = 'later' } = {}) {
     panel: fakePanel,
     actionExecutor: fakeAction,
   });
-  ctrl.config.set({ model: 'none', enabled: true, authorized: true });
+  // v4.11.0：应用画像（100+ 软件 × 3 行为）默认优先于场景规则；
+  // 本文件测的是场景规则本身，显式关掉画像让它走旧路径。
+  ctrl.config.set({ model: 'none', enabled: true, authorized: true, appProfilesEnabled: false });
   return { ctrl, captured };
 }
 
@@ -84,6 +86,16 @@ test('onWindowChange：点「生成并插入」→ 场景提示词方向随生�
   assert.ok(payload, '生成函数应被调用');
   const polish = normalizeSceneRules(DEFAULT_SCENE_RULES).find((r) => r.id === 'scene-wps-polish');
   assert.strictEqual(payload.direction, polish.prompt, 'direction 必须是场景规则的 prompt');
+});
+
+test('v4.11.0：开启应用画像时，画像优先于场景规则（给出 3 个行为而不是一句场景话术）', async () => {
+  const { ctrl, captured } = makeController({ choice: 'later' });
+  ctrl.config.set({ appProfilesEnabled: true });   // 默认策略
+  ctrl._enabled = true;
+  await ctrl.onWindowChange({ exeName: 'wps', title: '运维年终报告.docx - WPS Office' });
+  assert.ok(captured.suggestion, '应展示建议');
+  assert.ok(/应用画像/.test(captured.suggestion.reason), 'reason 应来自应用画像，实际：' + captured.suggestion.reason);
+  assert.strictEqual(captured.suggestion.behaviors.length, 3);
 });
 
 test('normalizeSceneRules：非法条目剔除 + id 去重', () => {

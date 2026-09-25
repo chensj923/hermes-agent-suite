@@ -59,7 +59,7 @@ CHANNEL_VERSION = "2.3"
 #   10 = v4.10.2x 结晶记忆注入 / 预测兜底
 #   11 = v4.10.30 pong 帧不再被二次编码成文本帧（修 channel-bad-json）
 #   12 = v4.10.35 predict_request/response 携带 req_id（支持并发请求按 ID 匹配）
-CHANNEL_BUILD = "13"
+CHANNEL_BUILD = "14"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -718,27 +718,37 @@ def mock_llm(messages, tools):
 PREDICT_PROMPT = (
     "你是 Hermes Buddy 的预测助手。用户在 Windows 电脑上工作，"
     "我们检测到一类行为（如正在写文档、填表单、收集资料、查接口、阅读思考）。"
-    "重要：你只会收到文字，不会收到图片——用户本机的视觉模型已经把屏幕截图读成"
-    "了一段文字描述（screenObservation），你可能完全没有视觉能力，不要假设自己能看图。"
-    "如果连 screenObservation 都没有，就只依据行为元数据（窗口类型、应用名、触发规则）判断。"
+    "v4.11.0：你具备视觉能力，默认会收到一张用户当前屏幕的截图——请直接看图判断"
+    "用户正在用什么软件、在做什么。没有图片时才退而求其次看 screenObservation"
+    "（本机视觉模型的文字描述）；两者都没有就只依据行为元数据"
+    "（窗口类型、应用名、触发规则）判断。"
     "判事实优先：exeName 是前台进程名（wps/winword/notepad/chrome/explorer 等），"
-    "windowClass 是 Win32 窗口类名，screenObservation 第一句会点名前台应用——"
-    "三者一致表明用户正在某个应用里工作。"
+    "windowClass 是 Win32 窗口类名——两者一致表明用户正在某个应用里工作。"
+    "看图优先于猜：截图里能看到的具体内容（文档标题、报错信息、聊天窗口、游戏画面）"
+    "就是判断依据，不要凭应用名泛泛而谈。"
+    "游戏画面：若截图是游戏，intent 取 game_guide（卡关/要攻略）、"
+    "game_live（正在打，要即时建议）或 game_quest（想知道先做什么任务）。"
     "防误判规则：当事实显示前台是文档编辑器或 IDE（WPS/Word/记事本/VSCode 等）"
     "且用户刚停笔（typingPauseMs 较大），这是「写作中的停顿」，"
     "建议必须围绕当前写作本身（如续写、润色、扩写标题、检查格式），"
     "绝不要建议「切换回文档」「回到写作」——用户根本没有离开。"
-    "只有 screenObservation 明确说前台是任务视图/开始菜单/桌面等非工作界面时，"
+    "只有画面明确显示是任务视图/开始菜单/桌面等非工作界面时，"
     "才可以建议切回原来的工作。"
-    "信息不足规则：如果 screenObservation 里除了桌宠卡通形象/空白窗口之外"
+    "信息不足规则：如果截图里除了桌宠卡通形象/空白窗口之外"
     "没有任何用户的工作内容，说明画面信息不可用，confidence 必须低于 0.3"
     "（宁可不打扰，也不要凭空编一个建议）。"
+    "建议文案必须具体：要说到画面里真实存在的东西，禁止「需要我帮你做点什么吗？」"
+    "这类放到任何画面都成立的空话。"
     "请判断用户此刻最可能需要什么帮助，并用中文返回一个严格 JSON 对象："
     '{"intent": "最可能的规则名", "confidence": 0到1之间的小数, '
     '"suggestion": "一句简短的中文建议文案（不超过40字）", '
     '"reason": "判断依据（一句话）"}。'
     "intent 只能取以下之一：word_writing / data_entry / collecting_material / "
-    "api_lookup / reading_or_thinking。只输出 JSON，不要输出其它任何文字。"
+    "api_lookup / reading_or_thinking / doc_polish / doc_summary / doc_outline / "
+    "doc_translate / data_formula / data_analysis / code_write / code_debug / "
+    "code_review / search_summary / translate / message_reply / "
+    "game_guide / game_live / game_quest / context_switch / generic_help。"
+    "只输出 JSON，不要输出其它任何文字。"
 )
 
 
@@ -758,7 +768,7 @@ def predict_intent(behavior, image_b64, model=None):
         return mock_predict(behavior)
     # v4.10.2：内容生成分支（客户端「生成并插入」）
     if isinstance(behavior, dict) and behavior.get("stage") == "generate_content":
-        return generate_content(behavior, model)
+        return generate_content(behavior, model, image_b64)
     rule = (behavior or {}).get("rule", "") or "word_writing"
     ctx_lines = []
     if isinstance(behavior, dict):
@@ -816,7 +826,8 @@ GENERATE_PROMPT = (
     "继续写作、整理笔记），现在需要你直接生成可粘贴使用的正文内容。"
     "你会收到：行为场景（rule）、当时的建议文案（suggestion）、前台窗口标题"
     "（windowTitle，文档编辑器的窗口标题通常就是文档名，是最可靠的主题线索）、"
-    "以及本机视觉模型对屏幕的文字描述（screenObservation，可能为空或只有概略信息）。"
+    "本机视觉模型对屏幕的文字描述（screenObservation，可能为空或只有概略信息），"
+    "以及 v4.11.0 起附带的当前屏幕截图（有图时以图片里真实可见的内容为准）。"
     "若给出用户自定义方向（direction），它是最高优先级：内容必须朝这个方向生成。"
     "要求："
     "1. 中文，直接给内容本身——不要寒暄、不要复述建议、不要问问题、不要输出 JSON；"
@@ -839,10 +850,11 @@ GENERATE_PROMPT = (
 )
 
 
-def generate_content(behavior, model=None):
+def generate_content(behavior, model=None, image_b64=None):
     """v4.10.2：为「生成并插入」生成真正的内容。返回 {content, intent}。
     v4.10.23：新增 windowTitle —— 文档编辑器的窗口标题就是文档名，
-    是比 VL 描述可靠得多的主题线索（小 VL 模型实测读不出文档正文）。"""
+    是比 VL 描述可靠得多的主题线索（小 VL 模型实测读不出文档正文）。
+    v4.11.0：支持带原图生成——服务端接多模态模型时，直接看截图里真实的正文。"""
     rule = (behavior or {}).get("rule", "") or "word_writing"
     suggestion = (behavior or {}).get("suggestion", "") or ""
     obs = (behavior or {}).get("screenObservation", "") or ""
@@ -862,9 +874,14 @@ def generate_content(behavior, model=None):
         % (rule, suggestion or "(无)", reason or "(无)",
            window_title or "(无)", obs or "(无)", direction or "(无)")
     )
+    # v4.11.0：有截图时把原图一起给模型（服务端多模态），比文字描述可靠得多
+    user_parts = [{"type": "text", "text": user_text}]
+    if image_b64:
+        url = image_b64 if image_b64.startswith("data:") else "data:image/png;base64," + image_b64
+        user_parts.append({"type": "image_url", "image_url": {"url": url}})
     messages = [
         {"role": "system", "content": GENERATE_PROMPT},
-        {"role": "user", "content": user_text},
+        {"role": "user", "content": user_parts},
     ]
     try:
         r = call_llm(messages, [], lambda: False, model, timeout=PREDICT_UPSTREAM_TIMEOUT)
