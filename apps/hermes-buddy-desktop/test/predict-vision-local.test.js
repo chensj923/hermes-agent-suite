@@ -56,7 +56,7 @@ function makeController({ model = 'hybrid', channel = null, predictFn = null, de
   });
   // 本机 VL 链路回归：显式关掉远端视觉（v4.11.0 起默认是走远端视觉的，
   // 这些用例测的是「服务端是纯文本模型」时的降级链路）。
-  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6, autoInsert: false, sendImageToServer: false, remoteVision: false });
+  ctrl.config.set({ model, enabled: true, authorized: true, confidenceThreshold: 0.6, autoInsert: false, remoteVision: false });
   return { ctrl, captured };
 }
 
@@ -73,11 +73,11 @@ function okChannel(sink) {
 
 // ---------- 1. 默认不发原图 ----------
 
-test('默认配置：sendImageToServer=true + remoteVision=true（v4.11.0 远程视觉优先）', () => {
+test('默认配置：remoteVision=true（截图直接发远端看图；sendImageToServer 已移除）', () => {
   const { ctrl } = makeController();
   // 注意：makeController 为测本机 VL 链路显式关了远端视觉，这里直接读默认配置
   const cfg = new (require('../src/predict/config').PredictConfig)({ dataDir: tmpDir() });
-  assert.strictEqual(cfg.get('sendImageToServer'), true);
+  assert.strictEqual(cfg.get('sendImageToServer'), undefined, '旧开关应已移除');
   assert.strictEqual(cfg.get('remoteVision'), true);
   assert.ok(ctrl, 'controller 构造成功');
 });
@@ -175,18 +175,17 @@ test('本机描述抛错 → 静默降级，不阻断远端', async () => {
 
 // ---------- 4. 显式开启时才发原图 ----------
 
-test('sendImageToServer=true：按旧行为把原图发给服务端（部署确实接了视觉模型）', async () => {
+test('remoteVision=true（默认）：截图原图直接发给远端，无需本机先描述', async () => {
   const calls = [];
   let describeCalls = 0;
   const { ctrl } = makeController({
-    model: 'remote',
     channel: okChannel(calls),
     describeFn: async () => { describeCalls += 1; return 'y'; },
   });
-  // v4.11.0：发原图需要同时开 sendImageToServer 与 remoteVision
-  ctrl.config.set({ sendImageToServer: true, remoteVision: true });
+  // v4.12.1：发图只看 remoteVision；makeController 默认关了它，这里重新打开
+  ctrl.config.set({ remoteVision: true });
   await ctrl.triggerRule('word_writing');
-  assert.strictEqual(calls[0].img, 'B64', '显式开启时应发原图');
+  assert.strictEqual(calls[0].img, 'B64', 'remoteVision 开启时应直接发原图');
   assert.strictEqual(describeCalls, 0, '发原图时无需再本地描述');
 });
 

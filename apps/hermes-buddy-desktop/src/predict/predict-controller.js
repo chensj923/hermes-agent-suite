@@ -261,6 +261,10 @@ class PredictController {
     // v4.11.0：结晶引擎（本地长期记忆）+ 应用画像触发的每应用冷却表
     this.crystal = new CrystalEngine({ dataDir: path.join(this.appDir, 'predict'), logger: this.logger });
     this._appLastFired = {};
+    // v4.12.1：onWindowChange 处理锁。窗口事件路径不设置 _processing，但卡片
+    // await panel.show 最长 20s，期间新切窗事件会再起卡片，导致 9s 内多条流水线、
+    // 步骤堆满同一面板（实测卡顿/混乱来源之一）。用独立标志保证窗口处理不重入。
+    this._windowHandling = false;
     this._lastProfile = null;   // 最近命中的应用画像（供生成阶段取行为 prompt）
   }
 
@@ -454,8 +458,10 @@ class PredictController {
    * @param {{exeName?:string,title?:string}} wi OS 前台窗口信息
    */
   async onWindowChange(wi) {
+    // v4.12.1：窗口处理不重入（上一张卡片仍 await show 时，新切窗事件直接忽略）
+    if (!this.isEnabled() || this._processing || this._windowHandling) return;
+    this._windowHandling = true;
     try {
-      if (!this.isEnabled() || this._processing) return;
       // v4.11.0：应用画像优先——命中就把这个应用最常用的 3 件事直接摆出来，
       // 不再让远端模型从零猜「用户现在在干嘛」（过去触发率和准确度都差在这一步）。
       if (this.config.get('appProfilesEnabled') !== false) {
@@ -508,6 +514,8 @@ class PredictController {
       this._applyDecision(choice, 'scene:' + rule.id, suggestion);
     } catch (e) {
       this.logger.warn('scene-rule-error', { error: e.message });
+    } finally {
+      this._windowHandling = false;   // v4.12.1：释放窗口处理锁
     }
   }
 
@@ -1584,8 +1592,9 @@ class PredictController {
       // 设计前提改成「服务端接的是多模态模型」——图形判断一律交给远端，
       // 本机 3B VL 只读屏转述会丢信息（实测只输出"光标在文档中"这类空话），
       // 是过去意图判断不准的根因之一。只有远端明确吃不下图片时，才退回本机 VL。
+      // v4.12.1：截图是否发远端统一由 remoteVision 决定（sendImageToServer 已移除）
       const remoteVision = this.config.get('remoteVision') !== false;
-      const allowImage = this.config.get('sendImageToServer') !== false && remoteVision;
+      const allowImage = remoteVision;
       let image = imageBase64;
       let observation = '';
       if (imageBase64 && allowImage) {
@@ -1833,18 +1842,21 @@ class PredictController {
   }
 
   /**
-   * v4.10.38：是否对该意图自动生成并插入。
-   * 要求 autoInsert 开启，且是明确写作类意图；reading_or_thinking 这类
+   * v4.10.38：是否对该意图自动生成正文。
+   * 要求 autoInsert 开启，且是明确「要出正文」的意图；reading_or_thinking 这类
    * 「发呆/斟酌」模糊意图不自动写（否则一发呆就往文档里塞字）。
+   * v4.12.1：纳入 message_reply——微信/邮件回复本质是要一条可粘贴的回复正文，
+   * 用户主动点猫后不应只拿到一句问话、停在确认框（实测"远端没信息"根因）。
    */
   _shouldAutoInsert(intent) {
     if (this.config.get('autoInsert') !== true) return false;
-    return intent === 'word_writing';
+    return intent === 'word_writing' || intent === 'message_reply';
   }
 
-  /** v4.11.0：是否允许把截图原图发往服务端（判断与生成两个阶段共用）。 */
+  /** v4.11.0/v4.12.1：是否把截图发往服务端（判断与生成两阶段共用）。
+   *  统一由 remoteVision 决定；旧的 sendImageToServer 已移除。 */
   _allowRemoteImage() {
-    return this.config.get('sendImageToServer') !== false && this.config.get('remoteVision') !== false;
+    return this.config.get('remoteVision') !== false;
   }
 
   // ---------------- 配置 / 状态 ----------------
@@ -2060,6 +2072,28 @@ class PredictController {
         suggestion.appProfile = ps.appProfile;
         suggestion.behaviorPrompt = ps.behaviorPrompt;
         suggestion.behaviorId = ps.behaviorId;
+      }
+
+      // v4.12.1：用户主动点猫＝明确要答案。明确「要出正文」的意图（写作/微信
+      // 邮件回复）直接生成正文投递，不再停在确认框——旧逻辑等 23s 只看到一句
+      // 问话、还需再点一次才出正文，用户没点到或超时，导致「远端没信息」。
+      if (this._shouldAutoInsert(suggestion.intent)) {
+        this.logger.info('predict-now-auto-generate', { intent: suggestion.intent });
+        this._logEntry({
+          phase: 'decision', rule: rule || '', intent: suggestion.intent,
+          suggestion: (suggestion.suggestion || '').slice(0, 200),
+          choice: 'auto-generate', proactive: true,
+        });
+        this.engine.userDecision(true);
+        this._step('decide', { title: '正在为你生成', status: 'pending', detail: '主动预测：明确意图直接出正文（不再等待点击）' });
+        this._showThinking('正在生成…（可能需要约 1 分钟）');
+        this._rearmPanelSafety(PANEL_GENERATE_SAFETY_MS);
+        try {
+          await this._generateAndDeliver(suggestion, '');
+        } catch (e) {
+          this.logger.warn('predict-now-auto-generate-failed', { error: e.message });
+        }
+        return { shown: true, choice: 'auto-generate', intent: suggestion.intent };
       }
 
       let choice = 'later';

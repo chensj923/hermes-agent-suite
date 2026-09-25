@@ -182,3 +182,78 @@ test('onThinkingTimeout：面板安全网触发时降级为规则模板弹窗', 
   assert.strictEqual(captured.suggestion.suggestion, '要不要我帮你续写或润色这段文字？');
   assert.ok(/模型响应超时/.test(captured.suggestion.reason));
 });
+
+// ---------- 7. v4.12.1：sendImageToServer 残留清理 ----------
+
+test('v4.12.1：旧落盘 sendImageToServer=false → 加载后删除该键（不再冷启动本机读图）', () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ sendImageToServer: false }), 'utf-8');
+  const cfg = new PredictConfig({ dataDir: dir });
+  cfg.load();
+  assert.strictEqual(cfg.get('sendImageToServer'), undefined, '旧开关应被删除');
+  assert.strictEqual(cfg.get('remoteVision'), true, '发图改由 remoteVision 默认 true 决定');
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+  assert.ok(!('sendImageToServer' in onDisk), '落盘里也应清除旧键');
+});
+
+// ---------- 8. v4.12.1：窗口处理不重入 ----------
+
+test('v4.12.1：onWindowChange 上一张卡片未返回时，新切窗事件被忽略（不重复起流水线）', async () => {
+  let entered = 0;
+  // 第一张卡片的 show 永不立即返回（卡在等待用户点击）
+  const hangPanel = {
+    available: true,
+    show: () => new Promise(() => { entered += 1; }),
+    destroy() {},
+  };
+  const ctrl = new PredictController({
+    appDir: tmpDir(),
+    logger: noopLogger(),
+    panel: hangPanel,
+    actionExecutor: { execute: async () => ({ ok: true }) },
+  });
+  ctrl.config.set({ enabled: true, authorized: true });
+  ctrl._enabled = true;
+  // 第一次进入：命中场景规则、卡片挂起（不等它返回，模拟新切窗事件紧接着到来）
+  const first = ctrl.onWindowChange({ exeName: 'wps', title: '文档1' });
+  await Promise.resolve();
+  assert.strictEqual(ctrl._windowHandling, true, '第一次窗口处理应持锁');
+  // 第二次切窗事件：必须被忽略
+  const before = entered;
+  await ctrl.onWindowChange({ exeName: 'wechat', title: '微信' });
+  assert.strictEqual(entered, before, '锁未释放时新切窗事件不应再处理');
+});
+
+// ---------- 9. v4.12.1：主动预测明确意图直接出正文 ----------
+
+test('v4.12.1：主动点猫 + 远端回 message_reply → 直接生成正文，不停在确认框', async () => {
+  const calls = [];
+  const channel = channelThat(async () => ({
+    intent: 'message_reply', confidence: 0.75,
+    suggestion: '微信回复卡住了？', reason: '在斟酌回复',
+  }));
+  const ctrl = new PredictController({
+    appDir: tmpDir(),
+    logger: noopLogger(),
+    capture: { captureActiveWindow: async () => ({ base64: 'B64', width: 800, height: 600 }) },
+    panel: {
+      available: true,
+      show: async () => { throw new Error('明确意图不应停在确认框'); },
+      showThinking() {},
+      armThinkingTimeout() {},
+      cancelThinking() {},
+      destroy() {},
+    },
+    actionExecutor: { execute: async (a) => { calls.push(a); return { ok: true, type: a.type }; } },
+    channel,
+    generateContentFn: async () => ({ content: '好的，我稍后回复你。' }),
+  });
+  ctrl.config.set({ enabled: true, authorized: true, autoInsert: true });
+  ctrl._enabled = true;
+  const r = await ctrl.predictNow();
+  assert.strictEqual(r.intent, 'message_reply');
+  assert.strictEqual(r.choice, 'auto-generate', '应自动生成正文');
+  const type = calls.find((a) => a.type === 'type-input' || a.type === 'clipboard-paste');
+  assert.ok(type, '回复正文应被投递');
+  assert.strictEqual(type.text, '好的，我稍后回复你。');
+});

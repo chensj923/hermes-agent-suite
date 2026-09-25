@@ -61,13 +61,11 @@ const DEFAULT_CONFIG = {
     behaviorLogTtlMs: 7 * 24 * 60 * 60 * 1000, // 行为日志只留 7 天
     oneClickOff: true // 一键关闭，立即停止所有监听
   },
-  // v4.10.0：是否把截图原图发往服务端做视觉推理。
-  // v4.11.0 起默认 true —— 设计前提改为「服务端接的是多模态模型」：图形判断
-  // 一律交给远端，本机 3B VL 转述会丢信息（实测只输出「光标在文档中」这类空话），
-  // 是过去意图判断不准的根因。远端吃不下图片时客户端会自动退回本机 VL。
-  sendImageToServer: true,
-  // v4.11.0：远程视觉开关。置 false 时退回「本机 VL 读成文字再发服务端」的旧链路
-  // （服务端是纯文本模型时才需要关）。
+  // v4.12.1：截图是否直接发给远端看图（远程视觉）。默认 true——已实测远端具备
+  // 视觉能力，图形判断一律交给远端；本机 3B VL 转述会丢信息（实测只输出「光标
+  // 在文档中」这类空话）。远端明确拒图时客户端自动退回本机 VL（不受此值影响）。
+  // 置 false 则固定走「本机 VL 读成文字再发服务端」（服务端是纯文本模型时才需要）。
+  // 旧的 sendImageToServer 开关已移除（与本字段语义重叠、设置页无入口）。
   remoteVision: true,
   // v4.11.0：应用画像库（约 100 种软件 × 3 个常用行为）开关。命中应用时
   // 直接把这个应用最常用的 3 件事摆给用户选，而不是让远端模型从零猜。
@@ -139,6 +137,14 @@ class PredictConfig {
       this._cache.vlmModel = this._defaults.vlmModel || 'qwen2.5-vl-3b';
       dirty = true;
     }
+    // v4.12.1 迁移：sendImageToServer 开关已移除（与 remoteVision 语义重叠、
+    // 设置页无入口）。老用户落盘残留 false 时，每轮都冷启动本机 2.6GB 小模型
+    // 读图（实测 23s）并与桌宠抢资源，是卡顿直接根因。显式删除该键：截图是否
+    // 发远端统一由 remoteVision 决定（默认 true）；远端拒图时自动退回本机 VL。
+    if (Object.prototype.hasOwnProperty.call(this._cache, 'sendImageToServer')) {
+      delete this._cache.sendImageToServer;
+      dirty = true;
+    }
     if (dirty) {
       try { this._ensureDir(); fs.writeFileSync(this.file, JSON.stringify(this._cache, null, 2), 'utf8'); } catch (_) {}
     }
@@ -168,6 +174,8 @@ class PredictConfig {
     const p = Object.assign({}, patch || {});
     // v4.12.0：运行模式已移除，即便外部（旧 UI/IPC）误传 model 也直接丢弃
     delete p.model;
+    // v4.12.1：sendImageToServer 已移除，发图统一由 remoteVision 控制
+    delete p.sendImageToServer;
     const next = this._merge(this._all(), p);
     this._cache = next;
     this._ensureDir();
