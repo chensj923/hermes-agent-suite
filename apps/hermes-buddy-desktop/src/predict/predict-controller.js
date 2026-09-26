@@ -25,7 +25,7 @@ const { ActionExecutor } = require('./action-executor');
 const { titleToApp } = require('./win-info');
 const { createSceneWatcher, normalizeSceneRules } = require('./scene-rules');
 // v4.11.0：应用画像库（约 100 种软件 × 3 个常用行为）与结晶引擎（长期记忆）
-const { lookupApp, behaviorsOf, behaviorById, isGame, CATEGORY_LABEL } = require('./app-profiles');
+const { lookupApp, behaviorsOf, behaviorById, isGame, CATEGORY_LABEL, INTENT_META } = require('./app-profiles');
 const { CrystalEngine } = require('./crystal-engine');
 
 /** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」。
@@ -510,6 +510,7 @@ class PredictController {
         confidence: 1,
         sceneRule: rule,   // 生成时作为提示词方向透传给服务端
       };
+      this._applyInsertPolicy(suggestion);   // v4.12.9：按意图元数据统一插入策略
       // 场景规则路径没跑 VL，_lastObservation 常为空 → 这里几乎总会需要主题输入
       this._decorateSuggestion(suggestion);
       let choice = 'later';
@@ -1005,6 +1006,7 @@ class PredictController {
         confidence: result.confidence,
         action: this._buildAction(result.intent, result.suggestion),
       };
+      this._applyInsertPolicy(suggestion);   // v4.12.9：游戏类只展示不写入
       // v4.10.41：截图失败但前台是 WPS/Word 时，远端盲猜 reading_or_thinking 不可靠，
       // 直接按写作意图兜底，避免「明明在写文档却问要不要梳理思路」且黑盒不自动写。
       if (behaviorContext._forceWriting && result.intent === 'reading_or_thinking') {
@@ -1188,6 +1190,24 @@ class PredictController {
   }
 
   /**
+   * v4.12.9：按意图元数据统一应用「是否可写入窗口」策略。
+   *
+   * 根因：触发/主动/场景三条路径构造 suggestion 时都没设 noInsert（只有画像路径
+   * _runBehavior 显式设了），导致 game_live / game_guide / game_quest 这类
+   * canInsert=false 的意图，在用户点「生成并插入」后被直接敲进游戏窗口——
+   * 在全屏游戏里模拟键盘输入是事故。这里统一补齐；已显式设 noInsert 的画像
+   * 路径不覆盖（画像行为可用 insert 字段单独覆盖意图默认值）。
+   */
+  _applyInsertPolicy(suggestion) {
+    if (!suggestion) return suggestion;
+    if (suggestion.noInsert === undefined) {
+      const meta = INTENT_META[suggestion.intent];
+      suggestion.noInsert = !(meta && meta.canInsert);
+    }
+    return suggestion;
+  }
+
+  /**
    * v4.10.2：真正执行「生成并插入」——
    * 走远端通道（stage=generate_content）基于屏幕观察 + 建议意图生成一段
    * 可粘贴的正文内容，写入剪贴板且不被 8 秒恢复机制冲掉；
@@ -1335,9 +1355,9 @@ class PredictController {
         if (this.actionExecutor) await this.actionExecutor.execute({ type: 'clipboard-keep', text: content });
       } catch (_) {}
       this._step('deliver', {
-        title: '已生成建议',
+        title: '已生成建议（不会输入到游戏）',
         status: 'done',
-        detail: content.length > 180 ? content.slice(0, 180) + '…' : content,
+        detail: content,
       });
       if (this.panel) { try { this.panel.cancelThinking(); } catch (_) {} }
       return content;
@@ -2112,6 +2132,7 @@ class PredictController {
         confidence: result.confidence,
         action: this._buildAction(result.intent, result.suggestion),
       };
+      this._applyInsertPolicy(suggestion);   // v4.12.9：游戏类只展示不写入
       if (!r2.suggest) {
         const weakIntent = !result.intent || result.intent === 'none' || Number(result.confidence) < 0.3;
         if (weakIntent && rule && RULE_TEMPLATE[rule]) {

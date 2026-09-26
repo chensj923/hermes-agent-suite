@@ -445,3 +445,34 @@ test('远端生成抛异常 → 不插入任何内容', async () => {
   const clip = captured.actionCalls.find((a) => a.type === 'clipboard' || a.type === 'clipboard-keep' || a.type === 'clipboard-paste' || a.type === 'type-input');
   assert.strictEqual(clip, undefined, '生成失败时不应写剪贴板/粘贴');
 });
+
+// v4.12.9 回归：触发链路远端识别为游戏（game_live），用户点生成 → 只给建议、
+// 保留到剪贴板，绝不把 310 字建议敲进游戏窗口（旧 bug：suggestion 未设 noInsert）。
+test('触发链路 game_live → 只保留剪贴板给建议，绝不注入游戏', async () => {
+  const advice = '1. 先出对子压住；\n2. 保留顺子应对；\n3. 当前优先选左侧那张牌。';
+  const { ctrl, captured } = makeController({
+    choice: 'generate',
+    predictFn: async () => ({
+      intent: 'game_live',
+      confidence: 0.8,
+      suggestion: '需要我看着当前画面给即时建议吗？',
+      reason: '识别到棋类对局',
+    }),
+  });
+  ctrl._generateContentFn = async () => ({ content: advice });
+  // 接住 fire-and-forget 的投递动作，避免时序竞态
+  let resolveAction;
+  const actionPromise = new Promise((r) => { resolveAction = r; });
+  ctrl.actionExecutor = {
+    execute: async (a) => { captured.actionCalls.push(a); resolveAction(); return { ok: true, type: a.type }; },
+  };
+  await ctrl.triggerRule('game_live');
+  assert.strictEqual(captured.suggestion.intent, 'game_live', '应展示 game_live 建议');
+  assert.strictEqual(captured.suggestion.noInsert, true, '触发链路也应按意图元数据标记不写入');
+  await actionPromise;
+  const injected = captured.actionCalls.find((a) => a.type === 'type-input' || a.type === 'clipboard-paste');
+  assert.strictEqual(injected, undefined, '游戏场景绝不注入/粘贴到窗口');
+  const keep = captured.actionCalls.find((a) => a.type === 'clipboard-keep');
+  assert.ok(keep, '建议应保留到剪贴板供用户自取');
+  assert.strictEqual(keep.text, advice, '保留的必须是完整游玩建议（含分条换行，不截断）');
+});
