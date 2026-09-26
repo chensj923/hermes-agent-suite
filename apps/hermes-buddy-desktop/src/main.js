@@ -1279,6 +1279,9 @@ async function bootstrap() {
         onRestore: () => restoreMainWindow(),
         onHide: () => logger.info('pet-hidden'),
       });
+      // v4.12.3：注册 pet:// 协议处理器。缺少这一步导致 Live2D 模型 fetch 报 Network error，
+      // 渲染器 fallback 到 PNG，桌宠动画卡顿。
+      try { pet.installProtocolHandler(); } catch (e) { logger.warn('pet-protocol-install-failed', { error: e.message }); }
       logger.info('desktop-pet-ready');
       startPetPatrol();
     } catch (e) {
