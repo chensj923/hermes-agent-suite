@@ -80,7 +80,7 @@ function captureForegroundWindow({ buddyPid, logger, timeoutMs } = {}) {
       }
       const started = Date.now();
       let settled = false;
-      let out = '';
+      const outChunks = [];
       let timer = null;
       const done = (value, err) => {
         if (settled) return;
@@ -112,9 +112,11 @@ function captureForegroundWindow({ buddyPid, logger, timeoutMs } = {}) {
       }, timeoutMs || DEFAULT_TIMEOUT_MS);
       if (timer.unref) timer.unref();
       if (child.unref) child.unref();
-      if (child.stdout) child.stdout.on('data', (d) => { out += String(d || ''); });
+      // v4.12.7：foreground.ps1 强制 UTF8 输出，这里用 Buffer 收集后统一按 UTF8 解码，
+      // 不依赖 String(chunk) 的默认行为，避免中文标题被损坏成 '?'。
+      if (child.stdout) child.stdout.on('data', (d) => { if (d) outChunks.push(Buffer.from(d)); });
       child.on('error', (e) => done(null, e));
-      child.on('close', () => done(parseForegroundOutput(out), null));
+      child.on('close', () => done(parseForegroundOutput(Buffer.concat(outChunks).toString('utf8')), null));
     } catch (e) {
       resolve(null);
     }

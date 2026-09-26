@@ -9,6 +9,12 @@
 
 param([int]$buddyPid = 0)
 
+# v4.12.7：强制 stdout 用 UTF8。target-window.js 以 spawn 启动本脚本并按 UTF8 解码，
+# 不设置时 PowerShell 用系统 OEM/ANSI 代码页输出（中文为 GBK 字节），中文标题会被
+# 损坏成 '?'（实测：不设置=GBK 乱码，设置后=正确 UTF8）。必须在任何 Write-Output 前。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 Add-Type -TypeDefinition @"
 using System;
 using System.Text;

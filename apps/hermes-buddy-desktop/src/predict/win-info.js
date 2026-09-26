@@ -32,17 +32,18 @@ const KNOWN_CLASSES = new Set([
 
 const PS_SCRIPT = [
   'Add-Type -MemberDefinition \'[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();',
-  '[DllImport("user32.dll")]public static extern int GetWindowText(IntPtr h,System.Text.StringBuilder s,int n);',
-  '[DllImport("user32.dll")]public static extern int GetClassName(IntPtr h,System.Text.StringBuilder s,int n);\' -Name Win -Namespace W -PassThru | Out-Null',
+  '[DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern int GetWindowTextW(IntPtr h,System.Text.StringBuilder s,int n);',
+  '[DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern int GetClassNameW(IntPtr h,System.Text.StringBuilder s,int n);\' -Name Win -Namespace W -PassThru | Out-Null',
   '$h=[W.Win]::GetForegroundWindow()',
   '$t=New-Object System.Text.StringBuilder 1024',
-  '[W.Win]::GetWindowText($h,$t,1024) | Out-Null',
+  '[W.Win]::GetWindowTextW($h,$t,1024) | Out-Null',
   '$title=$t.ToString()',
   '$c=New-Object System.Text.StringBuilder 1024',
-  '[W.Win]::GetClassName($h,$c,1024) | Out-Null',
+  '[W.Win]::GetClassNameW($h,$c,1024) | Out-Null',
   '$class=$c.ToString()',
   '$proc=Get-Process | Where-Object { $_.MainWindowHandle -eq $h } | Select-Object -First 1',
   '$exe=if($proc){$proc.ProcessName}else{"unknown"}',
+  '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8',
   '("{0}|{1}|{2}" -f $class,$title,$exe)',
 ].join('\n');
 
