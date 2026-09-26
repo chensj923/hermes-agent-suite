@@ -44,6 +44,20 @@ const LOCAL_ANALYZE_TIMEOUT_MS = 300000; // 5 分钟看门狗
 /** v4.10.11：远端模型推断超时升级为 5 分钟看门狗，与本地对齐，避免远端慢推理被掐。 */
 const REMOTE_ANALYZE_TIMEOUT_MS = 300000;
 
+/** v4.12.2：远端生成正文超时。生成阶段比意图推断慢很多，默认放宽到 3 分钟看门狗，
+ *  仍可被 HERMES_GENERATE_TIMEOUT_MS 覆盖。 */
+const REMOTE_GENERATE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HERMES_GENERATE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 180000;
+})();
+
+/** v4.12.2：本机离线生文兜底超时。本地 3B 小模型生文通常 10~30s，设 2 分钟看门狗
+ *  防止进程假死导致面板永远转圈。 */
+const LOCAL_GENERATE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HERMES_LOCAL_GENERATE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 120000;
+})();
+
 /**
  * v4.10.37：思考安全网在「服务端请求真正发出」后重新计时的时长。
  * 必须与 channel.js 的 PREDICT_TIMEOUT_MS（默认 90s，可用 HERMES_PREDICT_TIMEOUT_MS
@@ -1552,7 +1566,11 @@ class PredictController {
     const direction = (suggestion && suggestion.behaviorPrompt) || '';
     let text = '';
     try {
-      text = await this._localGenerate({ topic, direction, observation: this._lastObservation || '' });
+      text = await _withTimeout(
+        this._localGenerate({ topic, direction, observation: this._lastObservation || '' }),
+        LOCAL_GENERATE_TIMEOUT_MS,
+        '本机离线生文超时'
+      );
     } catch (e) {
       this.logger.warn('predict-generate-local-failed', { error: e.message });
       text = '';
@@ -1881,13 +1899,26 @@ class PredictController {
   }
 
   /**
-   * v4.12.0：后台预热本机模型。启用时调用，不阻塞主流程。
-   * 远端断线时需要本机模型立即顶上，因此始终预热（已安装且未启动才拉起）。
+   * v4.12.0/v4.12.2：后台预热本机模型。启用时调用，不阻塞主流程。
+   * 远端断线时需要本机模型立即顶上；但如果远端当前可用且用户开了远程视觉，
+   * 本机模型暂时只是兜底，不必在开机/启用瞬间立刻拉起 2.6GB 进程抢资源
+   * （实测会拖卡桌宠动画）。延迟到 30s 后再热启，既保留兜底能力，又避免启动即卡。
    */
   async warmLocalModel() {
     const runner = this._runner();
     if (!runner) return { ok: false, reason: '本地模型未安装' };
     if (runner.started) return { ok: true, reason: '本地模型已就绪' };
+    // v4.12.2：远端可用且开启远程视觉时，延迟预热，让开机不卡
+    if (this._remoteUsable() && this.config.get('remoteVision') !== false) {
+      this.logger.info('predict-warm-local-deferred', { ms: 30000 });
+      await new Promise((resolve) => { setTimeout(resolve, 30000); });
+      // 延迟期间用户可能已关闭预测，直接放弃启动
+      if (!this._enabled) {
+        this.logger.info('predict-warm-local-cancelled-disabled');
+        return { ok: false, reason: '预测已关闭' };
+      }
+      // 延迟期间可能已变为不可用（断线），此时更需要本机，继续启动
+    }
     try {
       await runner.start();
       return { ok: true, reason: '本地模型预热完成' };

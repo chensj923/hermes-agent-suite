@@ -1217,11 +1217,25 @@ async function bootstrap() {
       captureTargetWindowFn: (o) => captureForegroundWindow(Object.assign({}, o, { logger })),
       // v4.10.2：「生成并插入」的内容生成——走同一条远端通道，
       // 服务端按 stage=generate_content 走生成分支返回 {content}
+      // v4.12.2：生成阶段自带看门狗（默认 180s，可用 HERMES_GENERATE_TIMEOUT_MS
+      // 覆盖），防止服务端不响应时面板永远停在「思考中…」。
       generateContentFn: (payload, image) => {
         const ch = manager && manager.channel ? manager.channel : null;
         if (!ch) return Promise.reject(new Error('远端通道未连接'));
-        // v4.11.0：开启远端视觉时把截图一起发过去，服务端多模态直接看画面生成
-        return ch.predict(payload, image || null);
+        const raw = Number(process.env.HERMES_GENERATE_TIMEOUT_MS);
+        const ms = Number.isFinite(raw) && raw > 0 ? raw : 180000;
+        if (!ms || ms <= 0) return ch.predict(payload, image || null);
+        let timer = null;
+        const p = ch.predict(payload, image || null);
+        const guarded = p.finally(() => { if (timer) { clearTimeout(timer); timer = null; } });
+        return Promise.race([
+          guarded,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              reject(new Error('远端生成正文超时'));
+            }, ms);
+          }),
+        ]);
       },
       // 远端预测模式（model='remote'）需要通道客户端。manager.channel 在通道模式连接后才有值，
       // predict-controller._analyze 在运行时通过 resolveChannel 惰性取最新的，不锁死在构造时刻。
