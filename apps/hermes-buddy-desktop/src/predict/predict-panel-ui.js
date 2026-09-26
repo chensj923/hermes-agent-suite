@@ -53,6 +53,9 @@
   function upsertStep(data) {
     const id = data && data.id;
     if (!id) return;
+    // v4.12.6：新一轮标题（__flow__）插入前先清空上一轮所有步骤，
+    // 否则跨轮步骤无限堆积（面板越拉越长、旧轮残留 = "框体错位/堆叠"）。
+    if (id === '__flow__') clearSteps();
     let row = stepEls.get(id);
     if (!row) {
       row = document.createElement('div');

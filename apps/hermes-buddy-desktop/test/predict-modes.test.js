@@ -169,6 +169,28 @@ test('warmLocalModel：已热启时直接返回，未安装时返回未安装', 
   assert.ok(/未安装/.test(r2.reason));
 });
 
+test('v4.12.6 懒启动：远端可用时不拉起本地模型，远端断线时才启动兜底', async () => {
+  // 远端可用：start 不应被调用
+  let started1 = 0;
+  const runner1 = { started: false, start: async () => { started1++; } };
+  const { ctrl: c1 } = makeController({
+    modelRunner: runner1,
+    channel: channelThat(async () => ({ text: 'x' })),
+  });
+  const r1 = await c1.warmLocalModel();
+  assert.strictEqual(started1, 0, '远端可用时不应自动启动本地模型');
+  assert.strictEqual(r1.ok, false, '应返回未启动（懒启动）');
+
+  // 远端不可用（channel=null）：start 应被调用
+  let started2 = 0;
+  const runner2 = { started: false, start: async () => { started2++; } };
+  const { ctrl: c2 } = makeController({ modelRunner: runner2, channel: null });
+  c2._enabled = true;
+  const r2 = await c2.warmLocalModel();
+  assert.strictEqual(started2, 1, '远端断线时应立即启动本地模型兜底');
+  assert.strictEqual(r2.ok, true);
+});
+
 // ---------- 6. 思考安全网 ----------
 
 test('onThinkingTimeout：面板安全网触发时降级为规则模板弹窗', async () => {

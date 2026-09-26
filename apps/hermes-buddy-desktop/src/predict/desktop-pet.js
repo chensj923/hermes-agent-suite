@@ -80,6 +80,8 @@ class DesktopPet {
     this.preloadPath = preloadPath || path.join(__dirname, 'desktop-pet-preload.js');
     this.linesFile = this.dataDir ? path.join(this.dataDir, 'pet-lines.json') : '';
     this.modelFile = this.dataDir ? path.join(this.dataDir, 'pet-model.json') : '';
+    // v4.12.6：外观模式 cat（默认小猫）| live2d（女孩，需 WebGL）
+    this.modeFile = this.dataDir ? path.join(this.dataDir, 'pet-mode.json') : '';
     this.editorWin = null;
     this.win = null;
     this._ready = false;
@@ -169,6 +171,10 @@ class DesktopPet {
     });
     ipcMain.on('pet:drag-end', () => { this._dragging = false; this._dragLast = null; });
     ipcMain.on('pet:drag-move', (_e, dx, dy) => this._dragTo(dx, dy));
+    // v4.12.5b：真实拖动聚合埋点（松手一次），用于以真实手感数据定位卡顿
+    ipcMain.on('pet:drag-trace', (_e, data) => {
+      try { this.logger.info('pet-drag-trace', { trace: JSON.parse(JSON.stringify(data || {})) }); } catch (_) {}
+    });
     // v4.7：不再靠 hover 切换穿透（见 _setClickThrough）；渲染层诊断错误上报
     ipcMain.on('pet:error', (_e, msg) => this.logger.warn('pet-renderer-error', { error: String(msg || '').slice(0, 300) }));
     // v4.7：动画开关（省电模式）
@@ -243,11 +249,21 @@ class DesktopPet {
     if (!this.win || !_electron) return;
     this.wave();
     const { Menu } = _electron;
+    const isLive2d = this.getMode() === 'live2d';
     const menu = Menu.buildFromTemplate([
       { label: '立即预测（看一眼屏幕）', click: () => { this.speak('喵～ 我看一眼…'); try { this.onPredict(); } catch (_) {} } },
       { label: '修改文案…', click: () => this._openLinesEditor() },
       { label: '显示 Hermes Buddy', click: () => { try { this.onRestore(); } catch (_) {} } },
       { type: 'separator' },
+      {
+        label: isLive2d ? '外观：换回小猫（推荐，最流畅）' : '外观：切换 Live2D 女孩（更吃性能）',
+        click: () => {
+          const next = isLive2d ? 'cat' : 'live2d';
+          this.setMode(next);
+          this.speak(next === 'cat' ? '喵～ 我回来啦！' : '切换到 Live2D…');
+          this._reload();
+        },
+      },
       {
         label: this._paused ? '继续动画' : '暂停动画（省电）',
         click: () => {
@@ -294,6 +310,31 @@ class DesktopPet {
     } catch (_) {
       return fallback;
     }
+  }
+
+  // ---- 外观模式（v4.12.6）：cat 默认小猫 | live2d 女孩 ----
+
+  /** 读当前外观模式，损坏/未设置返回 'cat'。 */
+  getMode() {
+    try {
+      if (this.modeFile && fs.existsSync(this.modeFile)) {
+        const m = JSON.parse(fs.readFileSync(this.modeFile, 'utf-8'));
+        if (m && (m.mode === 'live2d' || m.mode === 'cat')) return m.mode;
+      }
+    } catch (_) {}
+    return 'cat';
+  }
+
+  /** 写外观模式。 */
+  setMode(mode) {
+    const m = mode === 'live2d' ? 'live2d' : 'cat';
+    try {
+      if (this.modeFile) {
+        fs.mkdirSync(path.dirname(this.modeFile), { recursive: true });
+        fs.writeFileSync(this.modeFile, JSON.stringify({ mode: m }), 'utf-8');
+      }
+    } catch (e) { this.logger.warn('pet-mode-save-failed', { error: e.message }); }
+    return m;
   }
 
   // ---- 自定义模型（v4.6）：用户可导入本地 Cubism 3/4/5 模型文件夹 ----
@@ -347,13 +388,20 @@ class DesktopPet {
     return 'pet://assets/live2d/hiyori/Hiyori.model3.json';
   }
 
+  /** v4.12.6：窗口加载查询，含外观模式。 */
+  _petQuery() {
+    const mode = this.getMode();
+    if (mode === 'live2d') return { mode: 'live2d', model: this._modelUrl() };
+    return { mode: 'cat' };
+  }
+
   /** 模型变更后热重载桌宠窗口（窗口不存在则下次 show 时生效）。 */
   _reload() {
     if (!this.win || this.win.isDestroyed()) return;
     try {
       this._ready = false;
       this.win.loadFile(path.join(__dirname, 'desktop-pet.html'), {
-        query: { model: this._modelUrl() },
+        query: this._petQuery(),
       }).then(() => { if (this.win) this._ready = true; }).catch(() => {});
     } catch (_) {}
   }
@@ -442,7 +490,7 @@ class DesktopPet {
     //   ① 菜单弹不出来（点击被系统丢掉）；② 频繁切换穿透状态会反复改窗口样式 → 拖动卡顿。
     // 现在窗口默认完全可交互，穿透做成菜单里的可选开关。
     win.loadFile(path.join(__dirname, 'desktop-pet.html'), {
-      query: { model: this._modelUrl() },
+      query: this._petQuery(),
     });
     win.on('closed', () => { this.win = null; this._ready = false; });
     win._isBuddyFloating = true; // 截图时只隐藏悬浮窗，不隐藏主窗口

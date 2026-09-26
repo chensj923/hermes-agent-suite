@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('petApi', {
   dragStart: () => ipcRenderer.send('pet:drag-start'),
   dragEnd: () => ipcRenderer.send('pet:drag-end'),
   dragMove: (dx, dy) => ipcRenderer.send('pet:drag-move', Math.round(dx), Math.round(dy)),
+  // v4.12.5b：拖动聚合埋点（松手时一次性上报）
+  dragTrace: (data) => ipcRenderer.send('pet:drag-trace', data),
   // v4.7：渲染层错误上报（只写日志，便于排查）；暂停动画（省电）
   error: (msg) => ipcRenderer.send('pet:error', String(msg || '')),
   onPaused: (handler) => ipcRenderer.on('pet:paused', (_e, v) => { try { handler(v); } catch (_) {} }),

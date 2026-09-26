@@ -95,9 +95,8 @@
     </div>
   </div>
   <div id="bubble"></div>
-  <script src="./assets/live2d/pixi.min.js"></script>
-  <script src="./assets/live2d/live2dcubismcore.min.js"></script>
-  <script src="./assets/live2d/pixi-live2d-cubism4.min.js"></script>
+  <!-- v4.12.6：Live2D 脚本不再静态引入 —— 默认桌宠是这只 PNG 小猫（零 WebGL、不依赖模型，
+       拖动最顺滑）。Live2D 仅在菜单里手动切换后，由 startLive2D() 动态加载。 -->
   <script>
     'use strict';
     const bubble = document.getElementById('bubble');
@@ -126,6 +125,23 @@
     let dragPending = null;   // { dx, dy }
     let dragTimer = null;
 
+    // v4.12.5b 拖动埋点：只在页面内累计（零额外 IPC），松手时一次性上报。
+    let __trace = null;
+    function traceReset() {
+      __trace = { moves: 0, flushes: 0, firstAt: 0, lastAt: 0, maxGap: 0, lastMoveAt: 0, maxDx: 0, maxDy: 0, captureOk: false };
+    }
+    function traceMove(dx, dy, now) {
+      if (!__trace) return;
+      __trace.moves++;
+      if (!__trace.firstAt) __trace.firstAt = now;
+      if (__trace.lastMoveAt) { const gap = now - __trace.lastMoveAt; if (gap > __trace.maxGap) __trace.maxGap = gap; }
+      __trace.lastMoveAt = now;
+      __trace.lastAt = now;
+      if (Math.abs(dx) > __trace.maxDx) __trace.maxDx = Math.abs(dx);
+      if (Math.abs(dy) > __trace.maxDy) __trace.maxDy = Math.abs(dy);
+    }
+    function traceFlush() { if (__trace) __trace.flushes++; }
+
     function flushDrag(force) {
       if (!dragPending) return;
       const now = performance.now();
@@ -139,6 +155,7 @@
       dragLastSentAt = now;
       const p = dragPending;
       dragPending = null;
+      traceFlush();
       window.petApi?.dragMove?.(p.dx, p.dy);
     }
 
@@ -169,13 +186,16 @@
     function onPointerDown(e) {
       if (e.button !== 0 && e.button !== 2) return;
       down = { x: e.screenX, y: e.screenY, t: Date.now(), btn: e.button, dragging: false, pid: e.pointerId };
-      capturePointer(e);
+      traceReset();
+      try { capturePointer(e); } catch (_) {}
+      if (__trace) __trace.captureOk = true;
       window.petApi?.dragStart?.();
     }
 
     function onPointerMove(e) {
       if (!down) return;
       const dx = e.screenX - down.x, dy = e.screenY - down.y;
+      traceMove(dx, dy, performance.now());
       if (!down.dragging && Math.hypot(dx, dy) >= 3) {
         down.dragging = true;
         // 拖动中停掉 Live2D 渲染，把 GPU/主线程让给窗口移动
@@ -193,6 +213,8 @@
       if (dragTimer) { clearTimeout(dragTimer); dragTimer = null; }
       flushDrag(true);          // 补发最后一帧，避免松手瞬间位置回跳
       setTickerPaused(false);   // 恢复渲染
+      // 一次性上报拖动埋点（额外仅 1 次 IPC）
+      if (__trace) { window.petApi?.dragTrace?.(__trace); __trace = null; }
       window.petApi?.dragEnd?.();
     }
 
@@ -206,26 +228,21 @@
     window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('pointermove', onPointerMove, true);
     window.addEventListener('pointerup', onPointerUp, true);
-    // 指针被系统抢走（如切窗口）或窗口失焦 —— 都必须结束拖动，否则窗口会黏着鼠标
+    // 指针被系统抢走（如切窗口）时结束拖动，否则窗口会黏着鼠标。
+    // v4.12.5b：不再监听 window 的 blur —— 真实按住快速拖动透明置顶窗时焦点会短暂波动，
+    // blur 会在拖动中途清掉 down，导致后续移动全部失效（"拖着拖着断/卡"）。
+    // pointercancel 已足以覆盖真正的指针丢失。
     window.addEventListener('pointercancel', endDrag, true);
-    window.addEventListener('blur', endDrag);
     window.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(); });
 
     // ---- 主进程推送 ----
     window.petApi?.onSpeak?.(say);
     window.petApi?.onWave?.(() => tapMotion(2000));
 
-    // ================= Live2D =================
+    // ================= Live2D（v4.12.6 起默认关闭，按需动态加载）=================
     let model = null;
     let paused = false;
-
-    function live2dHit(x, y) {
-      if (!model) return false;
-      const b = model.getBounds();
-      const inset = Math.min(b.width, b.height) * 0.06;
-      return x >= b.left + inset && x <= b.right - inset &&
-             y >= b.top + inset && y <= b.bottom - inset;
-    }
+    let live2dLoading = false;
 
     function applyPause() {
       if (!window.__pixiApp) return;
@@ -235,8 +252,6 @@
 
     /**
      * v4.12.5：拖动中暂停 Live2D 渲染（on=true）/ 结束后恢复（on=false）。
-     * Live2D 每帧要重新合成 2048 贴图，与窗口移动抢 GPU 与主线程；
-     * 拖动时窗口内容本就在变化，暂停动画肉眼无感但能明显减少掉帧。
      * 用户手动「暂停动画（省电）」时 paused=true，拖动结束也不得擅自恢复。
      */
     function dragActive() { return !!(down && down.dragging); }
@@ -255,7 +270,7 @@
       if (model) {
         try { model.motion(Math.random() < 0.5 ? 'TapBody' : 'Idle'); } catch (_) {}
       } else {
-        // 回退：双帧挥手
+        // 小猫模式：双帧挥手
         anim.classList.add('hop');
         let showWave = true;
         const flip = setInterval(() => {
@@ -272,16 +287,44 @@
       }
     }
 
-    // 隐藏页面时停渲染省 GPU；恢复时继续（Live2D 模式）
     document.addEventListener('visibilitychange', applyPause);
 
-    (async () => {
+    // ---- 默认：显示小猫（开机即此状态，零 WebGL / 零模型依赖，拖动最顺滑）----
+    function showCat() {
+      fallback.classList.add('on');
+      anim.classList.add('breathe');
+    }
+    showCat();
+
+    // ---- 动态脚本加载器（仅切换到 Live2D 时才拉取，文件仍在本地）----
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src; s.async = false;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error('load fail: ' + src));
+        document.head.appendChild(s);
+      });
+    }
+
+    /**
+     * 启动 Live2D（按需）。动态加载本地 pixi/core/pixi-live2d，创建 WebGL app，
+     * 加载模型并隐藏小猫。失败自动退回小猫，不重复弹错误打扰。
+     * @param {string} wanted 模型 URL（pet://...）
+     */
+    async function startLive2D(wanted) {
+      if (model || live2dLoading || window.__pixiApp) return;
+      live2dLoading = true;
       try {
+        if (!window.PIXI) {
+          await loadScript('./assets/live2d/pixi.min.js');
+          await loadScript('./assets/live2d/live2dcubismcore.min.js');
+          await loadScript('./assets/live2d/pixi-live2d-cubism4.min.js');
+        }
         if (!window.PIXI || !window.PIXI.live2d || typeof Live2DCubismCore === 'undefined') {
           throw new Error('runtime missing');
         }
         const { Live2DModel } = window.PIXI.live2d;
-        // v4.7：透明窗口上 MSAA（antialias）代价很高，关掉；限帧 20fps
         const app = new PIXI.Application({
           width: 170, height: 190,
           transparent: true,
@@ -290,16 +333,10 @@
           autoStart: true,
         });
         window.__pixiApp = app;
-        // canvas 设 pointer-events:none（CSS 已设），确保不拦截鼠标事件
         app.view.style.pointerEvents = 'none';
         document.body.appendChild(app.view);
-
-        // 给渲染限帧 —— 透明置顶窗口 60fps 全速渲染是「很卡」的主因之一
         app.ticker.maxFPS = 20;
 
-        // v4.6：模型 URL 由主进程经 query 传入（用户自选 → pet://model/...，内置 → pet://assets/...）
-        const q = new URLSearchParams(location.search);
-        const wanted = q.get('model') || 'pet://assets/live2d/hiyori/Hiyori.model3.json';
         const BUILTIN = 'pet://assets/live2d/hiyori/Hiyori.model3.json';
         const loadAt = async (url) => {
           const m = await Live2DModel.from(url, { autoInteract: false, motionPreload: 'IDLE' });
@@ -311,17 +348,28 @@
           try { m.motion('Idle'); } catch (_) {}
           return m;
         };
-        // 自定义模型失败 → 回落内置 Hiyori → 都失败 → 双帧 PNG
-        try { model = await loadAt(wanted); }
+        try { model = await loadAt(wanted || BUILTIN); }
         catch (e1) {
-          if (wanted === BUILTIN) throw e1;
+          if ((wanted || BUILTIN) === BUILTIN) throw e1;
           model = await loadAt(BUILTIN);
         }
+        // 成功 → 隐藏小猫
+        fallback.classList.remove('on');
+        anim.classList.remove('breathe');
       } catch (e) {
-        // Live2D 不可用 → 回退到双帧 PNG（无阴影、限动画的省电版）
-        fallback.classList.add('on');
-        anim.classList.add('breathe');
+        // 失败 → 确保退回小猫
+        showCat();
         window.petApi?.error?.('live2d-fallback: ' + (e && e.message ? e.message : e));
+      } finally {
+        live2dLoading = false;
+      }
+    }
+
+    // 仅当主进程经 query 指定 mode=live2d 时才自动启动（用户已手动切换并持久化）
+    (() => {
+      const q = new URLSearchParams(location.search);
+      if (q.get('mode') === 'live2d') {
+        startLive2D(q.get('model') || 'pet://assets/live2d/hiyori/Hiyori.model3.json');
       }
     })();
   </script>

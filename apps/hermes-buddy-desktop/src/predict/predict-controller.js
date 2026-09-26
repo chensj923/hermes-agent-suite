@@ -1899,29 +1899,32 @@ class PredictController {
   }
 
   /**
-   * v4.12.0/v4.12.2：后台预热本机模型。启用时调用，不阻塞主流程。
-   * 远端断线时需要本机模型立即顶上；但如果远端当前可用且用户开了远程视觉，
-   * 本机模型暂时只是兜底，不必在开机/启用瞬间立刻拉起 2.6GB 进程抢资源
-   * （实测会拖卡桌宠动画）。延迟到 30s 后再热启，既保留兜底能力，又避免启动即卡。
+   * v4.12.6：本机模型改为「纯懒启动」。
+   *
+   * 用户诉求＝推理默认走远端，不要被本地 2.6GB 模型拖累/拖卡。
+   * 因此：
+   *   - 远端可用时：完全不自动拉起本地模型（零进程、零占用）；
+   *     远端万一在某轮失败，runner.generate 自身会 `await start()` 按需顶上
+   *     （兜底路径天然懒启动，见 local-model-runner.generate）。
+   *   - 远端不可用时（断线）：立即启动本地模型兜底，保证离线仍可用。
+   * 之前的「延迟 30s 预热」已取消 —— 即便延迟，30s 后仍会无谓占用内存，
+   * 且它启动那一刻仍可能造成短暂卡顿。
    */
   async warmLocalModel() {
     const runner = this._runner();
     if (!runner) return { ok: false, reason: '本地模型未安装' };
     if (runner.started) return { ok: true, reason: '本地模型已就绪' };
-    // v4.12.2：远端可用且开启远程视觉时，延迟预热，让开机不卡
-    if (this._remoteUsable() && this.config.get('remoteVision') !== false) {
-      this.logger.info('predict-warm-local-deferred', { ms: 30000 });
-      await new Promise((resolve) => { setTimeout(resolve, 30000); });
-      // 延迟期间用户可能已关闭预测，直接放弃启动
-      if (!this._enabled) {
-        this.logger.info('predict-warm-local-cancelled-disabled');
-        return { ok: false, reason: '预测已关闭' };
-      }
-      // 延迟期间可能已变为不可用（断线），此时更需要本机，继续启动
+    // 远端可用 → 不预热，零占用
+    if (this._remoteUsable()) {
+      this.logger.info('predict-local-skipped-remote-usable');
+      return { ok: false, reason: '远端可用，本地模型按需懒启动' };
     }
+    // 远端不可用 → 立即拉起兜底
+    this.logger.info('predict-local-start-offline-fallback');
+    if (!this._enabled) return { ok: false, reason: '预测已关闭' };
     try {
       await runner.start();
-      return { ok: true, reason: '本地模型预热完成' };
+      return { ok: true, reason: '本地模型已启动（离线兜底）' };
     } catch (e) {
       this.logger.warn('predict-warm-local-failed', { error: e.message });
       return { ok: false, reason: e.message };
