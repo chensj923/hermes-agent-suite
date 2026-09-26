@@ -114,12 +114,33 @@
       bubble._t = setTimeout(() => bubble.classList.remove('show'), 4000);
     }
 
-    let down = null;          // { x, y, t, btn, dragging }
+    let down = null;          // { x, y, t, btn, dragging, pid }
     const CLICK_SLOP = 5;
     let lastMenuAt = 0;       // 防止 click / mouseup / contextmenu 重复弹两次
-    // 拖动节流：不每个 mousemove 都发 IPC（60fps -> 16fps 足够流畅，且 setPosition 是同步阻塞调用）
-    let dragRafQueued = false;
-    let dragLastDx = 0, dragLastDy = 0;
+    // v4.12.5 拖动节流：改用「时间节流」。
+    // 之前用 rAF 节流，但高刷屏（120/144Hz）rAF 间隔只有 ~7ms，等于不节流 ——
+    // 每秒上百次同步 setBounds（每次 ~1.2ms 阻塞主进程）是「按住移动卡顿」主因之一。
+    // 这里硬限到 ~60fps，并在松手时补发最后一帧。
+    const DRAG_MIN_INTERVAL = 16;
+    let dragLastSentAt = 0;
+    let dragPending = null;   // { dx, dy }
+    let dragTimer = null;
+
+    function flushDrag(force) {
+      if (!dragPending) return;
+      const now = performance.now();
+      const wait = DRAG_MIN_INTERVAL - (now - dragLastSentAt);
+      if (!force && wait > 0) {
+        if (!dragTimer) {
+          dragTimer = setTimeout(() => { dragTimer = null; flushDrag(true); }, wait + 1);
+        }
+        return;
+      }
+      dragLastSentAt = now;
+      const p = dragPending;
+      dragPending = null;
+      window.petApi?.dragMove?.(p.dx, p.dy);
+    }
 
     function openMenu() {
       const now = Date.now();
@@ -129,40 +150,65 @@
       window.petApi?.click();
     }
 
-    // v4.7：窗口默认完全可交互（不再点击穿透），所以整个窗口都能拖动，
-    // 菜单用 click / contextmenu / mouseup 三条路都挂，避免某条路径被系统吞掉。
-    function onMouseDown(e) {
-      down = { x: e.screenX, y: e.screenY, t: Date.now(), btn: e.button, dragging: false };
-      window.petApi?.dragStart?.();
-    }
-    function onMouseMove(e) {
-      if (!down) return;
-      const dx = e.screenX - down.x, dy = e.screenY - down.y;
-      if (!down.dragging && Math.hypot(dx, dy) >= 3) down.dragging = true;
-      if (down.dragging) {
-        dragLastDx = dx; dragLastDy = dy;
-        if (!dragRafQueued) {
-          dragRafQueued = true;
-          requestAnimationFrame(() => {
-            dragRafQueued = false;
-            window.petApi?.dragMove?.(dragLastDx, dragLastDy);
-          });
-        }
+    /**
+     * v4.12.5：改用 pointer 事件 + setPointerCapture。
+     *
+     * 之前用 mouse 事件且没有指针捕获：鼠标按住一旦移出这个 170x190 的小窗口，
+     * 窗口就再也收不到 mousemove/mouseup —— 表现为「拖动顿住、拖不动」，
+     * 且松手在窗口外时 down 永远清不掉，之后不按鼠标移动窗口也会跟着跑。
+     * setPointerCapture 保证指针移出窗口后事件仍持续投递到本窗口。
+     */
+    function capturePointer(e) {
+      const id = e.pointerId;
+      const targets = [e.target, document.body, document.documentElement];
+      for (const t of targets) {
+        try { if (t && t.setPointerCapture) { t.setPointerCapture(id); return; } } catch (_) {}
       }
     }
-    function onMouseUp(e) {
+
+    function onPointerDown(e) {
+      if (e.button !== 0 && e.button !== 2) return;
+      down = { x: e.screenX, y: e.screenY, t: Date.now(), btn: e.button, dragging: false, pid: e.pointerId };
+      capturePointer(e);
+      window.petApi?.dragStart?.();
+    }
+
+    function onPointerMove(e) {
+      if (!down) return;
+      const dx = e.screenX - down.x, dy = e.screenY - down.y;
+      if (!down.dragging && Math.hypot(dx, dy) >= 3) {
+        down.dragging = true;
+        // 拖动中停掉 Live2D 渲染，把 GPU/主线程让给窗口移动
+        setTickerPaused(true);
+      }
+      if (down.dragging) {
+        dragPending = { dx, dy };
+        flushDrag(false);
+      }
+    }
+
+    function endDrag() {
+      if (!down) return;
+      down = null;
+      if (dragTimer) { clearTimeout(dragTimer); dragTimer = null; }
+      flushDrag(true);          // 补发最后一帧，避免松手瞬间位置回跳
+      setTickerPaused(false);   // 恢复渲染
+      window.petApi?.dragEnd?.();
+    }
+
+    function onPointerUp(e) {
       if (!down) return;
       const moved = Math.hypot(e.screenX - down.x, e.screenY - down.y);
-      const btn = down.btn;
-      down = null;
-      window.petApi?.dragEnd?.();
-      if (moved < CLICK_SLOP && btn === e.button) openMenu();
+      endDrag();
+      if (moved < CLICK_SLOP) openMenu();
     }
-    window.addEventListener('mousedown', onMouseDown, true);
-    window.addEventListener('mousemove', onMouseMove, true);
-    window.addEventListener('mouseup', onMouseUp, true);
-    window.addEventListener('click', (e) => { if (e.button === 0) openMenu(); }, true);
-    window.addEventListener('dblclick', (e) => { e.preventDefault(); openMenu(); }, true);
+
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('pointermove', onPointerMove, true);
+    window.addEventListener('pointerup', onPointerUp, true);
+    // 指针被系统抢走（如切窗口）或窗口失焦 —— 都必须结束拖动，否则窗口会黏着鼠标
+    window.addEventListener('pointercancel', endDrag, true);
+    window.addEventListener('blur', endDrag);
     window.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(); });
 
     // ---- 主进程推送 ----
@@ -183,8 +229,23 @@
 
     function applyPause() {
       if (!window.__pixiApp) return;
-      if (paused || document.hidden) window.__pixiApp.ticker.stop();
+      if (paused || document.hidden || dragActive()) window.__pixiApp.ticker.stop();
       else window.__pixiApp.ticker.start();
+    }
+
+    /**
+     * v4.12.5：拖动中暂停 Live2D 渲染（on=true）/ 结束后恢复（on=false）。
+     * Live2D 每帧要重新合成 2048 贴图，与窗口移动抢 GPU 与主线程；
+     * 拖动时窗口内容本就在变化，暂停动画肉眼无感但能明显减少掉帧。
+     * 用户手动「暂停动画（省电）」时 paused=true，拖动结束也不得擅自恢复。
+     */
+    function dragActive() { return !!(down && down.dragging); }
+    function setTickerPaused(on) {
+      if (!window.__pixiApp) return;
+      try {
+        if (on || paused || document.hidden) window.__pixiApp.ticker.stop();
+        else window.__pixiApp.ticker.start();
+      } catch (_) {}
     }
 
     // 主进程菜单「暂停动画（省电）」/ 隐藏页面时停渲染，省 GPU/CPU

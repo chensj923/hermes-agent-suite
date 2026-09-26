@@ -163,10 +163,11 @@ class DesktopPet {
       try {
         const b = this.win.getBounds();
         this._dragBase = { x: b.x, y: b.y };
+        this._dragLast = null;
         this._dragging = true;
       } catch (_) {}
     });
-    ipcMain.on('pet:drag-end', () => { this._dragging = false; });
+    ipcMain.on('pet:drag-end', () => { this._dragging = false; this._dragLast = null; });
     ipcMain.on('pet:drag-move', (_e, dx, dy) => this._dragTo(dx, dy));
     // v4.7：不再靠 hover 切换穿透（见 _setClickThrough）；渲染层诊断错误上报
     ipcMain.on('pet:error', (_e, msg) => this.logger.warn('pet-renderer-error', { error: String(msg || '').slice(0, 300) }));
@@ -184,21 +185,22 @@ class DesktopPet {
 
   /**
    * 拖动：以 mousedown 时的窗口位置为基准平移。
-   * 用 setBounds 一次调用代替多次 setPosition + setSize，减少 Win32 同步开销。
-   * 不做额外节流（渲染层已用 rAF 限制到 ~16fps），但 setPosition 本身是
-   * 同步阻塞的 Win32 API -- 之前每个 mousemove 都调一次是卡顿主因。
+   *
+   * v4.12.5：
+   *   - 用 setPosition 代替 setBounds（实测 1.22ms vs 1.31ms，且不带尺寸参数，
+   *     避免每次移动都走一遍尺寸变更路径）；
+   *   - 位置去重：渲染层节流后仍可能发来相同坐标（如只移动了 1px 又回退），
+   *     重复 SetWindowPos 是纯浪费，直接跳过。
+   * 真正的节流在渲染层（时间节流 ~60fps）——高刷屏上 rAF 间隔只有 ~7ms，
+   * 靠 rAF 限流等于不限流，每秒上百次同步窗口移动会把主进程拖垮。
    */
   _dragTo(dx, dy) {
     if (!this.win || !this._dragBase) return;
-    try {
-      const PET_W = PET_WIDTH, PET_H = PET_HEIGHT;
-      this.win.setBounds({
-        x: this._dragBase.x + dx,
-        y: this._dragBase.y + dy,
-        width: PET_W,
-        height: PET_H,
-      });
-    } catch (_) {}
+    const x = this._dragBase.x + dx;
+    const y = this._dragBase.y + dy;
+    if (this._dragLast && this._dragLast.x === x && this._dragLast.y === y) return;
+    this._dragLast = { x, y };
+    try { this.win.setPosition(x, y); } catch (_) {}
   }
 
   /**
