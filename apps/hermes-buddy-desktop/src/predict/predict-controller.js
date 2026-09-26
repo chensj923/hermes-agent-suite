@@ -243,6 +243,7 @@ class PredictController {
     this.db = new BehaviorDB({ dataDir: path.join(this.appDir, 'predict') });
     this.engine = new BehaviorEngine({ config: this.config, db: this.db, logger: this.logger });
     this.hooks = null;
+    this._fgWatcher = null;   // v4.12.8：常驻前台窗口监视器
     this._processing = false;
     this._enabled = false;
     this._degraded = false;   // v4.8.5：防止 analyze 失败 + 面板安全网并发重复降级
@@ -695,6 +696,20 @@ class PredictController {
 
   // ---------------- 生命周期 ----------------
 
+  /**
+   * v4.12.8：从常驻监视器同步读取最新前台窗口（零进程、零冷启动）。
+   * 监视器尚未就绪（启动失败 / 非 Windows）时，回退到 main.js 注入的
+   * resolveWindow（会拉起一次 PowerShell），保证功能不中断。
+   * @returns {Promise<{windowClass:string,title:string,exeName:string}|null>}
+   */
+  async _resolveWindowFromWatcher() {
+    if (this._fgWatcher && this._fgWatcher.running) {
+      const v = this._fgWatcher.latest();
+      if (v) return v;
+    }
+    return this.resolveWindow();
+  }
+
   /** 是否具备启用条件（已授权 + 已启用 + 杀软不阻断）。 */
   _canEnable() {
     return Boolean(this.config.get('authorized') && this.config.get('enabled'));
@@ -706,14 +721,22 @@ class PredictController {
       throw new Error('预测模式未授权，无法启用');
     }
     this.config.set({ enabled: true });
+    // v4.12.8：启动常驻前台监视器（替代钩子内每 800ms 冷启动 powershell 的做法）。
+    // 它只维护「最新前台窗口」内存值；钩子轮询读缓存（零进程），窗口变化仍走
+    // 钩子原有的单一 window_change 通道，避免重复驱动。
+    if (!this._fgWatcher) {
+      const { ForegroundWatcher } = require('./foreground-watcher');
+      this._fgWatcher = new ForegroundWatcher({ logger: this.logger });
+    }
+    await this._fgWatcher.start();
     this.hooks = createBehaviorHooks({
       config: this.config,
       engine: this.engine,
       db: this.db,
       logger: this.logger,
-      resolveWindow: this.resolveWindow,
+      resolveWindow: () => this._resolveWindowFromWatcher(),
       onTrigger: (r) => this._onTrigger(r),
-      // v4.10.24：场景规则监视器挂在前台窗口切换事件上
+      // v4.10.24：场景规则监视器挂在前台窗口切换事件上（通道不变）
       onWindowChange: (p) => this.onWindowChange(p),
     });
     await this.hooks.start();
@@ -730,6 +753,7 @@ class PredictController {
   /** 停用：停钩子、停模型、清上下文。 */
   async disable() {
     if (this.hooks) { try { this.hooks.stop(); } catch (_) {} this.hooks = null; }
+    if (this._fgWatcher) { try { this._fgWatcher.stop(); } catch (_) {} this._fgWatcher = null; }
     if (this.modelRunner) { try { await this.modelRunner.stop(); } catch (_) {} this.modelRunner = null; }
     if (this.panel) { try { this.panel.destroy(); } catch (_) {} }
     this._enabled = false;
@@ -872,7 +896,7 @@ class PredictController {
 
       // 1.5) v4.10.3：前台是本应用自己 → 整轮跳过（不截图、不调模型、不弹卡）
       try {
-        const wi = await this.resolveWindow();
+        const wi = await this._resolveWindowFromWatcher();
         if (false) { // v4.10.8: 不再跳过本应用前台 -- capture.js 已隐藏本应用窗口
           this.logger.info('predict-skip-self-foreground', { title: wi && wi.title, exeName: wi && wi.exeName });
           this.engine.modelTimeout();
@@ -897,7 +921,7 @@ class PredictController {
       if (this.capture) {
         try {
           try {
-            wi = await this.resolveWindow();
+            wi = await this._resolveWindowFromWatcher();
           } catch (_) {}
           const fgTitle = (wi && wi.title) || '';
           const shot = await _withTimeout(
@@ -2000,7 +2024,7 @@ class PredictController {
       // 注意：主动点猫时 OS 前台就是桌宠自己，这里拿到的 wi 是桌宠身份，
       // 不能直接当「用户正在用的应用」——真实身份要从截图源标题反推（见 _applyScreenIdentity）。
       let wi = null;
-      try { wi = await this.resolveWindow(); } catch (_) { /* 前台解析失败不拦截 */ }
+      try { wi = await this._resolveWindowFromWatcher(); } catch (_) { /* 前台解析失败不拦截 */ }
       const fgTitle = (wi && wi.title) || '';
 
       let imageBase64 = null;

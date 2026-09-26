@@ -48,7 +48,8 @@ const PS_SCRIPT = [
 ].join('\n');
 
 /**
- * 取前台窗口信息。
+ * 取前台窗口信息（一次性）。
+ * 注意：高频轮询请改用 foreground-watcher（常驻进程，避免反复冷启动 powershell）。
  * @param {{execFileSync?:function}} [opts]
  * @returns {{windowClass:string,title:string,exeName:string}|null}
  */
