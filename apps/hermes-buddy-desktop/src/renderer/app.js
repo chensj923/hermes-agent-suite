@@ -583,6 +583,49 @@ el.btnDownloadChannelScript.addEventListener('click', async () => {
   }
 });
 
+// ---- 独立部署面板（设置页）：让用户主动把新 deploy 推到服务端升级 ----
+// v4.12.12：之前这两个按钮没有绑定事件，是死的。现在接通，使「需重新部署」可点。
+el.btnDeployToggle.addEventListener('click', () => {
+  const hidden = el.deployPanel.hidden;
+  el.deployPanel.hidden = !hidden;
+  el.btnDeployToggle.setAttribute('aria-expanded', String(hidden));
+  el.btnDeployToggle.textContent = hidden ? '收起部署面板 ▴' : '部署到服务器 ▾';
+});
+
+el.btnDeployKeypick.addEventListener('click', async () => {
+  try {
+    const result = await api.pickSshKey();
+    if (result && result.path) el.deployKey.value = result.path;
+  } catch (e) { /* 用户取消，忽略 */ }
+});
+
+el.btnDeployServer.addEventListener('click', async () => {
+  const host = el.deployHost.value.trim();
+  const user = el.deployUser.value.trim() || 'root';
+  const sshPort = Number(el.deployPort.value.trim()) || 22;
+  const keyPath = el.deployKey.value.trim();
+  const password = el.deployPassword.value.trim();
+  if (!host) { el.deployOutput.textContent = '请填写 Hermes 主机地址'; return; }
+  if (!keyPath && !password) { el.deployOutput.textContent = '请填 SSH 密码或私钥路径'; return; }
+  // 更新部署：不带上游参数 -> deploy.sh 检测不到 BUDDY_UPSTREAM_* 就不会动
+  // buddy-proxy.env，服务端现有上游配置原样保留（只升级通道/推理代理脚本）。
+  ensureDeploySubscribed();
+  el.btnDeployServer.disabled = true;
+  el.deployOutput.textContent = '正在通过 SSH 推送并部署（升级服务端组件）…\n';
+  try {
+    const result = await api.deployToServer({ host, user, keyPath, password, sshPort });
+    if (!result || !result.ok) {
+      el.deployOutput.textContent += '\n部署失败（退出码 ' + ((result && result.code) || '?') + '）。\n' + ((result && result.error) || '');
+    } else {
+      el.deployOutput.textContent += '\n部署完成。重新打开软件连接，服务端即为最新 build。\n';
+    }
+  } catch (e) {
+    el.deployOutput.textContent += '\n部署异常：' + e.message + '\n';
+  } finally {
+    el.btnDeployServer.disabled = false;
+  }
+});
+
 el.btnPickWorkspace.addEventListener('click', async () => {
   try {
     const result = await api.pickWorkspace();
@@ -3201,6 +3244,16 @@ async function renderProfiles() {
     return false;
   }
   for (const p of data.profiles) {
+    // 过旧项可点击：展开部署面板并预填该服务器，让用户主动推送升级。
+    const revealDeployFor = (host) => {
+      if (!host) return;
+      el.deployHost.value = host;
+      if (p.user) el.deployUser.value = p.user;
+      el.deployPanel.hidden = false;
+      el.btnDeployToggle.setAttribute('aria-expanded', 'true');
+      el.btnDeployToggle.textContent = '收起部署面板 ▴';
+      if (el.deployPanel.scrollIntoView) el.deployPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
     const card = document.createElement('div');
     card.className = 'profile-card';
     card.dataset.active = String(p.id === data.activeId);
@@ -3239,10 +3292,16 @@ async function renderProfiles() {
         verEl.textContent = '版本探测失败：' + probe.error;
       } else if (probe.buildStale) {
         verEl.dataset.state = 'outdated';
-        verEl.textContent = `服务端脚本 build ${probe.build} 过旧，需重新部署（要求 build ${probe.buildRequired}+）`;
+        verEl.textContent = `服务端脚本 build ${probe.build} 过旧，需重新部署（要求 build ${probe.buildRequired}+）点此更新`;
+        verEl.classList.add('clickable');
+        verEl.title = '点击打开部署面板，把最新组件推到这台服务器';
+        verEl.addEventListener('click', () => revealDeployFor(host));
       } else if (probe.needsRedeploy) {
         verEl.dataset.state = 'outdated';
-        verEl.textContent = `服务端版本 ${probe.version} 过旧，需重新部署（要求 ${probe.required}+）`;
+        verEl.textContent = `服务端版本 ${probe.version} 过旧，需重新部署（要求 ${probe.required}+）点此更新`;
+        verEl.classList.add('clickable');
+        verEl.title = '点击打开部署面板，把最新组件推到这台服务器';
+        verEl.addEventListener('click', () => revealDeployFor(host));
       } else if (probe.ok) {
         verEl.dataset.state = 'ok';
         verEl.textContent = `服务端版本 ${probe.version} ✓`;

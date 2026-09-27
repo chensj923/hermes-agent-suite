@@ -4,7 +4,7 @@
  * 校验「服务端部署压缩包」与仓库事实源是否一致。
  *
  * 背景（v4.11.0 真实事故）：
- *   改了 packages/hermes-buddy-channel/buddy-channel.py（BUILD 12 -> 14）后，
+ *   改了 packages/hermes-buddy-channel/buddy-channel.py（BUILD 14 -> 15）后，
  *   直接调 electron-builder 打包，跳过了 build-server-deploy-bundle.js。
  *   结果安装包内嵌的 server-deploy/*.tar.gz 仍是 build 12 ——
  *   客户端「一键部署」显示成功、服务端版本却永远不变，

@@ -1171,6 +1171,8 @@ body.resizing .context-resizer { pointer-events: auto; }
 .profile-version[data-state="outdated"] { color: #e74c3c; font-weight: 500; }
 .profile-version[data-state="unknown"] { color: var(--muted); }
 .profile-version[data-state="probing"] { color: var(--muted); font-style: italic; }
+.profile-version.clickable { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.profile-version.clickable:hover { opacity: 0.8; }
 .profile-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .profile-empty { color: var(--muted); font-size: 13px; padding: 6px 0 12px; }
 

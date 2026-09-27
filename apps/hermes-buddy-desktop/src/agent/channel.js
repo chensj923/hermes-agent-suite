@@ -40,8 +40,10 @@ const REQUIRED_CHANNEL_VERSION = '2.3';
  * 修 prompt 文案、加新函数不抬协议版本但抬 BUILD。客户端据此检测服务端脚本过旧
  * 并提示重新部署（老用户装新客户端后服务端仍是旧脚本 -> 功能静默缺失）。
  * 服务端 CHANNEL_BUILD < 此值 -> "服务端脚本过旧，请重新部署"。
+ * v4.12.12：抬到 15，因 deploy 已携带自动同步能力（模型随 config 对齐），
+ * 旧服务端（build 14）缺失该能力，装新客户端后应由向导/部署面板自动重部署升级。
  */
-const REQUIRED_CHANNEL_BUILD = 14;
+const REQUIRED_CHANNEL_BUILD = 15;
 
 /**
  * v4.10.30：predict_request 的等待上限。

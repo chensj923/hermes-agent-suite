@@ -59,7 +59,10 @@ CHANNEL_VERSION = "2.3"
 #   10 = v4.10.2x 结晶记忆注入 / 预测兜底
 #   11 = v4.10.30 pong 帧不再被二次编码成文本帧（修 channel-bad-json）
 #   12 = v4.10.35 predict_request/response 携带 req_id（支持并发请求按 ID 匹配）
-CHANNEL_BUILD = "14"
+#   14 = v4.12.x 上游模型名解析改为「Hermes config.yaml 权威、buddy-proxy.env 历史 pin 仅兜底」
+#        （部署即随 config 自动对齐；改 config 重启通道即生效，不再被陈旧 pin 掩盖）
+#   15 = v4.12.12 同 14 脚本内容，随 deploy 自动同步发布：客户端据此要求服务端重部署升级
+CHANNEL_BUILD = "15"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
