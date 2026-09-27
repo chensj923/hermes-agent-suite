@@ -152,6 +152,8 @@ class ChannelClient {
     this.serverVersion = '';   // 服务端 welcome 里声明的通道版本
     this.serverUpstream = '';  // 服务端实际在调的模型地址（出错时才知道该去查哪里）
     this._welcomed = false;    // 是否已收到 welcome（决定断连时该 resolve 还是 reject）
+    this._serverDefaultModel = '';   // 服务端 list_models 回传的实时默认模型
+    this._serverUnsupportedModels = []; // 服务端已判定不支持的模型名
     this._supportsResume = false;  // 服务端是否支持 resume_session（1.5+）
     this._supportsPredict = false;  // 服务端是否支持预测模式远端推断（2.0+）
     this.outdated = null;      // 版本不满足时置为 { server, required }，此时通道已断开
@@ -337,11 +339,15 @@ class ChannelClient {
       return;
     }
     if (msg.type === 'models') {
-      // list_models 的应答：服务端从上游 /models 拉到的真实模型清单
+      // list_models 的应答：服务端从上游 /models 拉到的真实模型清单。
+      // 同时缓存服务端实时默认模型 / 已判定不支持的模型，供校正本地过期选择。
+      const list = Array.isArray(msg.models) ? msg.models : [];
+      if (typeof msg.default === 'string') this._serverDefaultModel = msg.default;
+      if (Array.isArray(msg.unsupported)) this._serverUnsupportedModels = msg.unsupported;
       if (this.pendingModels) {
         const p = this.pendingModels;
         this.pendingModels = null;
-        p.resolve(Array.isArray(msg.models) ? msg.models : []);
+        p.resolve(list);
       }
       return;
     }
@@ -662,6 +668,14 @@ class ChannelClient {
       }, timeoutMs);
       this.send({ type: 'list_models', session: this.sessionId });
     });
+  }
+
+  /**
+   * 服务端最近一次 list_models 回传的实时默认模型名（STATE["model"]）。
+   * 必须先 await listModels() 才有值；未探测过时返回空串。
+   */
+  getDefaultModel() {
+    return this._serverDefaultModel || '';
   }
 
   abort() {

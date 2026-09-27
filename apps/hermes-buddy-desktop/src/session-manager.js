@@ -1298,6 +1298,74 @@ class SessionManager {
     }
   }
 
+  /**
+   * 拉模型清单的同时，取服务端回传的「实时默认模型」。
+   * 通道模式下这个默认名来自服务端 STATE["model"]，是校正本地过期选择的依据。
+   */
+  async modelsWithDefault() {
+    const list = await this.models();
+    const defaultModel = (this.channel && typeof this.channel.getDefaultModel === 'function')
+      ? this.channel.getDefaultModel()
+      : '';
+    return { models: list, defaultModel };
+  }
+
+  /**
+   * 进入软件 / 重连后调用：问 Hermes 当前真实模型名，对应校正本地选择。
+   *
+   * - 先拉最新清单与服务端实时默认模型；
+   * - 持久化的 connection.model 若已过期（不在最新清单）或为空，则跟随服务端默认并写回；
+   * - 返回下拉应当选中的模型，优先级：
+   *     智能体显式且仍有效 > 服务端实时默认 > 连接模型（已校正）> 清单第一项。
+   */
+  async reconcileModel() {
+    const { models: list, defaultModel } = await this.modelsWithDefault();
+    const inList = (m) => Boolean(m) && list.includes(m);
+    const agent = this.activeAgent;
+    const agentModel = agent ? agent.model : '';
+    const connModel = this.connection ? this.connection.model : '';
+
+    // 校正并持久化 connection.model
+    let nextConnModel = connModel;
+    if (!inList(connModel) && defaultModel) {
+      nextConnModel = defaultModel;
+      this.connection = { ...this.connection, model: nextConnModel };
+      try {
+        this.connection = this.store.save(this.connection);
+        this.logger.info('model-reconciled', { from: connModel, to: nextConnModel });
+      } catch (error) {
+        this.logger.warn('model-reconcile-save-failed', { error: error.message });
+      }
+    }
+
+    let selected = '';
+    if (inList(agentModel)) selected = agentModel;
+    else if (inList(defaultModel)) selected = defaultModel;
+    else if (inList(nextConnModel)) selected = nextConnModel;
+    else selected = list[0] || '';
+
+    return { models: list, defaultModel, selected, agentModel };
+  }
+
+  /**
+   * 用户在顶部下拉手动切换模型：立即持久化，下次 send 即生效。
+   * agentScope=true（默认）写到当前智能体；否则写到连接默认模型。
+   */
+  setActiveModel(model, agentScope = true) {
+    const m = String(model || '').trim();
+    if (agentScope && this.agentStore && this.activeAgent) {
+      this.agentStore.update(this.activeAgent.id, { model: m });
+      this.logger.info('active-model-set', { scope: 'agent', model: m });
+      return { scope: 'agent', model: m };
+    }
+    if (this.connection) {
+      this.connection = this.store.save({ ...this.connection, model: m });
+      this.logger.info('active-model-set', { scope: 'connection', model: m });
+      return { scope: 'connection', model: m };
+    }
+    return { scope: 'none', model: m };
+  }
+
   toolchain() { return detectTooling(); }
 
   async provisioningStatus() {

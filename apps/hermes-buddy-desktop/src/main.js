@@ -283,6 +283,9 @@ function registerIpc() {
   handle('buddy:profile:probe', async (_event, profile) => manager.probeProfileVersion(profile));
 
   handle('buddy:models', () => manager.models());
+  handle('buddy:model:reconcile', () => manager.reconcileModel());
+  handle('buddy:model:set', (_event, payload = {}) =>
+    manager.setActiveModel(String(payload.model || ''), Boolean(payload.agentScope)));
   handle('buddy:history', () => manager.history());
   handle('buddy:clear-history', () => manager.clearHistory());
   handle('buddy:provisioning-status', () => manager.provisioningStatus());

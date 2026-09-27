@@ -1541,12 +1541,18 @@ async function sendMessage() {
   }
 }
 
-async function loadModels(preferred) {
+async function loadModels() {
+  // 进入软件 / 重连 / 切换智能体都重新问 Hermes 当前真实模型名，
+  // 服务端默认模型变化时下拉自动校正，不再一直卡在旧名。
   let models = ['hermes-agent'];
+  let selected = '';
   try {
-    const list = await api.models();
+    const r = await api.reconcileModel();
     // 空清单不覆盖兜底值，否则下拉会变成空白
-    if (Array.isArray(list) && list.length) models = list;
+    if (Array.isArray(r.models) && r.models.length) {
+      models = r.models;
+      selected = r.selected || '';
+    }
   } catch (_) {}
   el.modelSelect.textContent = '';
   for (const id of models) {
@@ -1555,7 +1561,7 @@ async function loadModels(preferred) {
     option.textContent = id;
     el.modelSelect.appendChild(option);
   }
-  if (preferred && models.includes(preferred)) el.modelSelect.value = preferred;
+  if (selected && models.includes(selected)) el.modelSelect.value = selected;
 }
 
 function applyStatus(status) {
@@ -1596,10 +1602,6 @@ function permLabel(level) {
     'read-write': '读 + 写',
     full: '完全控制'
   })[level] || level;
-}
-
-function modelsInclude(select, value) {
-  return Array.from(select.options || []).some((option) => option.value === value);
 }
 
 // ---- 智能体列表：左侧栏。点击切换智能体（切工作区/权限/模型/上下文），齿轮打开配置 ----
@@ -1668,9 +1670,7 @@ async function refreshChatForAgent() {
   const status = await api.status().catch(() => null);
   if (status) {
     applyStatus(status);
-    const agents = await api.agents().catch(() => null);
-    const active = agents && agents.agents.find((a) => a.id === agents.activeId);
-    await loadModels((active && active.model) || (status && status.model));
+    await loadModels();
     await renderSessionList();
   }
   el.input.focus();
@@ -1679,11 +1679,7 @@ async function refreshChatForAgent() {
 async function enterChat(status) {
   applyStatus(status);
   showView('chat');
-  await loadModels(status && status.model);
-  // 模型下拉优先反映当前智能体的默认模型。
-  const agents = await api.agents().catch(() => null);
-  const active = agents && agents.agents.find((a) => a.id === agents.activeId);
-  if (active && active.model && modelsInclude(el.modelSelect, active.model)) el.modelSelect.value = active.model;
+  await loadModels();
   await renderSessionList();
   const history = await api.history().catch(() => []);
   el.chatLog.textContent = '';
@@ -1746,6 +1742,7 @@ el.btnReconnect.addEventListener('click', async () => {
   if (result.ok) {
     hideBanner();
     applyStatus(await api.status());
+    await loadModels();
     addMessage('system', '已重新建立会话。');
   } else {
     setStatusDot('error');
@@ -3166,7 +3163,9 @@ async function renderGatewayDiagTab() {
 }
 
 el.modelSelect.addEventListener('change', () => {
-  // 模型切换后下一次 send 会带入；不立即生效是符合预期的。
+  // 手动切换立即持久化到当前智能体，下次 send 即生效；失败静默回退到原值。
+  const value = el.modelSelect.value;
+  api.setActiveModel(value, true).catch(() => {});
 });
 
 // ============================================================ 启动

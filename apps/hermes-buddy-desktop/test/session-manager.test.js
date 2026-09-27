@@ -431,6 +431,49 @@ test('models: 推理服务异常时退回当前模型', async () => {
   assert.deepEqual(await manager.models(), ['hermes-agent']);
 });
 
+test('reconcileModel: 服务端默认模型变化时校正过期的连接模型并持久化', async () => {
+  const { manager, workspace } = makeManager();
+  await manager.connect(CONNECTION(workspace));
+  // 模拟进入软件后通道已恢复：服务端真实清单不含旧名，实时默认模型为 glm-5-3-flash-260828
+  manager.channel = {
+    async listModels() {
+      return ['glm-5-3-flash-260828', 'doubao-seed-1-6-flash-250828'];
+    },
+    getDefaultModel: () => 'glm-5-3-flash-260828'
+  };
+  const beforeModel = manager.connection.model;
+  assert.notEqual(beforeModel, 'glm-5-3-flash-260828');
+
+  const r = await manager.reconcileModel();
+  assert.deepEqual(r.models, ['glm-5-3-flash-260828', 'doubao-seed-1-6-flash-250828']);
+  assert.equal(r.defaultModel, 'glm-5-3-flash-260828');
+  assert.equal(r.selected, 'glm-5-3-flash-260828');
+  // connection.model 已跟随服务端默认并写回磁盘
+  assert.equal(manager.connection.model, 'glm-5-3-flash-260828');
+  assert.equal(manager.store.load().model, 'glm-5-3-flash-260828');
+});
+
+test('reconcileModel: 当前智能体显式模型仍有效时优先智能体选择', async () => {
+  const { manager, workspace } = makeManager();
+  await manager.connect(CONNECTION(workspace));
+  manager.agentStore.update(manager.activeAgent.id, { model: 'doubao-seed-1-6-flash-250828' });
+  manager.channel = {
+    async listModels() {
+      return ['glm-5-3-flash-260828', 'doubao-seed-1-6-flash-250828'];
+    },
+    getDefaultModel: () => 'glm-5-3-flash-260828'
+  };
+  const r = await manager.reconcileModel();
+  assert.equal(r.selected, 'doubao-seed-1-6-flash-250828');
+});
+
+test('setActiveModel: 手动切换写入当前智能体', async () => {
+  const { manager, workspace } = makeManager();
+  await manager.connect(CONNECTION(workspace));
+  manager.setActiveModel('doubao-seed-1-6-flash-250828', true);
+  assert.equal(manager.activeAgent.model, 'doubao-seed-1-6-flash-250828');
+});
+
 test('工作区越界：工具读不到工作区外的文件', async () => {
   const { manager, workspace } = makeManager();
   await manager.connect(CONNECTION(workspace));
