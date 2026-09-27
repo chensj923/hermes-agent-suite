@@ -487,9 +487,18 @@ fi
 
 # =============================================================================
 # 3. 探测上游并完成 function-calling 实测，写 buddy-proxy.env
+#
+# 自动同步说明（v4.12.10 起）：本步从 Hermes config.yaml 推导上游模型，
+# 因此【每次部署都会让通道/代理对齐到 Hermes 主配置当前模型】。
+# 通道运行期（buddy-channel.py / buddy-inference-proxy.py）的解析优先级为：
+#   进程环境变量 BUDDY_UPSTREAM_MODEL（部署时用户硬指定）
+#     > config.yaml 当前模型（默认权威，随 config 自动对齐）
+#     > buddy-proxy.env 历史 pin（仅兜底）
+# 即：改了 config.yaml 的 model，只要重新部署（或仅重启通道服务），
+#   下拉框就会自动跟随，不再卡在旧模型名。
 # =============================================================================
 echo ""
-echo "[deploy] ---- 3/4 探测上游并实测 function calling ----"
+echo "[deploy] ---- 3/4 探测上游并实测 function calling（并据 Hermes config.yaml 自动同步模型）----"
 HERMES_HOME="$HERMES_HOME" BUDDY_PROXY_PORT="$PROXY_PORT" BUDDY_PROXY_KEY="$PROXY_KEY" SHOW_KEYS="$SHOW_KEYS" python3 - <<'PYTEST' 2>&1 | sed 's/^/  /' || true
 import json, os, re, sys, urllib.request, urllib.error
 
@@ -606,7 +615,7 @@ if FORCE_WRITE:
         f.write("BUDDY_UPSTREAM_KEY=%s\n" % key)
     print("已写入 " + HOME + "/buddy-proxy.env（用户提供的上游参数，跳过 FC 探测）")
     print("  base_url =", base)
-    print("  model    =", name)
+    print("  model    =", name, "（用户显式指定，已作为硬覆盖写入；若要改回随 Hermes config 同步，删除此行并重部署）")
     print("  api_key  :", key if SHOW else mask(key))
     # 仍然试一下 FC，但不阻断
     purl = "http://127.0.0.1:%s/v1/chat/completions" % PORT
@@ -700,6 +709,7 @@ with open(os.path.join(HOME, "buddy-proxy.env"), "w", encoding="utf-8") as f:
     f.write("BUDDY_UPSTREAM_MODEL=%s\n" % name)
     f.write("BUDDY_UPSTREAM_KEY=%s\n" % key)
 print("已写入 " + HOME + "/buddy-proxy.env（上游密钥只存在服务端）")
+print("  模型已据 Hermes config.yaml 同步为:", name, "（通道重启即自动跟随此配置）")
 
 purl = "http://127.0.0.1:%s/v1/chat/completions" % PORT
 j, err = fc_test(purl, PROXY_KEY or key, name, True)
