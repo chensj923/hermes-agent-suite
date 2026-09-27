@@ -230,10 +230,18 @@ def discover_upstream():
             or model.get("base_url") or model.get("base-url") or model.get("endpoint")
             or env.get("OPENAI_BASE_URL") or "")
 
+    # 模型名解析优先级（v4.12.10 起）：与通道一致——
+    #   1) 进程环境变量 BUDDY_UPSTREAM_MODEL（部署时用户硬指定，最高优先）；
+    #   2) Hermes 主配置 config.yaml 当前模型（默认权威，随 config 自动对齐）；
+    #   3) buddy-proxy.env 历史 pin（仅兜底）；
+    #   4) .env OPENAI_MODEL / hermes-agent。
+    config_model = (model.get("name") or model.get("model") or model.get("model_name")
+                    or model.get("default") or "")
+    if not config_model and provider_match:
+        config_model = provider_match.get("model") or provider_match.get("model_name") or ""
     name = (os.environ.get("BUDDY_UPSTREAM_MODEL")
+            or config_model
             or proxy_env.get("BUDDY_UPSTREAM_MODEL")
-            or model.get("name") or model.get("model") or model.get("model_name")
-            or model.get("default")
             or env.get("OPENAI_MODEL") or "hermes-agent")
 
     key = (os.environ.get("BUDDY_UPSTREAM_KEY")
@@ -241,6 +249,7 @@ def discover_upstream():
            or provider_match.get("api_key") or provider_match.get("apiKey") or ""
            or model.get("api_key") or model.get("apiKey") or "")
     if not key:
+        # Only do the broad dig/env scan if we didn't find a key in the provider match
         key = (dig(model, "api_key", "apiKey", "key", "token") or "")
     if not key:
         for hint in ENV_KEY_HINTS:

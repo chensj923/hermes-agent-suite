@@ -268,10 +268,20 @@ def discover_upstream():
             or model.get("base_url") or model.get("base-url") or model.get("endpoint")
             or env.get("OPENAI_BASE_URL") or "")
 
+    # 模型名解析优先级（v4.12.10 起）：
+    #   1) 进程环境变量 BUDDY_UPSTREAM_MODEL —— 部署时用户显式硬指定，最高优先；
+    #   2) Hermes 主配置 config.yaml 的当前模型（model.name/default，或 model-router provider 名）
+    #      —— 默认以此为准，实现“随 Hermes 配置自动对齐”：改了 config 只需重启通道即生效；
+    #   3) buddy-proxy.env 里的历史 pin —— 仅当 config 无可用模型名时才兜底，
+    #      避免陈旧 pin 掩盖 config 变更（这正是此前一直卡在 glm-5.3-flash 的根因）；
+    #   4) .env 的 OPENAI_MODEL / 兜底 hermes-agent。
+    config_model = (model.get("name") or model.get("model") or model.get("model_name")
+                    or model.get("default") or "")
+    if not config_model and provider_match:
+        config_model = provider_match.get("model") or provider_match.get("model_name") or ""
     name = (os.environ.get("BUDDY_UPSTREAM_MODEL")
+            or config_model
             or proxy_env.get("BUDDY_UPSTREAM_MODEL")
-            or model.get("name") or model.get("model") or model.get("model_name")
-            or model.get("default")
             or env.get("OPENAI_MODEL") or "hermes-agent")
 
     key = (os.environ.get("BUDDY_UPSTREAM_KEY")
