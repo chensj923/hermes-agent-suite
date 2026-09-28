@@ -80,6 +80,45 @@ function findEngine(kind, appDir) {
   return '';
 }
 
+/**
+ * v4.12.18：模型文件完整性校验。
+ * 事故：hf-mirror 下载被截断，ggml-base.bin 只有 8.8 MB（应为 ~148 MB），
+ * 魔数仍是 ggml 所以"看起来像个模型"，findWhisperModel 照样当已安装，
+ * 直到 whisper 启动时报 "not all tensors loaded - expected 245, got 3"。
+ * 下载完必须验：① 体积是否够 ② 文件头是不是 ggml/GGUF（防下到 HTML 错误页）。
+ */
+const MODEL_MAGIC_GGML = Buffer.from([0x6c, 0x6d, 0x67, 0x67]); // "ggml"（uint32 小端）
+const MODEL_MAGIC_GGUF = Buffer.from('GGUF', 'ascii');
+/** 比这还小一定是坏的：最小的 whisper tiny 也有 70 MB+。 */
+const MODEL_MIN_BYTES = 20 * 1024 * 1024;
+/** 已知预期体积时的截断阈值（不同镜像给出的实际体积略有出入，留 10% 余量）。 */
+const MODEL_TRUNCATE_RATIO = 0.9;
+
+function verifyWhisperModel(file, expectBytes) {
+  let bytes = 0;
+  try { bytes = fs.statSync(file).size; } catch (_) { return { ok: false, bytes: 0, reason: 'missing', detail: '文件不存在' }; }
+  const mbOf = (n) => (n / 1048576).toFixed(1) + ' MB';
+  if (bytes < MODEL_MIN_BYTES) {
+    return { ok: false, bytes, reason: 'truncated', detail: `只有 ${mbOf(bytes)}，远小于正常模型` };
+  }
+  let magicOk = false;
+  try {
+    const fd = fs.openSync(file, 'r');
+    const head = Buffer.alloc(4);
+    fs.readSync(fd, head, 0, 4, 0);
+    fs.closeSync(fd);
+    magicOk = head.equals(MODEL_MAGIC_GGML) || head.equals(MODEL_MAGIC_GGUF);
+  } catch (_) { magicOk = false; }
+  if (!magicOk) {
+    return { ok: false, bytes, reason: 'bad-magic', detail: '文件头不是 ggml/GGUF（很可能下到了错误页或 HTML）' };
+  }
+  const exp = Number(expectBytes) || 0;
+  if (exp > 0 && bytes < exp * MODEL_TRUNCATE_RATIO) {
+    return { ok: false, bytes, reason: 'truncated', detail: `只有 ${mbOf(bytes)}，应约 ${mbOf(exp)}` };
+  }
+  return { ok: true, bytes, reason: '', detail: '' };
+}
+
 /** 找 whisper.cpp 的模型文件（ggml-*.bin）。 */
 function findWhisperModel(appDir) {
   const envVal = (process.env.BUDDY_WHISPER_MODEL || '').trim();
@@ -381,4 +420,6 @@ module.exports = {
   // v4.12.17：语音(STT)链路要用。之前没导出，voice-manager 调 pre.toWav16k
   // 直接 TypeError「is not a function」，收音成功但转写必崩——必须导出并加测试守住。
   toWav16k, runTranscribe, buildWhisperArgs,
+  // v4.12.18：模型完整性校验（防截断/错误页被当成已安装）
+  verifyWhisperModel, MODEL_MIN_BYTES, MODEL_TRUNCATE_RATIO,
 };

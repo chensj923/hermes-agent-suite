@@ -45,6 +45,10 @@ const pendingConfirms = new Map();
 // 确保至少能启动；性能影响对 Buddy 这种工具型应用可忽略。
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('no-sandbox');
+// v4.12.18：TTS 的 WAV 是在桌宠窗口里播的，而"点击试听"这个用户手势发生在主窗口，
+// Chromium 的自动播放策略（需用户激活）跨窗口不传递 → audio.play() 被拒且静默失败，
+// 表现就是"点了试听没反应"。放开自动播放限制。
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 // CI / 远程会话里通常没有可用 GPU，冒烟时关掉硬件加速，避免 GPU 进程拖垮启动。
 if (SMOKE_TEST) {
@@ -883,7 +887,9 @@ function registerIpc() {
     }
     return { ok, status: voiceManager.status() };
   });
-  handle('buddy:voice:speak', async (_event, text) => (voiceManager ? voiceManager.speak(String(text || '')) : false));
+  handle('buddy:voice:speak', async (_event, text) => (voiceManager
+    ? voiceManager.speak(String(text || ''))
+    : { ok: false, reason: '语音模块未就绪' }));
   handle('buddy:voice:start-listen', () => { if (voiceManager) voiceManager.setListening(true); return { listening: voiceManager ? voiceManager.isListening() : false }; });
   handle('buddy:voice:stop-listen', () => { if (voiceManager) voiceManager.setListening(false); return { listening: false }; });
   handle('buddy:voice:listen', (_event, on) => {

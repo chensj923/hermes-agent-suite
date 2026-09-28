@@ -19,6 +19,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { pathToFileURL } = require('url');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
@@ -211,36 +212,73 @@ class VoiceManager {
 
   /**
    * 朗读文本。会同时弹出气泡（pet.speak）与真出声（SAPI->WAV->渲染层）。
-   * @returns {Promise<boolean>} 是否真的出了声
+   * v4.12.18：返回 {ok, reason} 而不是布尔——之前"点了没反应"完全无法定位。
+   * @returns {Promise<{ok:boolean, reason:string}>}
    */
   async speak(text) {
-    if (!text) return false;
+    if (!text) return { ok: false, reason: '没有可朗读的内容' };
     const cfg = this.getSettings();
-    if (!cfg.enabled) return false;
+    if (!cfg.enabled) return { ok: false, reason: '语音未启用（请先勾选「启用语音」并保存）' };
     const pet = this.getPet();
     if (pet && typeof pet.speak === 'function') {
       try { pet.speak(String(text).slice(0, 40)); } catch (_) {}
     }
+    let wav;
     try {
-      const wav = await this._renderTts(String(text), cfg);
-      const target = (pet && pet.win && !pet.win.isDestroyed()) ? pet.win : this.getMainWindow();
-      if (target && !target.isDestroyed()) {
-        target.webContents.send('pet:speak-audio', { path: wav, speakerId: cfg.speakerId || '' });
-      }
-      return true;
+      wav = await this._renderTts(String(text), cfg);
     } catch (e) {
-      this.logger.warn('voice-tts-failed', { error: e.message });
-      return false;
+      const reason = 'TTS 渲染失败：' + String((e && e.message) || e || '未知错误');
+      this.logger.warn('voice-tts-render-failed', { error: reason });
+      this._reportVoiceError(reason);
+      return { ok: false, reason };
     }
+    // 用 pathToFileURL 而不是手工拼 'file://' + 路径：后者带反斜杠时 Chromium 不一定认。
+    const payload = { path: wav, url: pathToFileURL(wav).href, speakerId: cfg.speakerId || '' };
+    const petWin = (pet && pet.win && !pet.win.isDestroyed()) ? pet.win : null;
+    if (petWin) {
+      try { petWin.webContents.send('pet:speak-audio', payload); return { ok: true, reason: '' }; } catch (_) {}
+    }
+    // v4.12.18：没有桌宠窗口时，改由主窗口播放（之前这条路径压根没实现，点了必然没反应）
+    const mw = this.getMainWindow();
+    if (mw && !mw.isDestroyed()) {
+      try { mw.webContents.send('buddy:voice:play', payload); return { ok: true, reason: '' }; } catch (_) {}
+    }
+    const reason = '没有可用于播放音频的窗口';
+    this.logger.warn('voice-tts-no-target');
+    return { ok: false, reason };
   }
 
   // ---------------- STT ----------------
-  /** Whisper/ffmpeg 是否已安装。 */
+  /** 模型文件现状（含完整性校验）。 */
+  modelStatus() {
+    const file = pre.findWhisperModel(this.appDir);
+    if (!file) return { file: '', ok: false, bytes: 0, reason: 'missing', detail: '未找到 ggml-*.bin 模型文件' };
+    return Object.assign({ file }, pre.verifyWhisperModel(file, 0));
+  }
+
+  /** Whisper/ffmpeg 是否已安装且模型完整。 */
   engineReady() {
     const ffmpeg = pre.findEngine('ffmpeg', this.appDir);
     const whisper = pre.findEngine('whisper', this.appDir);
-    const model = pre.findWhisperModel(this.appDir);
-    return !!(ffmpeg && whisper && model);
+    if (!ffmpeg || !whisper) return false;
+    // v4.12.18：模型文件在但被截断的话，照样不能算装好
+    return this.modelStatus().ok;
+  }
+
+  /**
+   * 把 whisper/ffmpeg 的原始报错翻成人话。
+   * v4.12.18：截断的模型会让 whisper 报 "not all tensors loaded - expected 245, got 3"，
+   * 用户看到这行完全不知道该干嘛；这里直接指到「重新下载模型」。
+   */
+  _friendlySttError(e) {
+    const raw = String((e && e.message) || e || '');
+    if (/not all tensors loaded|failed to load model|failed to initialize whisper/i.test(raw)) {
+      const ms = this.modelStatus();
+      const size = ms.bytes ? (ms.bytes / 1048576).toFixed(1) + ' MB' : '体积未知';
+      return new Error(`语音模型文件损坏或不完整（${ms.file ? path.basename(ms.file) + ' ' : ''}${size}），请在设置 → 本机引擎与模型里重新下载模型`);
+    }
+    // 其余情况用 condenseError 压掉 whisper 的 load_backend 噪音，只留尾部原因
+    return new Error(pre.condenseError(e));
   }
 
   /** 渲染层把采集到的音频（base64）发回主进程后转写。 */
@@ -262,19 +300,28 @@ class VoiceManager {
     const whisper = pre.findEngine('whisper', this.appDir);
     const model = pre.findWhisperModel(this.appDir);
     if (!ffmpeg || !whisper || !model) throw new Error('语音引擎未安装（Whisper/ffmpeg）');
+    const ms = this.modelStatus();
+    if (!ms.ok) {
+      throw new Error(`语音模型不可用（${ms.detail || ms.reason}），请在设置 → 本机引擎与模型里重新下载模型`);
+    }
     const tmp = path.join(os.tmpdir(), 'hermes-voice-' + crypto.randomUUID());
     fs.mkdirSync(tmp, { recursive: true });
     const ext = /webm/i.test(mime) ? '.webm' : (/ogg/i.test(mime) ? '.ogg' : '.wav');
     const src = path.join(tmp, 'capture' + ext);
     fs.writeFileSync(src, Buffer.from(base64, 'base64'));
     const wav = path.join(tmp, 'capture.wav');
-    // v4.12.17：这两个函数此前没从 media-preprocess 导出，调用直接 TypeError。
-    await pre.toWav16k(ffmpeg, src, wav);
-    // whisper.cpp 默认按英文转写，不指定语言中文会变成音译乱码
-    const txt = await pre.runTranscribe(whisper, wav, tmp, model, { lang: this.getSettings().lang || 'zh' });
-    const clean = pre.cleanTranscript(txt);
-    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
-    return clean;
+    let txt;
+    try {
+      // v4.12.17：这两个函数此前没从 media-preprocess 导出，调用直接 TypeError。
+      await pre.toWav16k(ffmpeg, src, wav);
+      // whisper.cpp 默认按英文转写，不指定语言中文会变成音译乱码
+      txt = await pre.runTranscribe(whisper, wav, tmp, model, { lang: this.getSettings().lang || 'zh' });
+    } catch (e) {
+      throw this._friendlySttError(e);
+    } finally {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+    }
+    return pre.cleanTranscript(txt);
   }
 
   async _foregroundWindow() {

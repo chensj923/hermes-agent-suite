@@ -49,15 +49,29 @@ const DOWNLOAD_TIMEOUT = 30 * 1000;
 
 /** 引擎现状。缺什么由 UI 决定要不要提示安装。 */
 function getStatus(appDir) {
-  const { findEngine, findWhisperModel } = require('./media-preprocess');
+  const { findEngine, findWhisperModel, verifyWhisperModel } = require('./media-preprocess');
   const ffmpeg = findEngine('ffmpeg', appDir);
   const whisper = findEngine('whisper', appDir);
-  const model = findWhisperModel(appDir);
+  const modelPath = findWhisperModel(appDir);
+  // v4.12.18：光"文件存在"不算装好——下载截断的残file会一路装到 whisper 启动才炸。
+  const key = modelPath ? (path.basename(modelPath).match(/^ggml-(.*)\.bin$/i) || [])[1] : '';
+  const expected = key && MODELS[key] ? MODELS[key].bytes : 0;
+  const v = modelPath ? verifyWhisperModel(modelPath, expected) : { ok: false, bytes: 0, reason: 'missing', detail: '' };
   return {
     dir: appDir ? path.join(appDir, 'media') : '',
     ffmpeg: { ok: !!ffmpeg, path: ffmpeg || '' },
     whisper: { ok: !!whisper, path: whisper || '' },
-    model: { ok: !!model, path: model || '', name: model ? path.basename(model) : '' },
+    model: {
+      ok: !!modelPath && v.ok,
+      path: modelPath || '',
+      name: modelPath ? path.basename(modelPath) : '',
+      bytes: v.bytes || 0,
+      expectedBytes: expected,
+      // 文件在但校验不过 → 提示"重新下载"而不是"已安装"
+      damaged: !!modelPath && !v.ok,
+      reason: v.reason || '',
+      detail: v.detail || '',
+    },
   };
 }
 
@@ -371,6 +385,7 @@ function mb(bytes) {
  */
 async function install({ appDir, components = ['whisper', 'model', 'ffmpeg'], model = 'base', onProgress } = {}) {
   if (!appDir) throw new Error('缺少 userData 目录，无法安装');
+  const { verifyWhisperModel } = require('./media-preprocess');
   const mediaDir = path.join(appDir, 'media');
   const tmpDir = path.join(mediaDir, '_tmp');
   fs.mkdirSync(mediaDir, { recursive: true });
@@ -410,16 +425,43 @@ async function install({ appDir, components = ['whisper', 'model', 'ffmpeg'], mo
       const key = MODELS[model] ? model : 'base';
       const file = `ggml-${key}.bin`;
       const dest = path.join(mediaDir, file);
-      report({ component: 'model', phase: 'download', message: `正在下载语音模型 ${key}（约 ${mb(MODELS[key].bytes)}）…` });
-      const urls = MODEL_BASES.map((b) => `${b}/${file}`);
-      await downloadFirstAvailable(urls, dest, ({ received, total }) => {
-        report({
-          component: 'model', phase: 'download',
-          received, total: total || MODELS[key].bytes,
-          message: `正在下载模型 ${key}… ${mb(received)} / ${mb(total || MODELS[key].bytes)}`,
-        });
-      });
-      installed.push(file);
+      const expectBytes = MODELS[key].bytes;
+      // v4.12.18：先清掉已存在的坏文件（截断/错误页），否则会被误判成"已安装"而跳过。
+      if (fs.existsSync(dest)) {
+        const before = verifyWhisperModel(dest, expectBytes);
+        if (!before.ok) {
+          report({ component: 'model', phase: 'repair', message: `已存在的模型不完整（${mb(before.bytes)}），清除后重新下载…` });
+          try { fs.unlinkSync(dest); } catch (_) {}
+        } else {
+          report({ component: 'model', phase: 'skip', message: `模型 ${key} 已存在且完整（${mb(before.bytes)}），跳过下载` });
+          installed.push(file);
+        }
+      }
+      if (!fs.existsSync(dest)) {
+        report({ component: 'model', phase: 'download', message: `正在下载语音模型 ${key}（约 ${mb(expectBytes)}）…` });
+        const urls = MODEL_BASES.map((b) => `${b}/${file}`);
+        // 中途断流时 downloadTo 不报错、只留一个残缺文件，所以下完校验不过就重下一次
+        let after = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          await downloadFirstAvailable(urls, dest, ({ received, total }) => {
+            report({
+              component: 'model', phase: 'download',
+              received, total: total || expectBytes,
+              message: `正在下载模型 ${key}… ${mb(received)} / ${mb(total || expectBytes)}${attempt > 1 ? '（第 ' + attempt + ' 次尝试）' : ''}`,
+            });
+          });
+          after = verifyWhisperModel(dest, expectBytes);
+          if (after.ok) break;
+          try { fs.unlinkSync(dest); } catch (_) {}
+          if (attempt < 2) report({ component: 'model', phase: 'retry', message: `模型不完整（${mb(after.bytes)}），重试下载…` });
+        }
+        if (!after.ok) {
+          try { fs.unlinkSync(dest); } catch (_) {}
+          throw new Error(`模型下载不完整（${mb(after.bytes)} / 应约 ${mb(expectBytes)}）${after.detail ? '：' + after.detail : ''}。请重试，或换用镜像源。`);
+        }
+        report({ component: 'model', phase: 'verify', message: `模型校验通过（${mb(after.bytes)}）` });
+        installed.push(file);
+      }
     }
 
     if (want('ffmpeg')) {

@@ -154,6 +154,8 @@ const api = {
   voiceProbe: () => invoke('buddy:voice:probe'),
   onVoiceTranscript: (handler) => subscribe('buddy:voice:transcript', handler),
   onVoiceError: (handler) => subscribe('buddy:voice:error', handler),
+  // v4.12.18：没有桌宠窗口时，TTS 的 WAV 由主窗口播放（{path, url, speakerId}）
+  onVoicePlay: (handler) => subscribe('buddy:voice:play', handler),
 
   // ---- 桌宠猫咪（v4.1） ----
   petMinimize: () => invoke('buddy:pet:minimize'),

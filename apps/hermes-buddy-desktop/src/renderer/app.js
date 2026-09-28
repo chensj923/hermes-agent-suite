@@ -3027,7 +3027,49 @@ async function setupSceneRulesEditor() {
   });
 }
 
+/** v4.12.18：语音错误条（设置面板各处共用）。 */
+function showVoiceError(msg) {
+  const el = document.getElementById('voice-error');
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = '⚠ ' + (msg || '语音出错');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.hidden = true; }, 10000);
+}
+
+let _voiceAudioEl = null;
+let _voicePlayHooked = false;
+/**
+ * v4.12.18：没有桌宠窗口（或桌宠窗口不可用）时，主进程会把 TTS 的 WAV
+ * 发到主窗口播放。之前这条路径压根没实现，所以「试听」必然没反应。
+ */
+async function playVoiceAudio({ path, url, speakerId } = {}) {
+  const src = url || (path ? 'file://' + String(path).replace(/\\/g, '/') : '');
+  if (!src) return;
+  try {
+    if (!_voiceAudioEl) {
+      _voiceAudioEl = new Audio();
+      _voiceAudioEl.style.display = 'none';
+      document.body.appendChild(_voiceAudioEl);
+    }
+    if (speakerId && _voiceAudioEl.setSinkId) {
+      try { await _voiceAudioEl.setSinkId(speakerId); } catch (_) {}
+    }
+    _voiceAudioEl.src = src;
+    await _voiceAudioEl.play();
+  } catch (e) {
+    showVoiceError('播放失败：' + String((e && e.message) || e || '未知错误'));
+  }
+}
+
+function hookVoicePlayback() {
+  if (_voicePlayHooked || typeof api.onVoicePlay !== 'function') return;
+  _voicePlayHooked = true;
+  api.onVoicePlay((p) => { playVoiceAudio(p || {}); });
+}
+
 async function renderVoiceSection() {
+  hookVoicePlayback();
   const status = await api.voiceStatus().catch(() => ({ enabled: false, engineReady: false }));
   const engine = await api.voiceEngineStatus().catch(() => null);
   const voices = await api.voiceGetVoices().catch(() => []);
@@ -3093,8 +3135,12 @@ async function renderVoiceSection() {
   if (status.micId) micEl.value = status.micId;
 
   // 语音引擎状态（Whisper/ffmpeg）
+  // v4.12.18：模型"文件在但被截断"要单独识别出来，否则会一直显示未安装，
+  // 用户点安装却因为 dest 已存在而被跳过，永远修不好。
   if (engineEl) {
-    const ok = !!(engine && engine.whisper && engine.whisper.ok && engine.ffmpeg && engine.ffmpeg.ok && engine.model && engine.model.ok);
+    const m = (engine && engine.model) || {};
+    const ok = !!(engine && engine.whisper && engine.whisper.ok && engine.ffmpeg && engine.ffmpeg.ok && m.ok);
+    const mbOf = (n) => ((Number(n) || 0) / 1048576).toFixed(1) + ' MB';
     engineEl.innerHTML = '';
     if (ok) {
       const p = document.createElement('p');
@@ -3106,11 +3152,14 @@ async function renderVoiceSection() {
       wrap.className = 'settings-actions';
       const tip = document.createElement('p');
       tip.className = 'hint';
-      tip.textContent = 'STT（麦克风转文字）需要本地语音引擎：Whisper + ffmpeg + 模型。点下方按钮一键安装（约 300MB，离线可用）。';
+      tip.dataset.tone = m.damaged ? 'error' : '';
+      tip.textContent = m.damaged
+        ? `语音模型文件损坏或不完整：${m.name || 'ggml-*.bin'} 只有 ${mbOf(m.bytes)}${m.expectedBytes ? '（应约 ' + mbOf(m.expectedBytes) + '）' : ''}${m.detail ? '，' + m.detail : ''}。点下方按钮重新下载。`
+        : 'STT（麦克风转文字）需要本地语音引擎：Whisper + ffmpeg + 模型。点下方按钮一键安装（约 300MB，离线可用）。';
       wrap.appendChild(tip);
       const btn = document.createElement('button');
       btn.className = 'primary';
-      btn.textContent = '安装语音引擎（Whisper/ffmpeg）';
+      btn.textContent = m.damaged ? '重新下载语音模型' : '安装语音引擎（Whisper/ffmpeg）';
       btn.addEventListener('click', async () => {
         btn.disabled = true;
         statusEl.textContent = '正在安装语音引擎，请稍候…';
@@ -3144,10 +3193,19 @@ async function renderVoiceSection() {
   });
 
   // 试听
+  // v4.12.18：把失败原因显示出来——之前只 await 不取返回值，"没反应"无从排查
   const testBtn = document.getElementById('voice-test-tts');
   if (testBtn) testBtn.addEventListener('click', async () => {
     testBtn.disabled = true;
-    await api.voiceSpeak('你好，我是你的桌宠，已经可以开口读回复啦。').catch(() => {});
+    const r = await api.voiceSpeak('你好，我是你的桌宠，已经可以开口读回复啦。')
+      .catch((e) => ({ ok: false, reason: String((e && e.message) || e || '未知错误') }));
+    if (r && r.ok) {
+      if (statusEl) { statusEl.dataset.tone = 'ok'; statusEl.textContent = '已朗读，听到声音了吗？'; }
+    } else {
+      const reason = (r && r.reason) || '未知原因';
+      if (statusEl) { statusEl.dataset.tone = 'error'; statusEl.textContent = '试听失败：' + reason; }
+      showVoiceError(reason);
+    }
     testBtn.disabled = false;
   });
 

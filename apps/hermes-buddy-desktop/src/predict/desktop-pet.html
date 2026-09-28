@@ -303,11 +303,14 @@
     const listenEl = document.getElementById('listen');
     const pttBtn = document.getElementById('ptt-btn');
 
-    async function playAudio({ path, speakerId } = {}) {
-      if (!path) return;
+    async function playAudio({ path, url, speakerId } = {}) {
+      // v4.12.18：优先用主进程算好的 file URL。手工拼 'file://' + 'C:\...' 带反斜杠，
+      // Chromium 不一定认，src 无效时 play() 会静默失败（表现为"点了试听没反应"）。
+      const src = url || (path ? 'file://' + String(path).replace(/\\/g, '/') : '');
+      if (!src) return;
       try {
         if (speakerId && ttsAudio.setSinkId) { try { await ttsAudio.setSinkId(speakerId); } catch (_) {} }
-        ttsAudio.src = 'file://' + path;
+        ttsAudio.src = src;
         await ttsAudio.play();
       } catch (e) {
         window.petApi?.error?.('tts-play-failed: ' + (e && e.message ? e.message : e));
