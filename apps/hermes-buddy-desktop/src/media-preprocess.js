@@ -151,22 +151,50 @@ function cleanTranscript(text) {
   return out.join('\n').trim();
 }
 
-async function runTranscribe(bin, audioFile, outDir, model) {
-  const flavor = whisperFlavor(bin);
-  let args;
-  if (flavor === 'cpp') {
+/**
+ * 跑 whisper 转写。
+ * @param {string} bin    whisper 可执行文件路径
+ * @param {string} audioFile 16k 单声道 WAV
+ * @param {string} outDir 输出目录（转写结果 transcript.txt 落这里）
+ * @param {string} model  whisper.cpp 的模型路径（python 版忽略）
+ * @param {{lang?: string}} [opts] 语言提示，如 'zh'。whisper.cpp 默认是 en，
+ *   不指定会把中文转成英文音译，所以语音场景必须传。
+ */
+/**
+ * 纯函数：拼 whisper 的命令行参数（便于单测，避免为测参数去伪造可执行文件）。
+ * @param {'cpp'|'python'} flavor
+ * @param {string} [lang] 语言提示；留空则不追加语言参数
+ */
+function buildWhisperArgs(flavor, audioFile, outDir, model, lang) {
+  const base = (flavor === 'cpp')
     // whisper.cpp：必须给模型文件，输出 txt 到 outDir
-    args = ['-m', model, '-f', audioFile, '-otxt', '-of', path.join(outDir, 'transcript')];
-  } else {
+    ? ['-m', model, '-f', audioFile, '-otxt', '-of', path.join(outDir, 'transcript')]
     // openai-whisper(python CLI)：--model 默认 base
-    args = [audioFile, '--model', 'base', '--output_format', 'txt', '--output_dir', outDir];
-  }
-  const { stdout, stderr } = await execFileAsync(bin, args, {
+    : [audioFile, '--model', 'base', '--output_format', 'txt', '--output_dir', outDir];
+  if (!lang) return base;
+  return base.concat(flavor === 'cpp' ? ['-l', lang] : ['--language', lang]);
+}
+
+async function runTranscribe(bin, audioFile, outDir, model, opts) {
+  const lang = opts && opts.lang ? String(opts.lang).trim() : '';
+  const flavor = whisperFlavor(bin);
+  const baseArgs = buildWhisperArgs(flavor, audioFile, outDir, model, '');
+  const withLang = buildWhisperArgs(flavor, audioFile, outDir, model, lang);
+  const run = (args) => execFileAsync(bin, args, {
     timeout: WHISPER_TIMEOUT,
     cwd: path.dirname(bin),   // 保证 ggml-*.dll / whisper.dll 能被同目录加载
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024,
   });
+  let result;
+  try {
+    result = await run(withLang);
+  } catch (e) {
+    // 老版本 whisper / 英文-only 模型可能不认 -l，去掉语言参数重试一次
+    if (!lang) throw e;
+    try { result = await run(baseArgs); } catch (_) { throw e; }
+  }
+  const { stdout, stderr } = result;
   // 优先读落盘的 txt；读不到就用 stdout
   const candidates = ['transcript.txt', path.basename(audioFile, path.extname(audioFile)) + '.txt'];
   for (const c of candidates) {
@@ -350,4 +378,7 @@ module.exports = {
   preprocessParts, toBuffer, findEngine, findWhisperModel,
   // 下面几个导出是为了能单测"格式判断 / 报错压缩 / 文本清洗"这几条关键逻辑
   needsWav, condenseError, cleanTranscript,
+  // v4.12.17：语音(STT)链路要用。之前没导出，voice-manager 调 pre.toWav16k
+  // 直接 TypeError「is not a function」，收音成功但转写必崩——必须导出并加测试守住。
+  toWav16k, runTranscribe, buildWhisperArgs,
 };

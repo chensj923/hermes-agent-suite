@@ -82,7 +82,9 @@ const DEFAULT_CONFIG = {
     volume: 100,           // SAPI 音量 0..100
     hotkey: 'Ctrl+Alt+F1', // 推话筒快捷键（globalShortcut 注册）
     readAloud: true,       // 预测回复自动朗读
-    sttEnabled: true       // 允许 STT（麦克风收音）
+    sttEnabled: true,      // 允许 STT（麦克风收音）
+    lang: 'zh'             // v4.12.17：Whisper 识别语言。whisper.cpp 默认按 en 转写，
+                           // 不指定会把中文转成音译乱码，所以默认 zh（可选 en/auto）
   },
   // 确认框等点击，而是直接走远端生成并把正文打进目标窗口（WPS/Word）；生成期间
   // 浮窗保留并显示「正在生成…」。仅对明确写作意图生效，reading_or_thinking 等

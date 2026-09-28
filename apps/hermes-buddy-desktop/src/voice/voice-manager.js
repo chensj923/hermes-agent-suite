@@ -159,7 +159,7 @@ class VoiceManager {
   // ---------------- 设置 ----------------
   getSettings() {
     const pc = this.getPredict();
-    const def = { enabled: false, speakerId: '', micId: '', voiceName: '', rate: 0, volume: 100, hotkey: 'Ctrl+Alt+F1', readAloud: true, sttEnabled: true };
+    const def = { enabled: false, speakerId: '', micId: '', voiceName: '', rate: 0, volume: 100, hotkey: 'Ctrl+Alt+F1', readAloud: true, sttEnabled: true, lang: 'zh' };
     if (!pc || !pc.config || typeof pc.config.get !== 'function') return def;
     const v = pc.config.get('voice');
     return Object.assign({}, def, v || {});
@@ -268,9 +268,13 @@ class VoiceManager {
     const src = path.join(tmp, 'capture' + ext);
     fs.writeFileSync(src, Buffer.from(base64, 'base64'));
     const wav = path.join(tmp, 'capture.wav');
+    // v4.12.17：这两个函数此前没从 media-preprocess 导出，调用直接 TypeError。
     await pre.toWav16k(ffmpeg, src, wav);
-    const txt = await pre.runTranscribe(whisper, wav, tmp, model);
-    return pre.cleanTranscript(txt);
+    // whisper.cpp 默认按英文转写，不指定语言中文会变成音译乱码
+    const txt = await pre.runTranscribe(whisper, wav, tmp, model, { lang: this.getSettings().lang || 'zh' });
+    const clean = pre.cleanTranscript(txt);
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+    return clean;
   }
 
   async _foregroundWindow() {
@@ -383,6 +387,7 @@ class VoiceManager {
       engineReady: this.engineReady(),
       speakerId: cfg.speakerId || '',
       micId: cfg.micId || '',
+      lang: cfg.lang || 'zh',
     };
   }
 }
