@@ -185,9 +185,14 @@ class PredictConfig {
     return String(key).split('.').reduce((o, k) => (o == null ? undefined : o[k]), all);
   }
 
-  /** 局部合并并落盘。patch 只能包含 config 已知字段。 */
+  /** 局部合并并落盘。patch 必须是普通对象（v4.12.19 起强校验：
+   *  曾有调用方传 set('voice', x)，字符串被 Object.assign 按索引展开，
+   *  配置文件顶层出现 "0":"v","1":"o"... 垃圾键，真实设置全部丢失）。 */
   set(patch) {
-    const p = Object.assign({}, patch || {});
+    if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw new Error('config.set(patch) 需要对象参数，收到：' + typeof patch);
+    }
+    const p = Object.assign({}, patch);
     // v4.12.0：运行模式已移除，即便外部（旧 UI/IPC）误传 model 也直接丢弃
     delete p.model;
     // v4.12.1：sendImageToServer 已移除，发图统一由 remoteVision 控制

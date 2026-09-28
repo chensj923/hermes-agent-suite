@@ -3159,17 +3159,30 @@ async function renderVoiceSection() {
       wrap.appendChild(tip);
       const btn = document.createElement('button');
       btn.className = 'primary';
-      btn.textContent = m.damaged ? '重新下载语音模型' : '安装语音引擎（Whisper/ffmpeg）';
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        statusEl.textContent = '正在安装语音引擎，请稍候…';
-        const r = await api.installMediaEngines({ components: ['whisper', 'model', 'ffmpeg'], model: 'base' }).catch((e) => ({ error: e.message }));
-        if (r && r.error) { statusEl.dataset.tone = 'error'; statusEl.textContent = '安装失败：' + r.error; }
-        else { statusEl.dataset.tone = 'ok'; statusEl.textContent = '安装完成，麦克风指令可用。'; }
-        btn.disabled = false;
-        renderVoiceSection();
-      });
-      wrap.appendChild(btn);
+      const modelBad = !m.ok; // 缺模型或已损坏
+      if (modelBad) {
+        // v4.12.19：不再在这里偷偷装写死的 base——模型型号该由用户在
+        // 「本机引擎与模型」页选（tiny/base/small），那里下完还有完整性校验。
+        btn.textContent = '去「本机引擎与模型」下载语音模型';
+        btn.addEventListener('click', async () => {
+          state.settingsTab = 'media';
+          await renderSettings();
+        });
+        wrap.appendChild(btn);
+      } else {
+        // 模型没问题，缺的只是 whisper/ffmpeg 可执行文件——就地装，与模型无关
+        btn.textContent = '安装语音引擎（Whisper/ffmpeg）';
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          statusEl.textContent = '正在安装语音引擎，请稍候…';
+          const r = await api.installMediaEngines({ components: ['whisper', 'ffmpeg'] }).catch((e) => ({ error: e.message }));
+          if (r && r.error) { statusEl.dataset.tone = 'error'; statusEl.textContent = '安装失败：' + r.error; }
+          else { statusEl.dataset.tone = 'ok'; statusEl.textContent = '安装完成，麦克风指令可用。'; }
+          btn.disabled = false;
+          renderVoiceSection();
+        });
+        wrap.appendChild(btn);
+      }
       engineEl.appendChild(wrap);
     }
   }

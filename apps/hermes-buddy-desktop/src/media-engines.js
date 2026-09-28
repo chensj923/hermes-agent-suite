@@ -383,7 +383,21 @@ function mb(bytes) {
  * @param {string} [opts.model]  tiny | base | small
  * @param {(p:object)=>void} [opts.onProgress]
  */
+/** 安装互斥锁：同时只允许一个安装任务（用户常在设置页连点两处按钮，
+ *  两个 install 并发会互踩共享的 _tmp 目录，出现互相删除对方 zip 的鬼现象）。 */
+let installRunning = false;
+
 async function install({ appDir, components = ['whisper', 'model', 'ffmpeg'], model = 'base', onProgress } = {}) {
+  if (installRunning) throw new Error('已有安装任务在进行，请等它完成后再试');
+  installRunning = true;
+  try {
+    return await _installInner({ appDir, components, model, onProgress });
+  } finally {
+    installRunning = false;
+  }
+}
+
+async function _installInner({ appDir, components = ['whisper', 'model', 'ffmpeg'], model = 'base', onProgress } = {}) {
   if (!appDir) throw new Error('缺少 userData 目录，无法安装');
   const { verifyWhisperModel } = require('./media-preprocess');
   const mediaDir = path.join(appDir, 'media');
@@ -461,6 +475,22 @@ async function install({ appDir, components = ['whisper', 'model', 'ffmpeg'], mo
         }
         report({ component: 'model', phase: 'verify', message: `模型校验通过（${mb(after.bytes)}）` });
         installed.push(file);
+        // v4.12.19：顺手清掉其他**损坏**的 ggml-*.bin。用户目录里常同时躺着
+        // 之前下载截断的坏模型（如 76MB 的 base），findWhisperModel 挑完好的
+        // 已经不会被它骗了，但留着只会让状态页反复报"模型损坏"，徒增困惑。
+        try {
+          for (const f of fs.readdirSync(mediaDir)) {
+            if (!/^ggml-.*\.bin$/i.test(f) || f === file) continue;
+            const other = path.join(mediaDir, f);
+            const otherKey = (f.match(/^ggml-(.*)\.bin$/i) || [])[1] || '';
+            const otherExp = MODELS[otherKey] ? MODELS[otherKey].bytes : 0;
+            const v2 = verifyWhisperModel(other, otherExp);
+            if (!v2.ok) {
+              report({ component: 'model', phase: 'cleanup', message: `清理损坏的旧模型 ${f}（${mb(v2.bytes)}）` });
+              try { fs.unlinkSync(other); } catch (_) {}
+            }
+          }
+        } catch (_) {}
       }
     }
 

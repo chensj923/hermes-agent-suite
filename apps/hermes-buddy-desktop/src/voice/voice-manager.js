@@ -171,7 +171,10 @@ class VoiceManager {
     if (!pc || !pc.config || typeof pc.config.set !== 'function') return false;
     const cur = this.getSettings();
     const next = Object.assign({}, cur, patch || {});
-    pc.config.set('voice', next);
+    // v4.12.19：set() 只收对象 patch。之前写成 set('voice', next)——
+    // 第二个参数被静默忽略，'voice' 字符串被 Object.assign 按索引展开成
+    // {0:'v',1:'o',...} 污染配置顶层，真正的开关一个都没存上。
+    pc.config.set({ voice: next });
     // 热键变化则重新注册
     if (patch && patch.hotkey && patch.hotkey !== this._hotkey) this.registerHotkey(next.hotkey);
     return true;

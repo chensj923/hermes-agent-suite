@@ -119,15 +119,31 @@ function verifyWhisperModel(file, expectBytes) {
   return { ok: true, bytes, reason: '', detail: '' };
 }
 
-/** 找 whisper.cpp 的模型文件（ggml-*.bin）。 */
+/**
+ * 找 whisper.cpp 的模型文件（ggml-*.bin）。
+ * v4.12.19：目录里可能同时存在多个模型（比如用户装了 small，之前还留着一个
+ * 下载截断的 base）——readdir 按字母序第一个是 ggml-base.bin，旧实现无脑取第一个，
+ * 结果完整的 small 躺在旁边也被判"损坏"。现在逐个校验，优先返回**完好的**里
+ * 体积最大的；全都坏才返回第一个（让 getStatus 继续能报 damaged）。
+ */
 function findWhisperModel(appDir) {
   const envVal = (process.env.BUDDY_WHISPER_MODEL || '').trim();
   if (envVal) return envVal;
   const mediaDir = appDir ? path.join(appDir, 'media') : '';
   if (mediaDir && fs.existsSync(mediaDir)) {
     try {
-      const hit = fs.readdirSync(mediaDir).find((f) => /^ggml-.*\.bin$/i.test(f));
-      if (hit) return path.join(mediaDir, hit);
+      const hits = fs.readdirSync(mediaDir)
+        .filter((f) => /^ggml-.*\.bin$/i.test(f))
+        .sort();
+      if (!hits.length) return '';
+      const full = hits.map((f) => path.join(mediaDir, f));
+      // 先做不依赖预期体积的基础校验（体积下限 + 魔数），通过的里挑最大的
+      const good = full
+        .map((p) => ({ p, v: verifyWhisperModel(p, 0) }))
+        .filter((x) => x.v.ok)
+        .sort((a, b) => b.v.bytes - a.v.bytes);
+      if (good.length) return good[0].p;
+      return full[0]; // 全坏：仍返回一个路径，让上层报"损坏/重新下载"
     } catch (_) {}
   }
   return '';
