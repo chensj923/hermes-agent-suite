@@ -23,4 +23,13 @@ contextBridge.exposeInMainWorld('petApi', {
   onPaused: (handler) => ipcRenderer.on('pet:paused', (_e, v) => { try { handler(v); } catch (_) {} }),
   onSpeak: (handler) => ipcRenderer.on('pet:speak', (_e, text) => { try { handler(text); } catch (_) {} }),
   onWave: (handler) => ipcRenderer.on('pet:wave', (_e) => { try { handler(); } catch (_) {} }),
+  // v4.12.14：语音
+  // 主进程把 SAPI 渲染好的 WAV 路径发来，渲染层用 <audio>.setSinkId(扬声器) 播放
+  onSpeakAudio: (handler) => ipcRenderer.on('pet:speak-audio', (_e, payload) => { try { handler(payload || {}); } catch (_) {} }),
+  // 主进程经热键/按钮切换「收音」状态：on=true 开始采集，false=停止并回传
+  onListenCommand: (handler) => ipcRenderer.on('pet:listen', (_e, on) => { try { handler(!!on); } catch (_) {} }),
+  // 渲染层把采集到的音频（base64）发回主进程转写
+  sendCapture: (data, mime) => ipcRenderer.invoke('buddy:voice:capture', { data, mime }),
+  // 主进程下发语音设备配置（麦克风/扬声器选择），渲染层缓存
+  onVoiceConfig: (handler) => ipcRenderer.on('pet:voice-config', (_e, cfg) => { try { handler(cfg || {}); } catch (_) {} }),
 });

@@ -85,6 +85,25 @@
     border-top-color: #fff;
     border-bottom: 0;
   }
+
+  /* v4.12.14：收音指示（热键触发麦克风时显示） */
+  #listen {
+    position: absolute;
+    top: 0; left: 50%;
+    transform: translate(-50%, -22px);
+    display: none;
+    align-items: center;
+    gap: 4px;
+    background: #e8443a;
+    color: #fff;
+    font: 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 3px 8px;
+    border-radius: 10px;
+    z-index: 3;
+    pointer-events: none;
+  }
+  #listen.on { display: flex; animation: listenPulse 1s ease-in-out infinite; }
+  @keyframes listenPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 </style>
 </head>
 <body>
@@ -95,6 +114,8 @@
     </div>
   </div>
   <div id="bubble"></div>
+  <div id="listen">🎤 收听中…</div>
+  <audio id="tts" style="display:none"></audio>
   <!-- v4.12.6：Live2D 脚本不再静态引入 —— 默认桌宠是这只 PNG 小猫（零 WebGL、不依赖模型，
        拖动最顺滑）。Live2D 仅在菜单里手动切换后，由 startLive2D() 动态加载。 -->
   <script>
@@ -238,6 +259,69 @@
     // ---- 主进程推送 ----
     window.petApi?.onSpeak?.(say);
     window.petApi?.onWave?.(() => tapMotion(2000));
+
+    // ================= 语音（v4.12.14）=================
+    const ttsAudio = document.getElementById('tts');
+    const listenEl = document.getElementById('listen');
+    let voiceMicId = '';
+    let mediaRecorder = null;
+    let recChunks = [];
+    let recStream = null;
+
+    window.petApi?.onVoiceConfig?.((cfg) => { if (cfg && cfg.micId != null) voiceMicId = cfg.micId; });
+
+    async function playAudio({ path, speakerId } = {}) {
+      if (!path) return;
+      try {
+        if (speakerId && ttsAudio.setSinkId) { try { await ttsAudio.setSinkId(speakerId); } catch (_) {} }
+        ttsAudio.src = 'file://' + path;
+        await ttsAudio.play();
+      } catch (e) {
+        window.petApi?.error?.('tts-play-failed: ' + (e && e.message ? e.message : e));
+      }
+    }
+    window.petApi?.onSpeakAudio?.(playAudio);
+
+    async function startCapture() {
+      try {
+        const constraints = voiceMicId
+          ? { audio: { deviceId: { exact: voiceMicId } } }
+          : { audio: true };
+        recStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (e) {
+        window.petApi?.error?.('mic-denied: ' + (e && e.message ? e.message : e));
+        return;
+      }
+      recChunks = [];
+      try { mediaRecorder = new MediaRecorder(recStream); }
+      catch (e) { window.petApi?.error?.('mediarecorder-unsupported: ' + (e && e.message ? e.message : e)); recStream.getTracks().forEach(t => t.stop()); return; }
+      mediaRecorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) recChunks.push(ev.data); };
+      mediaRecorder.onstop = async () => {
+        listenEl.classList.remove('on');
+        const blob = new Blob(recChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+        recChunks = [];
+        try {
+          const buf = await blob.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          let bin = '';
+          const step = 0x8000;
+          for (let i = 0; i < bytes.length; i += step) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+          const b64 = btoa(bin);
+          await window.petApi?.sendCapture(b64, blob.type);
+        } catch (e) {
+          window.petApi?.error?.('voice-capture-send-failed: ' + (e && e.message ? e.message : e));
+        }
+        if (recStream) { recStream.getTracks().forEach((t) => t.stop()); recStream = null; }
+      };
+      mediaRecorder.start();
+      listenEl.classList.add('on');
+    }
+
+    function stopCapture() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    }
+
+    window.petApi?.onListenCommand?.((on) => { if (on) startCapture(); else stopCapture(); });
 
     // ================= Live2D（v4.12.6 起默认关闭，按需动态加载）=================
     let model = null;

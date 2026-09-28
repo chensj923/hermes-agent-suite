@@ -142,6 +142,16 @@ const api = {
   predictClearLog: () => invoke('buddy:predict:clear-log'),
   onPredictLogEntry: (handler) => subscribe('buddy:predict:log-entry', handler),
 
+  // ---- 语音（v4.12.14：TTS/STT）----
+  voiceStatus: () => invoke('buddy:voice:status'),
+  voiceSet: (patch) => invoke('buddy:voice:set', patch || {}),
+  voiceGetVoices: () => invoke('buddy:voice:get-voices'),
+  voiceEngineStatus: () => invoke('buddy:voice:engine-status'),
+  voiceSpeak: (text) => invoke('buddy:voice:speak', text),
+  voiceStartListen: () => invoke('buddy:voice:start-listen'),
+  voiceStopListen: () => invoke('buddy:voice:stop-listen'),
+  onVoiceTranscript: (handler) => subscribe('buddy:voice:transcript', handler),
+
   // ---- 桌宠猫咪（v4.1） ----
   petMinimize: () => invoke('buddy:pet:minimize'),
   petRestore: () => invoke('buddy:pet:restore'),

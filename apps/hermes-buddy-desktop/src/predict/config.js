@@ -70,6 +70,20 @@ const DEFAULT_CONFIG = {
   // v4.11.0：应用画像库（约 100 种软件 × 3 个常用行为）开关。命中应用时
   // 直接把这个应用最常用的 3 件事摆给用户选，而不是让远端模型从零猜。
   appProfilesEnabled: true,
+  // v4.12.14：语音（TTS/STT）。TTS 用 Windows SAPI 离线朗读回复；STT 用本地
+  // Whisper（media-engines 一键安装）把麦克风语音转成文字。speakerId/micId 由渲染层
+  // enumerateDevices 取得（audiooutput / audioinput 的 deviceId）；voiceName 为 SAPI 语音名。
+  voice: {
+    enabled: false,        // 总开关（设置里打开）
+    speakerId: '',         // 扬声器 deviceId（空=系统默认）
+    micId: '',             // 麦克风 deviceId（空=系统默认）
+    voiceName: '',         // SAPI 语音名（空=系统默认中文语音）
+    rate: 0,               // SAPI 语速 -10..10
+    volume: 100,           // SAPI 音量 0..100
+    hotkey: 'Ctrl+Alt+F1', // 推话筒快捷键（globalShortcut 注册）
+    readAloud: true,       // 预测回复自动朗读
+    sttEnabled: true       // 允许 STT（麦克风收音）
+  },
   // 确认框等点击，而是直接走远端生成并把正文打进目标窗口（WPS/Word）；生成期间
   // 浮窗保留并显示「正在生成…」。仅对明确写作意图生效，reading_or_thinking 等
   // 模糊意图仍只提示不自动写。置 false 回到「先确认再生成」的旧行为。

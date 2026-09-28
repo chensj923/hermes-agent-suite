@@ -360,6 +360,36 @@ class PredictController {
   }
 
   /**
+   * v4.12.14：语音指令 → 生成。把用户说出的话作为方向，复用注入的远端/本机生成函数，
+   * 产出一段可朗读的回复草稿。未连模型时返回 null（由调用方降级）。
+   * @param {string} text 语音转写文本
+   * @param {{title?:string,windowClass?:string,exeName?:string}} [wi] 前台窗口信息
+   * @returns {Promise<string|null>}
+   */
+  async voicePrompt(text, wi) {
+    if (typeof this._generateContentFn !== 'function') return null;
+    const t = String(text || '').trim();
+    if (!t) return null;
+    try {
+      const res = await this._generateContentFn({
+        stage: 'generate_content',
+        rule: 'voice_command',
+        suggestion: '',
+        reason: '语音指令',
+        screenObservation: '',
+        windowTitle: (wi && wi.title) || '',
+        direction: '用户通过语音请求：' + t,
+        topic: t,
+      }, null);
+      if (res && typeof res.content === 'string' && res.content.trim()) return res.content.trim();
+      return null;
+    } catch (e) {
+      this.logger.warn('voice-prompt-failed', { error: e.message });
+      return null;
+    }
+  }
+
+  /**
    * 后台结晶：第二次及以后打开应用时静默跑一次，淘汰过期/不爱用的预测，
    * 固化新的高频高接受率行为。不阻塞主线程（纯本地 JSON 计算）。
    */

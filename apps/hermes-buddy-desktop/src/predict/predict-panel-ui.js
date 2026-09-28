@@ -215,7 +215,17 @@
   if (api && api.onClear) api.onClear(() => clearSteps());
   if (api && api.onThinking) api.onThinking((data) => showThinking(true, (data && data.text) || '思考中…'));
   if (api && api.onThinkingStop) api.onThinkingStop(() => showThinking(false));
-  if (api && api.onSuggestion) api.onSuggestion((data) => showCard(data));
+  if (api && api.onSuggestion) api.onSuggestion((data) => {
+    showCard(data);
+    // v4.12.14：预测回复自动朗读（需用户在语音设置里启用并勾选「预测回复自动朗读」）
+    if (data && data.suggestion) {
+      try {
+        api.voiceStatus().then((st) => {
+          if (st && st.enabled && st.readAloud) { try { api.voiceSpeak(data.suggestion); } catch (_) {} }
+        }).catch(() => {});
+      } catch (_) {}
+    }
+  });
   if (api && api.onCardHide) api.onCardHide(() => hideCard());
   if (api && api.onClose) api.onClose(() => { try { window.close(); } catch (_) {} });
 

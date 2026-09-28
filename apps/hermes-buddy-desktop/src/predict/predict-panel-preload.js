@@ -53,6 +53,9 @@ const api = {
       behaviorId: String(behaviorId || '').trim(),
     });
   },
+  // v4.12.14：语音（预测回复自动朗读）
+  voiceStatus: () => ipcRenderer.invoke('buddy:voice:status'),
+  voiceSpeak: (text) => ipcRenderer.invoke('buddy:voice:speak', text),
   // v4.10.40：用户点 × 主动关闭浮窗
   close: () => {
     ipcRenderer.send('predict-panel:close');

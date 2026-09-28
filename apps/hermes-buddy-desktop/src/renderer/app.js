@@ -2384,6 +2384,34 @@ async function renderPredictTab() {
       <p class="hint">从你的常用行为与回复中提炼经验，每天结晶更新：确定性高的固化为可直接执行的规则（script），需判断的固化为调用模型的方案（model）。连接服务端后自动同步。</p>
       <div id="experience-crystal" class="predict-stats"></div>
 
+      <h3>语音（桌宠开口读回复 + 麦克风指令）🎤</h3>
+      <p class="hint">让桌宠把预测回复朗读出来；并设置快捷键，按下后桌宠听你说话，把语音转成文字去预测/回复。TTS 用系统离线语音（SAPI，无需联网）；STT 用本机 Whisper（需先安装语音引擎）。</p>
+      <label class="settings-field">启用语音
+        <input id="voice-enabled" type="checkbox">
+      </label>
+      <label class="settings-field">预测回复自动朗读
+        <input id="voice-readaloud" type="checkbox">
+      </label>
+      <label class="settings-field">扬声器（朗读输出设备）
+        <select id="voice-speaker"><option value="">系统默认</option></select>
+      </label>
+      <label class="settings-field">麦克风（收音输入设备）
+        <select id="voice-mic"><option value="">系统默认</option></select>
+      </label>
+      <label class="settings-field">语音（SAPI 嗓音）
+        <select id="voice-voice"><option value="">系统默认中文语音</option></select>
+      </label>
+      <label class="settings-field">推话筒快捷键（如 Ctrl+Alt+F1；支持的修饰键 Ctrl/Alt/Shift + 字母或 F1-F12）
+        <input id="voice-hotkey" type="text" placeholder="Ctrl+Alt+F1">
+      </label>
+      <div class="settings-actions">
+        <button class="primary" id="voice-save" type="button">保存语音设置</button>
+        <button class="ghost" id="voice-test-tts" type="button">试听一句</button>
+      </div>
+      <div class="settings-status" id="voice-status" role="status"></div>
+      <div id="voice-engine" class="predict-stats"></div>
+      <div id="voice-transcript" class="voice-transcript" hidden></div>
+
       <h3>回填方式</h3>
       <label class="settings-field">生成内容如何进入当前窗体
         <select id="predict-insert-mode">
@@ -2735,6 +2763,9 @@ async function renderPredictTab() {
     }
   }
 
+  // 语音（v4.12.14）
+  await renderVoiceSection().catch(() => {});
+
   // 杀软
   const avEl = $('predict-av');
   const avList = (av && av.antivirus) || [];
@@ -2972,6 +3003,127 @@ async function setupSceneRulesEditor() {
     statusEl.textContent = '场景规则已保存（' + r.length + ' 条，立即生效）';
     statusEl.dataset.tone = 'ok';
   });
+}
+
+async function renderVoiceSection() {
+  const status = await api.voiceStatus().catch(() => ({ enabled: false, engineReady: false }));
+  const engine = await api.voiceEngineStatus().catch(() => null);
+  const voices = await api.voiceGetVoices().catch(() => []);
+
+  const enEl = document.getElementById('voice-enabled');
+  const raEl = document.getElementById('voice-readaloud');
+  const spEl = document.getElementById('voice-speaker');
+  const micEl = document.getElementById('voice-mic');
+  const voiceEl = document.getElementById('voice-voice');
+  const hkEl = document.getElementById('voice-hotkey');
+  const statusEl = document.getElementById('voice-status');
+  const engineEl = document.getElementById('voice-engine');
+  const trEl = document.getElementById('voice-transcript');
+  if (!enEl) return;
+
+  enEl.checked = !!status.enabled;
+  raEl.checked = status.readAloud !== false;
+  hkEl.value = status.hotkey || 'Ctrl+Alt+F1';
+
+  // SAPI 嗓音
+  for (const v of (voices || [])) {
+    const o = document.createElement('option');
+    o.value = v.Name || '';
+    o.textContent = `${v.Name || v.Id || '?'}${v.Culture ? ' (' + v.Culture + ')' : ''}`;
+    voiceEl.appendChild(o);
+  }
+  if (status.voiceName) voiceEl.value = status.voiceName;
+
+  // 扬声器 / 麦克风：渲染层 enumerateDevices
+  let devices = [];
+  try {
+    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+      devices = await navigator.mediaDevices.enumerateDevices();
+    }
+  } catch (_) {}
+  for (const d of devices.filter((x) => x.kind === 'audiooutput')) {
+    const o = document.createElement('option');
+    o.value = d.deviceId || '';
+    o.textContent = d.label || ('扬声器 ' + (d.deviceId || '').slice(0, 8));
+    spEl.appendChild(o);
+  }
+  for (const d of devices.filter((x) => x.kind === 'audioinput')) {
+    const o = document.createElement('option');
+    o.value = d.deviceId || '';
+    o.textContent = d.label || ('麦克风 ' + (d.deviceId || '').slice(0, 8));
+    micEl.appendChild(o);
+  }
+  if (status.speakerId) spEl.value = status.speakerId;
+  if (status.micId) micEl.value = status.micId;
+
+  // 语音引擎状态（Whisper/ffmpeg）
+  if (engineEl) {
+    const ok = !!(engine && engine.whisper && engine.whisper.ok && engine.ffmpeg && engine.ffmpeg.ok && engine.model && engine.model.ok);
+    engineEl.innerHTML = '';
+    if (ok) {
+      const p = document.createElement('p');
+      p.className = 'hint';
+      p.textContent = '语音引擎已就绪（Whisper + ffmpeg + 模型已安装），可用麦克风指令。';
+      engineEl.appendChild(p);
+    } else {
+      const wrap = document.createElement('div');
+      wrap.className = 'settings-actions';
+      const tip = document.createElement('p');
+      tip.className = 'hint';
+      tip.textContent = 'STT（麦克风转文字）需要本地语音引擎：Whisper + ffmpeg + 模型。点下方按钮一键安装（约 300MB，离线可用）。';
+      wrap.appendChild(tip);
+      const btn = document.createElement('button');
+      btn.className = 'primary';
+      btn.textContent = '安装语音引擎（Whisper/ffmpeg）';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        statusEl.textContent = '正在安装语音引擎，请稍候…';
+        const r = await api.installMediaEngines({ components: ['whisper', 'model', 'ffmpeg'], model: 'base' }).catch((e) => ({ error: e.message }));
+        if (r && r.error) { statusEl.dataset.tone = 'error'; statusEl.textContent = '安装失败：' + r.error; }
+        else { statusEl.dataset.tone = 'ok'; statusEl.textContent = '安装完成，麦克风指令可用。'; }
+        btn.disabled = false;
+        renderVoiceSection();
+      });
+      wrap.appendChild(btn);
+      engineEl.appendChild(wrap);
+    }
+  }
+
+  // 保存
+  const saveBtn = document.getElementById('voice-save');
+  if (saveBtn) saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    const patch = {
+      enabled: enEl.checked,
+      readAloud: raEl.checked,
+      speakerId: spEl.value || '',
+      micId: micEl.value || '',
+      voiceName: voiceEl.value || '',
+      hotkey: (hkEl.value || 'Ctrl+Alt+F1').trim(),
+    };
+    const r = await api.voiceSet(patch).catch((e) => ({ ok: false, error: e.message }));
+    statusEl.dataset.tone = r && r.ok ? 'ok' : 'error';
+    statusEl.textContent = (r && r.ok) ? '语音设置已保存。若已启用，按快捷键即可让桌宠听你说话。' : ('保存失败：' + ((r && r.error) || '未知'));
+    saveBtn.disabled = false;
+  });
+
+  // 试听
+  const testBtn = document.getElementById('voice-test-tts');
+  if (testBtn) testBtn.addEventListener('click', async () => {
+    testBtn.disabled = true;
+    await api.voiceSpeak('你好，我是你的桌宠，已经可以开口读回复啦。').catch(() => {});
+    testBtn.disabled = false;
+  });
+
+  // 实时显示识别到的语音指令
+  if (trEl) {
+    api.onVoiceTranscript(({ text }) => {
+      trEl.hidden = false;
+      trEl.textContent = '🎙 识别到：' + (text || '');
+      clearTimeout(trEl._t);
+      trEl._t = setTimeout(() => { trEl.hidden = true; }, 8000);
+    });
+  }
 }
 
 function renderSceneRuleRows() {

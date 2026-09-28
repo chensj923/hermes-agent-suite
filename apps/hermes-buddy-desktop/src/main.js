@@ -3,7 +3,7 @@
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const { app, BrowserWindow, ipcMain, safeStorage, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell, dialog, globalShortcut, session } = require('electron');
 const provisioning = require('@hermes/provisioning');
 const registry = require('@hermes/capability-registry');
 const { describeGatewayError } = require('@hermes/connection');
@@ -35,6 +35,7 @@ let predictController = null;   // v4.0 预测模式编排器（bootstrap 中惰
 let pet = null;                 // v4.1 桌宠猫咪（bootstrap 中惰性创建）
 let trayInstance = null;        // v4.8.3 常驻系统托盘
 let predictLogCallback = null;  // v4.10.18 推理记录实时推送给渲染层的回调
+let voiceManager = null;        // v4.12.14 语音（TTS/STT）管理器
 let isQuitting = false;         // 真正退出时置 true，关闭到托盘时保持 false
 let logger = { info() {}, warn() {}, error() {}, debug() {} };
 const pendingConfirms = new Map();
@@ -54,6 +55,29 @@ if (SMOKE_TEST) {
 
 function safeSend(sender, channel, payload) {
   if (sender && !sender.isDestroyed()) sender.send(channel, payload);
+}
+
+/**
+ * v4.12.14：语音指令处理。转写文本 → 经预测管线生成回复草稿 → TTS 朗读。
+ * 同时把识别到的指令推给渲染层显示。
+ */
+async function runVoiceCommand(text, wi) {
+  if (!text) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('buddy:voice:transcript', { text: String(text) }); } catch (_) {}
+  }
+  let reply = null;
+  try {
+    if (predictController && typeof predictController.voicePrompt === 'function') {
+      reply = await predictController.voicePrompt(text, wi);
+    }
+  } catch (e) {
+    logger.warn('voice-command-generate-failed', { error: e.message });
+  }
+  if (!reply) {
+    reply = '（未连接到 Hermes 或本地模型不可用，已收到你的语音：' + String(text).slice(0, 60) + '）';
+  }
+  if (voiceManager) { try { await voiceManager.speak(reply); } catch (_) {} }
 }
 
 function createWindow() {
@@ -845,6 +869,33 @@ function registerIpc() {
     }
   });
 
+  // ---- 语音（v4.12.14：TTS/STT）----
+  handle('buddy:voice:status', () => (voiceManager ? voiceManager.status() : { enabled: false, engineReady: false }));
+  handle('buddy:voice:get-voices', async () => (voiceManager ? voiceManager.getVoices() : []));
+  handle('buddy:voice:engine-status', () => mediaEngines.getStatus(app.getPath('userData')));
+  handle('buddy:voice:set', async (_event, patch = {}) => {
+    if (!voiceManager) return { ok: false, error: '语音未就绪' };
+    const ok = await voiceManager.saveSettings(patch || {});
+    // 设备选择变化时下发到桌宠缓存（麦克风）
+    const vcfg = voiceManager.getSettings();
+    if (patch && (patch.micId !== undefined || patch.speakerId !== undefined) && pet && pet.win && !pet.win.isDestroyed()) {
+      pet.win.webContents.send('pet:voice-config', { micId: vcfg.micId || '' });
+    }
+    return { ok, status: voiceManager.status() };
+  });
+  handle('buddy:voice:speak', async (_event, text) => (voiceManager ? voiceManager.speak(String(text || '')) : false));
+  handle('buddy:voice:start-listen', () => { if (voiceManager) voiceManager.setListening(true); return { listening: voiceManager ? voiceManager.isListening() : false }; });
+  handle('buddy:voice:stop-listen', () => { if (voiceManager) voiceManager.setListening(false); return { listening: false }; });
+  handle('buddy:voice:capture', async (_event, payload = {}) => {
+    if (!voiceManager) return { ok: false, error: '语音未就绪' };
+    try {
+      const text = await voiceManager.handleCapture(payload);
+      return { ok: true, text };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e || '转写失败') };
+    }
+  });
+
   // ---- 智能体 ----
   handle('buddy:agents', () => manager.listAgents());
   handle('buddy:agents:create', (_event, input) => manager.createAgent(input || {}));
@@ -1292,6 +1343,39 @@ async function bootstrap() {
       try { pet.installProtocolHandler(); } catch (e) { logger.warn('pet-protocol-install-failed', { error: e.message }); }
       logger.info('desktop-pet-ready');
       startPetPatrol();
+
+      // v4.12.14：语音管理器。桌宠窗口常驻，麦克风采集在渲染层完成，
+      // 主进程负责 TTS 渲染(SAPI) + STT 转写(Whisper) + 语音指令→预测。
+      try {
+        const { VoiceManager } = require('./voice/voice-manager');
+        voiceManager = new VoiceManager({
+          logger,
+          appDir: userData,
+          getPet: () => pet,
+          getMainWindow: () => mainWindow,
+          getPredict: () => predictController,
+          onVoiceCommand: runVoiceCommand,
+        });
+        voiceManager.setGlobalShortcut(globalShortcut);
+        const vcfg = predictController.config.get('voice') || {};
+        voiceManager.registerHotkey(vcfg.hotkey || 'Ctrl+Alt+F1');
+        if (pet && pet.win && !pet.win.isDestroyed()) {
+          pet.win.webContents.send('pet:voice-config', { micId: vcfg.micId || '' });
+        }
+        logger.info('voice-manager-ready', { hotkey: vcfg.hotkey || 'Ctrl+Alt+F1' });
+      } catch (e) {
+        voiceManager = null;
+        logger.warn('voice-manager-init-failed', { error: e.message });
+      }
+
+      // v4.12.14：允许桌宠渲染层 getUserMedia 采集麦克风（仅音频）
+      try {
+        if (session && session.defaultSession && typeof session.defaultSession.setPermissionRequestHandler === 'function') {
+          session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+            callback(permission === 'media' || permission === 'microphone' || permission === 'geolocation');
+          });
+        }
+      } catch (_) {}
     } catch (e) {
       pet = null;
       logger.warn('desktop-pet-init-failed', { error: e.message });
