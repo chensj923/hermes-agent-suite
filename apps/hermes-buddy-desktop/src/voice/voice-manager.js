@@ -39,6 +39,10 @@ function extractPs1(name) {
 const LIST_VOICES_PS = 'list-voices.ps1';
 const TTS_PS = 'tts.ps1';
 
+// v4.12.20：TTS 音频内联成 data URL 的体积上限。超过则退回 file:// URL。
+// 22.05kHz/16bit/单声道 ≈ 44KB/秒，4MB ≈ 90 秒语音，正常朗读不会超。
+const MAX_INLINE_BYTES = 4 * 1024 * 1024;
+
 class VoiceManager {
   constructor({ logger, appDir, getPet, getMainWindow, getPredict, onVoiceCommand } = {}) {
     this.logger = logger || { info() {}, warn() {}, error() {}, debug() {} };
@@ -214,6 +218,37 @@ class VoiceManager {
   }
 
   /**
+   * v4.12.20：把 SAPI 渲染出的 WAV 打包成渲染层能播的载荷。
+   *
+   * 之前只给 file:// URL —— 主窗口和桌宠窗口都是 file:// 源且开了 sandbox，
+   * Chromium 对 file:// 页面加载 file:// 媒体资源有访问限制，解码失败时只抛
+   * "Failed to load because no supported source was found."，完全看不出真实原因。
+   * 改成内联 base64 data URL：绕开文件访问策略，也绕开路径转义问题。
+   *
+   * 顺带校验"空壳 WAV"：没装语音 / 选了不可用嗓音时 SAPI 会只写 44 字节的文件头，
+   * 这种文件播出来就是上面的报错，必须在主进程就拦下并说人话。
+   */
+  _audioPayload(wav, cfg) {
+    let bytes = 0;
+    try { bytes = fs.statSync(wav).size; } catch (_) {
+      throw new Error('TTS 输出文件不存在（渲染未生成音频）');
+    }
+    const speakerId = (cfg && cfg.speakerId) || '';
+    const url = pathToFileURL(wav).href;
+    if (bytes <= 44 + 512) {
+      throw new Error(`TTS 未生成有效音频（仅 ${bytes} 字节，只有文件头）`);
+    }
+    if (bytes <= MAX_INLINE_BYTES) {
+      const b64 = fs.readFileSync(wav).toString('base64');
+      // 已内联，临时文件可以清掉（之前每次朗读都在 %TEMP% 留一个目录）
+      try { fs.rmSync(path.dirname(wav), { recursive: true, force: true }); } catch (_) {}
+      return { dataUrl: 'data:audio/wav;base64,' + b64, url: '', path: '', speakerId, bytes };
+    }
+    // 超大音频不内联，退回文件 URL（保留文件）
+    return { dataUrl: '', url, path: wav, speakerId, bytes };
+  }
+
+  /**
    * 朗读文本。会同时弹出气泡（pet.speak）与真出声（SAPI->WAV->渲染层）。
    * v4.12.18：返回 {ok, reason} 而不是布尔——之前"点了没反应"完全无法定位。
    * @returns {Promise<{ok:boolean, reason:string}>}
@@ -235,8 +270,23 @@ class VoiceManager {
       this._reportVoiceError(reason);
       return { ok: false, reason };
     }
-    // 用 pathToFileURL 而不是手工拼 'file://' + 路径：后者带反斜杠时 Chromium 不一定认。
-    const payload = { path: wav, url: pathToFileURL(wav).href, speakerId: cfg.speakerId || '' };
+    let payload;
+    try {
+      payload = this._audioPayload(wav, cfg);
+    } catch (e) {
+      let reason = 'TTS 音频不可用：' + String((e && e.message) || e || '未知错误');
+      // 空壳音频最常见的原因是系统压根没装语音，给出可操作的指引
+      const voices = await this.getVoices().catch(() => []);
+      if (!voices.length) {
+        reason += '。系统未安装任何语音，请在 Windows「设置 → 时间和语言 → 语音」里添加语音功能';
+      } else {
+        reason += `。系统已装 ${voices.length} 个语音，可尝试在上方「嗓音」里换一个`;
+      }
+      this.logger.warn('voice-tts-payload-failed', { error: reason });
+      this._reportVoiceError(reason);
+      return { ok: false, reason };
+    }
+    this.logger.info('voice-tts-ready', { bytes: payload.bytes, inline: !payload.dataUrl ? false : true });
     const petWin = (pet && pet.win && !pet.win.isDestroyed()) ? pet.win : null;
     if (petWin) {
       try { petWin.webContents.send('pet:speak-audio', payload); return { ok: true, reason: '' }; } catch (_) {}

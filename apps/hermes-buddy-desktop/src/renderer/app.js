@@ -3043,17 +3043,24 @@ let _voicePlayHooked = false;
  * v4.12.18：没有桌宠窗口（或桌宠窗口不可用）时，主进程会把 TTS 的 WAV
  * 发到主窗口播放。之前这条路径压根没实现，所以「试听」必然没反应。
  */
-async function playVoiceAudio({ path, url, speakerId } = {}) {
-  const src = url || (path ? 'file://' + String(path).replace(/\\/g, '/') : '');
-  if (!src) return;
+async function playVoiceAudio(payload = {}) {
+  // v4.12.20：优先用主进程内联好的 base64 data URL。主窗口是 file:// 源且开了 sandbox，
+  // 直接给 file:// URL 会被 Chromium 拒绝加载，报 "no supported source"。
+  const src = payload.dataUrl || payload.url || (payload.path ? 'file://' + String(payload.path).replace(/\\/g, '/') : '');
+  if (!src) { showVoiceError('播放失败：音频源为空'); return; }
   try {
     if (!_voiceAudioEl) {
       _voiceAudioEl = new Audio();
       _voiceAudioEl.style.display = 'none';
+      // 解码失败不会让 play() 抛错，只会静默无声 —— 必须挂 onerror 才看得见原因
+      _voiceAudioEl.onerror = () => {
+        const e = _voiceAudioEl && _voiceAudioEl.error;
+        showVoiceError('播放失败：' + ((e && e.message) || ('音频无法解码，错误码 ' + ((e && e.code) || '?'))));
+      };
       document.body.appendChild(_voiceAudioEl);
     }
-    if (speakerId && _voiceAudioEl.setSinkId) {
-      try { await _voiceAudioEl.setSinkId(speakerId); } catch (_) {}
+    if (payload.speakerId && _voiceAudioEl.setSinkId) {
+      try { await _voiceAudioEl.setSinkId(payload.speakerId); } catch (_) {}
     }
     _voiceAudioEl.src = src;
     await _voiceAudioEl.play();

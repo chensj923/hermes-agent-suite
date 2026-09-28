@@ -303,13 +303,23 @@
     const listenEl = document.getElementById('listen');
     const pttBtn = document.getElementById('ptt-btn');
 
-    async function playAudio({ path, url, speakerId } = {}) {
-      // v4.12.18：优先用主进程算好的 file URL。手工拼 'file://' + 'C:\...' 带反斜杠，
-      // Chromium 不一定认，src 无效时 play() 会静默失败（表现为"点了试听没反应"）。
-      const src = url || (path ? 'file://' + String(path).replace(/\\/g, '/') : '');
+    // v4.12.20：优先用主进程内联好的 base64 data URL。
+    // 之前只给 file:// URL，而桌宠页面本身也是 file:// 源且开了 sandbox，
+    // Chromium 会拒绝加载这类媒体资源，报 "no supported source"（试听没声音）。
+    function audioSrc(p) {
+      return (p && (p.dataUrl || p.url)) || (p && p.path ? 'file://' + String(p.path).replace(/\\/g, '/') : '');
+    }
+    async function playAudio(payload = {}) {
+      const src = audioSrc(payload);
       if (!src) return;
       try {
+        const speakerId = payload.speakerId;
         if (speakerId && ttsAudio.setSinkId) { try { await ttsAudio.setSinkId(speakerId); } catch (_) {} }
+        // 解码失败不会让 play() 抛错，只会静默无声 —— 必须挂 onerror 才看得见原因
+        ttsAudio.onerror = () => {
+          const e = ttsAudio.error;
+          window.petApi?.error?.('tts-play-failed: ' + ((e && e.message) || ('错误码 ' + ((e && e.code) || '?'))));
+        };
         ttsAudio.src = src;
         await ttsAudio.play();
       } catch (e) {
