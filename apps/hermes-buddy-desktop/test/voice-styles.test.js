@@ -105,3 +105,36 @@ test('voiceStyles() 返回预设副本（外部改不脏内部常量）', () => 
   a.push({ id: 'hack' });
   assert.equal(vm.voiceStyles().some((s) => s.id === 'hack'), false, '必须返回副本');
 });
+
+// ---- v4.12.23：语音对话独立小窗（不唤主窗口）----
+const MAIN_JS423 = () => fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+
+test('语音激活时弹独立小窗而非唤主窗口（会话 sink 接 handleVoiceSessionEvent）', () => {
+  const src = MAIN_JS423();
+  assert.ok(/setSessionSink\(handleVoiceSessionEvent\)/.test(src), 'setSessionSink 必须指向 handleVoiceSessionEvent');
+  // showVoiceChat 函数体里不得再调用 restoreMainWindow
+  const m = src.match(/function showVoiceChat\(\) \{[\s\S]*?\n\}/);
+  assert.ok(m, 'main.js 必须定义 showVoiceChat');
+  assert.ok(!m[0].includes('restoreMainWindow'), 'showVoiceChat 不允许唤主窗口');
+  assert.ok(/function handleVoiceSessionEvent[\s\S]*?evt\.type === 'open'[\s\S]*?showVoiceChat\(\)/.test(src),
+    'open 事件必须走 showVoiceChat');
+});
+
+test('语音对话小窗三件套存在（html + preload，支持会话/播放/隐藏）', () => {
+  const dir = path.join(__dirname, '..', 'src', 'voice');
+  const html = fs.readFileSync(path.join(dir, 'voice-chat.html'), 'utf8');
+  assert.ok(html.includes('vc.onSession') && html.includes('vc.hide') && html.includes('vc.onPlay'),
+    '小窗页面要订阅会话事件、播放音频并支持关闭');
+  const pre = fs.readFileSync(path.join(dir, 'voice-chat-preload.js'), 'utf8');
+  for (const kw of ['onSession', 'onPlay', 'hide', 'contextBridge']) {
+    assert.ok(pre.includes(kw), `preload 缺少 ${kw}`);
+  }
+});
+
+test('TTS 播放优先级：桌宠 → 语音小窗 → 主窗口', () => {
+  const vm = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice', 'voice-manager.js'), 'utf8');
+  const iPet = vm.indexOf('pet:speak-audio');
+  const iVc = vm.indexOf("vcWin.webContents.send('buddy:voice:play'");
+  const iMw = vm.indexOf("mw.webContents.send('buddy:voice:play'");
+  assert.ok(iPet > 0 && iVc > iPet && iMw > iVc, 'speak() 播放顺序必须是 桌宠→小窗→主窗口');
+});

@@ -148,6 +148,87 @@ function restoreMainWindow() {
   }
 }
 
+// ---------------- v4.12.23：语音对话小窗 ----------------
+// 聆听/识别/AI 回复都在这个贴着桌宠弹出的无边框小窗里滚动，
+// 主窗口保持原样（用户反馈：不要一说话就跳回主页面）。
+let voiceChatWin = null;
+let voiceChatHideTimer = null;
+
+function getVoiceChatWin() { return voiceChatWin; }
+
+function showVoiceChat() {
+  if (voiceChatWin && !voiceChatWin.isDestroyed()) {
+    if (voiceChatHideTimer) { clearTimeout(voiceChatHideTimer); voiceChatHideTimer = null; }
+    voiceChatWin.show();
+    return;
+  }
+  const { screen } = require('electron');
+  try {
+    // 位置：工作区右下角，往左上让出桌宠和托盘的位置
+    const area = screen.getPrimaryDisplay().workArea;
+    const W = 380, H = 480, M = 24;
+    const x = Math.max(area.x, area.x + area.width - W - M - 180);
+    const y = Math.max(area.y, area.y + area.height - H - M - 40);
+    voiceChatWin = new BrowserWindow({
+      width: W,
+      height: H,
+      x, y,
+      show: true,
+      frame: false,
+      resizable: false,
+      fullscreenable: false,
+      minimizable: false,
+      maximizable: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      transparent: false,
+      backgroundColor: '#12141c',
+      roundedCorners: true,
+      webPreferences: {
+        preload: path.join(__dirname, 'voice', 'voice-chat-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+        backgroundThrottling: false,
+      },
+    });
+    try { voiceChatWin.setAlwaysOnTop(true, 'screen-saver'); } catch (_) {}
+    voiceChatWin.setMenuBarVisibility(false);
+    voiceChatWin.loadFile(path.join(__dirname, 'voice', 'voice-chat.html')).catch(() => {});
+    voiceChatWin.on('closed', () => { voiceChatWin = null; });
+    voiceChatWin.on('blur', () => {
+      // 失焦不立刻关：朗读/思考中用户可能切到别的窗口；靠自动收起定时器
+    });
+  } catch (e) {
+    logger.warn('voice-chat-window-failed', { error: e.message });
+  }
+}
+
+function scheduleVoiceChatAutoHide(ms) {
+  if (voiceChatHideTimer) { clearTimeout(voiceChatHideTimer); voiceChatHideTimer = null; }
+  if (!voiceChatWin || voiceChatWin.isDestroyed()) return;
+  voiceChatHideTimer = setTimeout(() => {
+    voiceChatHideTimer = null;
+    try { if (voiceChatWin && !voiceChatWin.isDestroyed()) voiceChatWin.hide(); } catch (_) {}
+  }, ms);
+}
+
+/** 语音会话事件统一入口：显示小窗、转发事件、安排自动收起。 */
+function handleVoiceSessionEvent(evt) {
+  if (!evt || !evt.type) return;
+  if (evt.type === 'open') {
+    showVoiceChat();
+    return;
+  }
+  if (voiceChatWin && !voiceChatWin.isDestroyed()) {
+    try { voiceChatWin.webContents.send('buddy:voice:session', evt); } catch (_) {}
+  }
+  // 最终回复或出错后 25 秒自动收起小窗（不打扰桌面）
+  if ((evt.type === 'ai' && evt.pending === false) || evt.type === 'error') {
+    scheduleVoiceChatAutoHide(25000);
+  }
+}
+
 /**
  * v4.2 主动预测：不看规则、不受冷却，「现在就看一眼屏幕」。
  * 桌宠点击 / 设置页按钮 / 巡检定时器共用。结果通过猫的气泡或浮层反馈。
@@ -1400,14 +1481,11 @@ async function bootstrap() {
           getMainWindow: () => mainWindow,
           getPredict: () => predictController,
           onVoiceCommand: runVoiceCommand,
+          getVoiceChatWin,
         });
         voiceManager.setGlobalShortcut(globalShortcut);
-        // v4.12.22：语音一激活就把主窗口唤到「语音对话」视图（热键/桌宠按钮都走这条）
-        voiceManager.setSessionSink((evt) => {
-          if (evt && evt.type === 'open') {
-            try { restoreMainWindow(); } catch (_) {}
-          }
-        });
+        // v4.12.23：语音一激活就弹出独立「语音对话」小窗（不再唤主窗口）
+        voiceManager.setSessionSink(handleVoiceSessionEvent);
         const vcfg = predictController.config.get('voice') || {};
         const hkOk = voiceManager.registerHotkey(vcfg.hotkey || 'Ctrl+Alt+F1');
         if (pet && pet.win && !pet.win.isDestroyed()) {
@@ -1421,6 +1499,12 @@ async function bootstrap() {
         // v4.12.16：桌宠 🎤 按钮改为点击切换（toggle），更贴合用户习惯
         try {
           ipcMain.on('pet:push-talk-toggle', () => { if (voiceManager) voiceManager.toggleListening(); });
+        } catch (_) {}
+        // v4.12.23：小窗 ✕ / Esc → 隐藏（窗口留着复用）
+        try {
+          ipcMain.on('buddy:voice-chat:hide', () => {
+            try { if (voiceChatWin && !voiceChatWin.isDestroyed()) voiceChatWin.hide(); } catch (_) {}
+          });
         } catch (_) {}
       } catch (e) {
         voiceManager = null;

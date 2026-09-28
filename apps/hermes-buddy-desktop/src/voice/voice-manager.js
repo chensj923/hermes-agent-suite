@@ -67,12 +67,14 @@ function styleById(id) {
 }
 
 class VoiceManager {
-  constructor({ logger, appDir, getPet, getMainWindow, getPredict, onVoiceCommand } = {}) {
+  constructor({ logger, appDir, getPet, getMainWindow, getPredict, onVoiceCommand, getVoiceChatWin } = {}) {
     this.logger = logger || { info() {}, warn() {}, error() {}, debug() {} };
     this.appDir = appDir || '';
     this.getPet = getPet || (() => null);
     this.getMainWindow = getMainWindow || (() => null);
     this.getPredict = getPredict || (() => null);
+    // v4.12.23：语音对话小窗（优先在这里播放，主窗口可保持隐藏）
+    this.getVoiceChatWin = typeof getVoiceChatWin === 'function' ? getVoiceChatWin : () => null;
     this.onVoiceCommand = typeof onVoiceCommand === 'function' ? onVoiceCommand : null;
     // v4.12.22：语音会话事件（聆听/识别中/我说的/AI 回复）→ 主窗口「语音对话」面板
     this.onSession = null;
@@ -372,6 +374,11 @@ class VoiceManager {
     const petWin = (pet && pet.win && !pet.win.isDestroyed() && pet.isReady !== false) ? pet.win : null;
     if (petWin) {
       try { petWin.webContents.send('pet:speak-audio', payload); return { ok: true, reason: '' }; } catch (_) {}
+    }
+    // v4.12.23：其次发语音对话小窗（它比主窗口更可能是用户正盯着的）
+    const vcWin = this.getVoiceChatWin();
+    if (vcWin && !vcWin.isDestroyed()) {
+      try { vcWin.webContents.send('buddy:voice:play', payload); return { ok: true, reason: '' }; } catch (_) {}
     }
     // v4.12.18：没有桌宠窗口时，改由主窗口播放（之前这条路径压根没实现，点了必然没反应）
     const mw = this.getMainWindow();
