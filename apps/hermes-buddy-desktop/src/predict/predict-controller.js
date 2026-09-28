@@ -360,27 +360,83 @@ class PredictController {
   }
 
   /**
-   * v4.12.14：语音指令 → 生成。把用户说出的话作为方向，复用注入的远端/本机生成函数，
+   * v4.12.25：语音指令 → 生成。把用户说出的话作为方向，复用注入的远端/本机生成函数，
    * 产出一段可朗读的回复草稿。未连模型时返回 null（由调用方降级）。
+   *
+   * 关键改动：
+   *   1. **先截图，再判断**：用户通过语音问"我现在该回什么""图上写了什么"这类
+   *      具体问题时，必须先看当前屏幕。旧实现直接生成，AI 只会复读"看不到屏幕"；
+   *      现在 captureActiveWindow → 远端视觉开则带图，未开则本机 VL 读图成文字。
+   *   2. **对话进度与预测进度合并**：语音小窗不再只显示"正在思考…"，而是把
+   *      截图/理解屏幕/组织回复这些预测步骤实时滚动到状态条，让语音对话就是一次
+   *      带有语音输入的预测。
+   *
    * @param {string} text 语音转写文本
    * @param {{title?:string,windowClass?:string,exeName?:string}} [wi] 前台窗口信息
+   * @param {(step:{phase:string,text:string})=>void} [onProgress] 进度回调，供语音小窗展示
    * @returns {Promise<string|null>}
    */
-  async voicePrompt(text, wi) {
+  async voicePrompt(text, wi, onProgress) {
     if (typeof this._generateContentFn !== 'function') return null;
     const t = String(text || '').trim();
     if (!t) return null;
+
+    const report = (phase, text) => {
+      if (typeof onProgress === 'function') {
+        try { onProgress({ phase, text }); } catch (_) {}
+      }
+    };
+
+    let imageBase64 = null;
+    let shotSource = null;
+    let observation = '';
+
+    // 1) 先截图：语音问具体问题必须先看屏幕，否则 AI 只能说"看不到"
+    report('capturing', '正在看屏幕…');
+    if (this.capture && typeof this.capture.captureActiveWindow === 'function') {
+      try {
+        const shot = await _withTimeout(
+          this.capture.captureActiveWindow({
+            skipName: /hermes buddy|hermes-buddy|桌宠|buddy/i,
+            fgTitle: (wi && wi.title) || '',
+          }),
+          CAPTURE_AWAIT_TIMEOUT_MS,
+          '截图取源超时'
+        );
+        imageBase64 = shot && shot.base64;
+        shotSource = shot && shot.source;
+      } catch (e) {
+        this.logger.warn('voice-prompt-capture-failed', { error: e.message });
+      }
+    }
+
+    // 2) 未开远端视觉时，用本机 VL 把截图读成文字描述（避免服务端收图报错）
+    if (!this._allowRemoteImage() && imageBase64) {
+      report('analyzing', '正在理解屏幕内容…');
+      observation = await this._localVisionToText({}, imageBase64, null);
+    }
+
+    this.logger.info('voice-prompt-shot', {
+      hasImage: !!imageBase64,
+      source: shotSource || 'none',
+      hasObservation: !!observation,
+      remoteVision: this._allowRemoteImage(),
+    });
+
+    // 3) 生成回答：带图或带描述，明确告诉模型不要再说"看不到"
+    report('generating', '正在组织回复…');
     try {
+      const genImage = this._allowRemoteImage() ? imageBase64 : null;
       const res = await this._generateContentFn({
         stage: 'generate_content',
         rule: 'voice_command',
         suggestion: '',
         reason: '语音指令',
-        screenObservation: '',
+        screenObservation: observation || '',
         windowTitle: (wi && wi.title) || '',
-        direction: '用户通过语音请求：' + t,
+        direction: '用户通过语音请求：' + t + '。请结合当前屏幕内容直接回答，不要再说"看不到屏幕"。',
         topic: t,
-      }, null);
+      }, genImage);
       if (res && typeof res.content === 'string' && res.content.trim()) return res.content.trim();
       return null;
     } catch (e) {

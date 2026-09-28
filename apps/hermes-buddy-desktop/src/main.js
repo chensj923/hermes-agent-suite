@@ -62,8 +62,13 @@ function safeSend(sender, channel, payload) {
 }
 
 /**
- * v4.12.14：语音指令处理。转写文本 → 经预测管线生成回复草稿 → TTS 朗读。
- * 同时把识别到的指令推给渲染层显示。
+ * v4.12.25：语音指令处理。转写文本 → 经预测管线生成回复草稿 → TTS 朗读。
+ *
+ * 语音对话与预测进度合并：
+ *   - 语音问具体问题要先看屏幕，所以 voicePrompt 内部会先 captureActiveWindow；
+ *   - 这些截图/理解/生成步骤通过 onProgress 回调抛到这里，再转发成
+ *     buddy:voice:session phase 事件，让语音小窗的状态条实时滚动，
+ *     而不是只显示一个"正在思考…"死水一潭。
  */
 async function runVoiceCommand(text, wi) {
   if (!text) return;
@@ -72,10 +77,16 @@ async function runVoiceCommand(text, wi) {
   }
   // v4.12.22：AI 侧先挂一条「思考中」气泡，拿到回复后原地替换 —— 聊天感
   if (voiceManager) voiceManager._emitSession({ type: 'ai', text: '正在思考…', pending: true });
+
+  // v4.12.25：把 voicePrompt 里的预测进度同步到语音小窗，实现"对话=预测"
+  const onProgress = (step) => {
+    if (voiceManager && step) voiceManager._emitSession({ type: 'phase', phase: step.phase, text: step.text || '' });
+  };
+
   let reply = null;
   try {
     if (predictController && typeof predictController.voicePrompt === 'function') {
-      reply = await predictController.voicePrompt(text, wi);
+      reply = await predictController.voicePrompt(text, wi, onProgress);
     }
   } catch (e) {
     logger.warn('voice-command-generate-failed', { error: e.message });

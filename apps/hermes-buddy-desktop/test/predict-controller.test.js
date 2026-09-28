@@ -476,3 +476,48 @@ test('触发链路 game_live → 只保留剪贴板给建议，绝不注入游�
   assert.ok(keep, '建议应保留到剪贴板供用户自取');
   assert.strictEqual(keep.text, advice, '保留的必须是完整游玩建议（含分条换行，不截断）');
 });
+
+// v4.12.25 回归：语音问具体问题要先截图，并把预测进度同步到语音小窗。
+test('voicePrompt 先截图、按序汇报进度、并把图传给生成函数', async () => {
+  const { ctrl } = makeController({ model: 'none', choice: 'generate' });
+  let generateCalled = 0;
+  let generateImage = null;
+  let generatePayload = null;
+  ctrl._generateContentFn = async (payload, image) => {
+    generateCalled += 1;
+    generateImage = image;
+    generatePayload = payload;
+    return { content: '这是结合屏幕内容给出的回复。' };
+  };
+  const progress = [];
+  const reply = await ctrl.voicePrompt('帮我判断现在该回什么', { title: '微信 - 陈' }, (step) => {
+    progress.push({ phase: step.phase, text: step.text });
+  });
+  assert.strictEqual(reply, '这是结合屏幕内容给出的回复。');
+  assert.strictEqual(generateCalled, 1, '必须先截图再调用生成');
+  assert.strictEqual(generateImage, 'BASE64FAKE', '远端视觉开启时应把截图 base64 直接传给生成函数');
+  assert.ok(generatePayload, '生成 payload 必须存在');
+  assert.strictEqual(generatePayload.rule, 'voice_command');
+  assert.strictEqual(generatePayload.windowTitle, '微信 - 陈');
+  assert.ok(/不要再说"看不到屏幕"/.test(generatePayload.direction), 'direction 必须提示模型不要复读看不到');
+  assert.deepStrictEqual(progress.map((s) => s.phase), ['capturing', 'generating'], '进度顺序应为截图→生成');
+  assert.ok(/看屏幕/.test(progress[0].text), 'capturing 阶段文案应明确在看屏幕');
+});
+
+test('voicePrompt remoteVision=false 时用本机 VL 描述并写入 screenObservation', async () => {
+  const { ctrl } = makeController({ model: 'none', choice: 'generate' });
+  ctrl.config.set({ remoteVision: false });
+  // 模拟本机 VL：把 base64 前缀作为观察返回
+  ctrl._describeFn = async (_ctx, imageBase64) => '屏幕内容是：' + (imageBase64 ? '有图' : '无图');
+  // 让 _localVisionToText 认为本机已热启，否则为避免冷启动会直接跳过描述
+  ctrl._predictFn = async () => ({ observation: '' });
+  let generatePayload = null;
+  ctrl._generateContentFn = async (payload) => {
+    generatePayload = payload;
+    return { content: '已读屏后的回复。' };
+  };
+  const reply = await ctrl.voicePrompt('这个窗口里写了什么');
+  assert.strictEqual(reply, '已读屏后的回复。');
+  assert.ok(generatePayload, '生成 payload 必须存在');
+  assert.ok(/屏幕内容是：有图/.test(generatePayload.screenObservation), 'remoteVision=false 时应把本机 VL 描述写进 screenObservation');
+});

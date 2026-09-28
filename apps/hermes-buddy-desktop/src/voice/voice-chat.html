@@ -36,6 +36,10 @@
   header .dot.recognizing { background: #ffd479; animation: blink 1s infinite; }
   header .dot.thinking { background: #7fd1ff; animation: blink 1s infinite; }
   header .dot.speaking { background: #8be9a8; }
+  /* v4.12.25：语音对话 = 预测，把截图/分析/生成进度也显示在状态条 */
+  header .dot.capturing { background: #a78bfa; animation: blink 1s infinite; }
+  header .dot.analyzing { background: #7fd1ff; animation: blink 1s infinite; }
+  header .dot.generating { background: #facc15; animation: blink 1s infinite; }
   header .title { font-size: 13px; font-weight: 600; }
   header .status {
     flex: 1; font-size: 11px; color: var(--muted);
@@ -125,6 +129,10 @@
         status.textContent = evt.text || '';
         dot.className = 'dot ' + (evt.phase || '');
         if (evt.phase === 'listening' && !log.children.length) addMsg('system', '🎙 正在聆听，说完再按一次快捷键');
+        // v4.12.25：把预测进度（截图/分析/生成）也写进对话流，让对话和预测成为同一件事
+        if (evt.phase === 'capturing') addMsg('system', '📸 ' + (evt.text || '正在看屏幕…'));
+        if (evt.phase === 'analyzing') addMsg('system', '🔍 ' + (evt.text || '正在理解屏幕内容…'));
+        if (evt.phase === 'generating') addMsg('system', '✍️ ' + (evt.text || '正在组织回复…'));
       } else if (evt.type === 'user') {
         pendingAi = null;
         addMsg('user', evt.text || '');
