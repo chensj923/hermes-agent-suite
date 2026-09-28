@@ -26,13 +26,13 @@ contextBridge.exposeInMainWorld('petApi', {
   // v4.12.14：语音
   // 主进程把 SAPI 渲染好的 WAV 路径发来，渲染层用 <audio>.setSinkId(扬声器) 播放
   onSpeakAudio: (handler) => ipcRenderer.on('pet:speak-audio', (_e, payload) => { try { handler(payload || {}); } catch (_) {} }),
-  // 主进程经热键/按钮切换「收音」状态：on=true 开始采集，false=停止并回传
-  onListenCommand: (handler) => ipcRenderer.on('pet:listen', (_e, on) => { try { handler(!!on); } catch (_) {} }),
-  // 渲染层把采集到的音频（base64）发回主进程转写
+  // 主进程经热键/按钮切换「收音」状态：on=true 显示「收听中」，false=隐藏。
+  // v4.12.16：载荷是 {on:bool}，这里取 payload.on，修掉之前把整个对象当布尔导致 stop 永不触发的 bug。
+  onListenCommand: (handler) => ipcRenderer.on('pet:listen', (_e, payload) => { try { handler(!!(payload && payload.on)); } catch (_) {} }),
+  // 渲染层把采集到的音频（base64）发回主进程转写（仅 STT 兜底路径用；v4.12.16 起采集改由独立窗口负责）
   sendCapture: (data, mime) => ipcRenderer.invoke('buddy:voice:capture', { data, mime }),
   // 主进程下发语音设备配置（麦克风/扬声器选择），渲染层缓存
   onVoiceConfig: (handler) => ipcRenderer.on('pet:voice-config', (_e, cfg) => { try { handler(cfg || {}); } catch (_) {} }),
-  // v4.12.15：按住说话按钮（pointerdown/up 触发）
-  pushTalkStart: () => ipcRenderer.send('pet:push-talk-start'),
-  pushTalkStop: () => ipcRenderer.send('pet:push-talk-stop'),
+  // v4.12.16：🎤 按钮点击切换（toggle）收音
+  pushTalkToggle: () => ipcRenderer.send('pet:push-talk-toggle'),
 });

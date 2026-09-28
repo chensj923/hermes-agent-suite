@@ -1006,6 +1006,11 @@ body.resizing .context-resizer { pointer-events: auto; }
   font-size: 12px;
   color: var(--text, #333);
 }
+.voice-error {
+  border-color: #e8443a;
+  color: #c0392b;
+  background: #fdecea;
+}
 #voice-hotkey {
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
   letter-spacing: 0.5px;

@@ -151,7 +151,9 @@ const api = {
   voiceStartListen: () => invoke('buddy:voice:start-listen'),
   voiceStopListen: () => invoke('buddy:voice:stop-listen'),
   voiceListen: (on) => invoke('buddy:voice:listen', typeof on === 'boolean' ? on : undefined),
+  voiceProbe: () => invoke('buddy:voice:probe'),
   onVoiceTranscript: (handler) => subscribe('buddy:voice:transcript', handler),
+  onVoiceError: (handler) => subscribe('buddy:voice:error', handler),
 
   // ---- 桌宠猫咪（v4.1） ----
   petMinimize: () => invoke('buddy:pet:minimize'),

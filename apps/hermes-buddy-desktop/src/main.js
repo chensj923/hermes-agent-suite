@@ -902,6 +902,12 @@ function registerIpc() {
       return { ok: false, error: String((e && e.message) || e || '转写失败') };
     }
   });
+  // v4.12.16：设置面板「测试麦克风」—— 在采集窗实测 getUserMedia，报告具体错误
+  handle('buddy:voice:probe', async () => {
+    if (!voiceManager) return { ok: false, error: '语音未就绪' };
+    try { await voiceManager.probeMic(); return { ok: true }; }
+    catch (e) { return { ok: false, error: String((e && e.message) || e || '麦克风不可用') }; }
+  });
 
   // ---- 智能体 ----
   handle('buddy:agents', () => manager.listAgents());
@@ -1382,10 +1388,12 @@ async function bootstrap() {
         }
         logger.info('voice-manager-ready', { hotkey: voiceManager.getSettings().hotkey || vcfg.hotkey || 'Ctrl+Alt+F1', registered: hkOk });
 
-        // v4.12.15：桌宠按住说话按钮（pointerdown/up 触发）
+        // v4.12.16：独立采集窗（file:// 可靠上下文跑 getUserMedia）
+        try { voiceManager.initCaptureWindow(); } catch (e) { logger.warn('voice-capture-init-failed', { error: e.message }); }
+
+        // v4.12.16：桌宠 🎤 按钮改为点击切换（toggle），更贴合用户习惯
         try {
-          ipcMain.on('pet:push-talk-start', () => { if (voiceManager) voiceManager.pushToTalk(true); });
-          ipcMain.on('pet:push-talk-stop', () => { if (voiceManager) voiceManager.pushToTalk(false); });
+          ipcMain.on('pet:push-talk-toggle', () => { if (voiceManager) voiceManager.toggleListening(); });
         } catch (_) {}
       } catch (e) {
         voiceManager = null;

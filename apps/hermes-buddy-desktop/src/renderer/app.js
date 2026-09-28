@@ -2241,8 +2241,9 @@ async function renderToolchainTab() {
 
 async function renderMediaTab() {
   el.contextBody.innerHTML = `
-    <h2>本地媒体引擎</h2>
-    <p class="hint">发语音或视频时，Buddy 会先在本机把它转成文字、抽出关键帧，只把文字和图片发给 AI——原始音视频不出本机。这需要本机的 Whisper 与 ffmpeg，点一下就能装好（装在应用数据目录，不写 PATH、不需要管理员权限）。</p>
+    <h2>本机引擎与模型</h2>
+    <p class="hint">本机跑的引擎和模型都在这里统一管理：<b>Whisper + ffmpeg</b>（语音/视频本地转写）与<b>本地推理模型 GGUF</b>（与服务端断线时的离线兜底）。</p>
+    <p class="hint">发语音或视频时，Buddy 会先在本机把它转成文字、抽出关键帧，只把文字和图片发给 AI——原始音视频不出本机。点击安装即可装好（装在应用数据目录，不写 PATH、不需要管理员权限）。</p>
     <div id="media-engine-list"></div>
     <label class="settings-field">语音模型
       <select id="media-engine-model">
@@ -2256,6 +2257,8 @@ async function renderMediaTab() {
       <button class="ghost" id="media-engine-opendir" type="button">打开引擎目录</button>
     </div>
     <p class="hint" id="media-engine-tip"></p>
+    <!-- v4.12.16：本机推理模型（GGUF / VLM 引擎）从预测模式页迁来，与 Whisper 统一管理 -->
+    <div id="media-local-model"></div>
   `;
 
   const list = $('media-engine-list');
@@ -2334,6 +2337,170 @@ async function renderMediaTab() {
   });
 
   $('media-engine-opendir').addEventListener('click', () => { api.openMediaEngineDir(); });
+
+  // v4.12.16：本机推理模型（离线预测兜底用的 GGUF / VLM 引擎）统一挂在这一页
+  await renderLocalModelSection().catch(() => {});
+}
+
+/**
+ * 本机推理模型（GGUF / VLM 引擎）配置。
+ *
+ * v4.12.16：原先散在「预测模式」页，现迁到「本地媒体引擎」页，与 Whisper/ffmpeg 一起
+ * 作为「本机模型与引擎」的统一入口。本机模型只在与 Hermes 服务端断线时作为离线兜底，
+ * 连着服务端时不影响使用。
+ */
+async function renderLocalModelSection() {
+  const container = document.getElementById('media-local-model');
+  if (!container) return;
+  const engine = await api.predictEngineStatus().catch(() => null);
+  if (!engine) return;
+  container.innerHTML = '';
+
+  const ready = engine.llamaServer && engine.llamaServer.ok && engine.model && engine.model.ok;
+
+  // ---- VLM 引擎安装引导（未就绪才显示） ----
+  if (!ready) {
+    const sec = document.createElement('section');
+    sec.id = 'predict-engine-install';
+    const h = document.createElement('h3');
+    h.textContent = 'VLM 引擎';
+    const tip = document.createElement('p');
+    tip.className = 'hint';
+    const bits = [
+      'llama-server: ' + (engine.llamaServer && engine.llamaServer.ok ? '已安装' : '未安装'),
+      '模型 GGUF: ' + (engine.model && engine.model.ok ? '已安装' : '未安装')
+    ];
+    tip.textContent = '本机模型作为远端断线时的离线兜底，但引擎未就绪（' + bits.join('，') + '）。' +
+      '连着 Hermes 服务端时不影响使用，断线时才需要它。' +
+      '引擎约 18MB（llama.cpp）+ 2GB（Qwen2.5-VL-3B GGUF）。';
+    const actions = document.createElement('div');
+    actions.className = 'settings-actions';
+    const btn = document.createElement('button');
+    btn.className = 'primary';
+    btn.type = 'button';
+    btn.textContent = '一键安装 VLM 引擎';
+    const prog = document.createElement('div');
+    prog.className = 'settings-status';
+    prog.id = 'predict-engine-progress';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = '安装中…';
+      prog.textContent = '准备下载…';
+      prog.dataset.tone = '';
+      const r = await api.predictInstallEngine().catch((e) => ({ error: e.message }));
+      if (r && r.error) {
+        prog.textContent = '安装失败：' + r.error;
+        prog.dataset.tone = 'error';
+        btn.disabled = false;
+        btn.textContent = '重试安装';
+      } else {
+        prog.textContent = 'VLM 引擎就绪 ✓（回到设置页即可生效）';
+        prog.dataset.tone = 'ok';
+        btn.textContent = '安装完成 ✓';
+      }
+    });
+    actions.appendChild(btn);
+    sec.append(h, tip, actions, prog);
+    container.appendChild(sec);
+  }
+
+  // ---- 本地推理模型（GGUF）：已下好的可直接指定，无需再下载 2GB ----
+  const sec2 = document.createElement('section');
+  const h2 = document.createElement('h3');
+  h2.textContent = '本地推理模型（可自己指定）';
+  const modelLine = document.createElement('p');
+  modelLine.className = 'hint';
+  const mmLine = document.createElement('p');
+  mmLine.className = 'hint';
+  const st2 = document.createElement('div');
+  st2.className = 'settings-status';
+  function renderModelLines() {
+    const mp = (engine && engine.model && engine.model.path) || '';
+    const xp = (engine && engine.mmproj && engine.mmproj.path) || '';
+    modelLine.textContent = '主模型 GGUF：' + (mp || '（未指定，一键安装会自动下载约 2GB）');
+    modelLine.title = mp;
+    mmLine.textContent = '视觉投影 mmproj：' + (xp || '（未指定；缺了它模型看不懂截图）');
+    mmLine.title = xp;
+  }
+  renderModelLines();
+  const acts2 = document.createElement('div');
+  acts2.className = 'settings-actions';
+  const bModel = document.createElement('button');
+  bModel.className = 'ghost'; bModel.type = 'button'; bModel.textContent = '指定本地 GGUF 模型…';
+  const bMm = document.createElement('button');
+  bMm.className = 'ghost'; bMm.type = 'button'; bMm.textContent = '指定 mmproj…';
+  const bReset = document.createElement('button');
+  bReset.className = 'ghost'; bReset.type = 'button'; bReset.textContent = '恢复自动下载的模型';
+  bModel.addEventListener('click', async () => {
+    const r = await api.predictModelPick().catch((e) => ({ error: e.message }));
+    if (r && r.canceled) return;
+    if (r && r.error) { st2.textContent = '导入失败：' + r.error; st2.dataset.tone = 'error'; return; }
+    st2.textContent = '已切换到本地模型：' + r.path;
+    st2.dataset.tone = 'ok';
+    renderMediaTab();
+  });
+  bMm.addEventListener('click', async () => {
+    const r = await api.predictMmprojPick().catch((e) => ({ error: e.message }));
+    if (r && r.canceled) return;
+    if (r && r.error) { st2.textContent = '导入失败：' + r.error; st2.dataset.tone = 'error'; return; }
+    st2.textContent = '已指定视觉投影：' + r.path;
+    st2.dataset.tone = 'ok';
+    renderMediaTab();
+  });
+  bReset.addEventListener('click', async () => {
+    await api.predictModelReset().catch(() => {});
+    st2.textContent = '已恢复使用自动下载的模型';
+    st2.dataset.tone = 'ok';
+    renderMediaTab();
+  });
+  acts2.append(bModel, bMm, bReset);
+  const hint2 = document.createElement('p');
+  hint2.className = 'hint';
+  hint2.innerHTML = '支持 llama.cpp 兼容的 <b>GGUF 视觉模型</b>：推荐 <b>Qwen2.5-VL-3B-Instruct</b>（Q4_K_M，1.8GB，中文/截图理解最好），更轻可选 <b>SmolVLM2 2.2B</b>（2.3GB、更快）。' +
+    '手动指定需要两个文件：<b>主模型 GGUF</b> + <b>视觉投影 mmproj GGUF</b>（文件名通常以 mmproj 开头，缺它模型看不懂屏幕）。' +
+    '指定后点「一键安装 VLM 引擎」只会补 llama-server（约 18MB），<b>不再下载模型本体</b>。';
+  sec2.append(h2, modelLine, mmLine, acts2, st2, hint2);
+  container.appendChild(sec2);
+
+  // ---- 手动下载直链：内置下载器慢/断线时自行下载再导入 ----
+  const links = (engine && engine.links) || [];
+  if (links.length) {
+    const sec3 = document.createElement('section');
+    const h3 = document.createElement('h3');
+    h3.textContent = '手动下载地址';
+    const tip3 = document.createElement('p');
+    tip3.className = 'hint';
+    tip3.innerHTML = '内置下载器慢或断线时，可以自己用浏览器/下载工具下这两个文件，' +
+      '再用上面的「指定本地 GGUF 模型…」和「指定 mmproj…」导入（<b>两个都要</b>）。' +
+      '点击链接会用默认浏览器打开。';
+    sec3.append(h3, tip3);
+    for (const f of links) {
+      const box = document.createElement('div');
+      box.className = 'predict-link-row';
+      const cap = document.createElement('div');
+      cap.className = 'predict-link-cap';
+      cap.textContent = (f.role === 'mmproj' ? '视觉投影 mmproj' : '主模型') +
+        '：' + f.file + (f.bytes ? `　（${(f.bytes / 1024 / 1024).toFixed(0)} MB）` : '');
+      box.appendChild(cap);
+      const row = document.createElement('div');
+      row.className = 'settings-actions';
+      for (const s of f.sources) {
+        const a = document.createElement('button');
+        a.className = 'ghost'; a.type = 'button'; a.textContent = s.name;
+        a.title = s.url;
+        a.addEventListener('click', () => {
+          api.openExternal(s.url).catch(() => {});
+          try { navigator.clipboard.writeText(s.url); } catch (_) {}
+          st2.textContent = '已打开浏览器，下载链接也已复制到剪贴板：' + s.url;
+          st2.dataset.tone = 'ok';
+        });
+        row.appendChild(a);
+      }
+      box.appendChild(row);
+      sec3.appendChild(box);
+    }
+    container.appendChild(sec3);
+  }
 }
 
 // ---- 预测模式（v4.0）：事件驱动主动预判的设置面板 ----
@@ -2349,7 +2516,8 @@ const PREDICT_RULE_LABEL = {
 
 async function renderPredictTab() {
   const status = await api.predictStatus().catch(() => null);
-  const engine = await api.predictEngineStatus().catch(() => null);
+  // v4.12.16：本机推理模型（GGUF / VLM 引擎）的配置已迁到「本地媒体引擎」页统一管理，
+  // 这里不再重复取 predictEngineStatus，也不再渲染模型区块。
   const av = await api.predictAv({}).catch(() => ({ antivirus: [] }));
   const crystal = (status && status.crystallization) || {};
   const on = !!(status && status.enabled);
@@ -2407,12 +2575,14 @@ async function renderPredictTab() {
       <div class="settings-actions">
         <button class="primary" id="voice-save" type="button">保存语音设置</button>
         <button class="ghost" id="voice-test-tts" type="button">试听一句</button>
-        <button class="ghost" id="voice-ptt" type="button" title="按住说话">🎤 按住说话</button>
+        <button class="ghost" id="voice-ptt" type="button" title="点击开始/停止收音">🎤 收音开/关</button>
+        <button class="ghost" id="voice-probe" type="button" title="测试麦克风是否可用">测试麦克风</button>
       </div>
       <div class="settings-status" id="voice-status" role="status"></div>
       <p class="hint" id="voice-hint"></p>
       <div id="voice-engine" class="predict-stats"></div>
       <div id="voice-transcript" class="voice-transcript" hidden></div>
+      <div id="voice-error" class="voice-transcript voice-error" hidden></div>
 
       <h3>回填方式</h3>
       <label class="settings-field">生成内容如何进入当前窗体
@@ -2563,156 +2733,6 @@ async function renderPredictTab() {
   // 场景规则编辑器（v4.10.24 结晶场景）
   setupSceneRulesEditor();
 
-  // 引擎现状提示 + 一键安装引导（v4.1 / v4.12.0）
-  // 运行模式已移除：本机模型始终作为远端断线时的离线兜底，缺引擎就给安装入口
-  if (engine && status) {
-    const ready = engine.llamaServer && engine.llamaServer.ok && engine.model && engine.model.ok;
-    if (!ready) {
-      const sec = document.createElement('section');
-      sec.id = 'predict-engine-install';
-      const h = document.createElement('h3');
-      h.textContent = 'VLM 引擎';
-      const tip = document.createElement('p');
-      tip.className = 'hint';
-      const bits = [
-        'llama-server: ' + (engine.llamaServer && engine.llamaServer.ok ? '已安装' : '未安装'),
-        '模型 GGUF: ' + (engine.model && engine.model.ok ? '已安装' : '未安装')
-      ];
-      tip.textContent = '本机模型作为远端断线时的离线兜底，但引擎未就绪（' + bits.join('，') + '）。' +
-        '连着 Hermes 服务端时不影响使用，断线时才需要它。' +
-        '引擎约 18MB（llama.cpp）+ 2GB（Qwen2.5-VL-3B GGUF）。';
-      const actions = document.createElement('div');
-      actions.className = 'settings-actions';
-      const btn = document.createElement('button');
-      btn.className = 'primary';
-      btn.type = 'button';
-      btn.textContent = '一键安装 VLM 引擎';
-      const prog = document.createElement('div');
-      prog.className = 'settings-status';
-      prog.id = 'predict-engine-progress';
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        btn.textContent = '安装中…';
-        prog.textContent = '准备下载…';
-        prog.dataset.tone = '';
-        // 先订阅进度再发起，避免首条进度丢失
-        const r = await api.predictInstallEngine().catch((e) => ({ error: e.message }));
-        if (r && r.error) {
-          prog.textContent = '安装失败：' + r.error;
-          prog.dataset.tone = 'error';
-          btn.disabled = false;
-          btn.textContent = '重试安装';
-        } else {
-          prog.textContent = 'VLM 引擎就绪 ✓（回到设置页即可生效）';
-          prog.dataset.tone = 'ok';
-          btn.textContent = '安装完成 ✓';
-        }
-      });
-      actions.appendChild(btn);
-      sec.append(h, tip, actions, prog);
-      config.appendChild(sec);
-    }
-
-    // v4.7：本地推理模型（GGUF）—— 已经下好的就别再下载 2GB
-    const sec2 = document.createElement('section');
-    const h2 = document.createElement('h3');
-    h2.textContent = '本地推理模型（可自己指定）';
-    const modelLine = document.createElement('p');
-    modelLine.className = 'hint';
-    const mmLine = document.createElement('p');
-    mmLine.className = 'hint';
-    const st2 = document.createElement('div');
-    st2.className = 'settings-status';
-    function renderModelLines() {
-      const mp = (engine && engine.model && engine.model.path) || '';
-      const xp = (engine && engine.mmproj && engine.mmproj.path) || '';
-      modelLine.textContent = '主模型 GGUF：' + (mp || '（未指定，一键安装会自动下载约 2GB）');
-      modelLine.title = mp;
-      mmLine.textContent = '视觉投影 mmproj：' + (xp || '（未指定；缺了它模型看不懂截图）');
-      mmLine.title = xp;
-    }
-    renderModelLines();
-    const acts2 = document.createElement('div');
-    acts2.className = 'settings-actions';
-    const bModel = document.createElement('button');
-    bModel.className = 'ghost'; bModel.type = 'button'; bModel.textContent = '指定本地 GGUF 模型…';
-    const bMm = document.createElement('button');
-    bMm.className = 'ghost'; bMm.type = 'button'; bMm.textContent = '指定 mmproj…';
-    const bReset = document.createElement('button');
-    bReset.className = 'ghost'; bReset.type = 'button'; bReset.textContent = '恢复自动下载的模型';
-    bModel.addEventListener('click', async () => {
-      const r = await api.predictModelPick().catch((e) => ({ error: e.message }));
-      if (r && r.canceled) return;
-      if (r && r.error) { st2.textContent = '导入失败：' + r.error; st2.dataset.tone = 'error'; return; }
-      st2.textContent = '已切换到本地模型：' + r.path;
-      st2.dataset.tone = 'ok';
-      renderPredictTab();
-    });
-    bMm.addEventListener('click', async () => {
-      const r = await api.predictMmprojPick().catch((e) => ({ error: e.message }));
-      if (r && r.canceled) return;
-      if (r && r.error) { st2.textContent = '导入失败：' + r.error; st2.dataset.tone = 'error'; return; }
-      st2.textContent = '已指定视觉投影：' + r.path;
-      st2.dataset.tone = 'ok';
-      renderPredictTab();
-    });
-    bReset.addEventListener('click', async () => {
-      await api.predictModelReset().catch(() => {});
-      st2.textContent = '已恢复使用自动下载的模型';
-      st2.dataset.tone = 'ok';
-      renderPredictTab();
-    });
-    acts2.append(bModel, bMm, bReset);
-    const hint2 = document.createElement('p');
-    hint2.className = 'hint';
-    hint2.innerHTML = '支持 llama.cpp 兼容的 <b>GGUF 视觉模型</b>：推荐 <b>Qwen2.5-VL-3B-Instruct</b>（Q4_K_M，1.8GB，中文/截图理解最好），更轻可选 <b>SmolVLM2 2.2B</b>（2.3GB、更快）。' +
-      '手动指定需要两个文件：<b>主模型 GGUF</b> + <b>视觉投影 mmproj GGUF</b>（文件名通常以 mmproj 开头，缺它模型看不懂屏幕）。' +
-      '指定后点「一键安装 VLM 引擎」只会补 llama-server（约 18MB），<b>不再下载模型本体</b>。';
-    sec2.append(h2, modelLine, mmLine, acts2, st2, hint2);
-
-    // v4.8：手动下载直链 —— 内置下载器慢/断线时，用户可以自己用下载器下完再导入
-    const links = (engine && engine.links) || [];
-    if (links.length) {
-      const sec3 = document.createElement('section');
-      const h3 = document.createElement('h3');
-      h3.textContent = '手动下载地址';
-      const tip3 = document.createElement('p');
-      tip3.className = 'hint';
-      tip3.innerHTML = '内置下载器慢或断线时，可以自己用浏览器/下载工具下这两个文件，' +
-        '再用上面的「指定本地 GGUF 模型…」和「指定 mmproj…」导入（<b>两个都要</b>）。' +
-        '点击链接会用默认浏览器打开。';
-      sec3.append(h3, tip3);
-      for (const f of links) {
-        const box = document.createElement('div');
-        box.className = 'predict-link-row';
-        const cap = document.createElement('div');
-        cap.className = 'predict-link-cap';
-        cap.textContent = (f.role === 'mmproj' ? '视觉投影 mmproj' : '主模型') +
-          '：' + f.file + (f.bytes ? `　（${(f.bytes / 1024 / 1024).toFixed(0)} MB）` : '');
-        box.appendChild(cap);
-        const row = document.createElement('div');
-        row.className = 'settings-actions';
-        for (const s of f.sources) {
-          const a = document.createElement('button');
-          a.className = 'ghost'; a.type = 'button'; a.textContent = s.name;
-          a.title = s.url;
-          a.addEventListener('click', () => {
-            api.openExternal(s.url).catch(() => {});
-            // 同时把地址放到剪贴板，方便粘进下载工具
-            try { navigator.clipboard.writeText(s.url); } catch (_) {}
-            st2.textContent = '已打开浏览器，下载链接也已复制到剪贴板：' + s.url;
-            st2.dataset.tone = 'ok';
-          });
-          row.appendChild(a);
-        }
-        box.appendChild(row);
-        sec3.appendChild(box);
-      }
-      config.appendChild(sec3);
-    }
-
-    config.appendChild(sec2);
-  }
 
   // 偏好结晶统计
   const statsEl = $('predict-stats');
@@ -3131,21 +3151,34 @@ async function renderVoiceSection() {
     testBtn.disabled = false;
   });
 
-  // v4.12.15：设置面板「按住说话」按钮
+  // v4.12.16：设置面板「收音开/关」按钮（点击切换，与热键/桌宠按钮一致）
   const pttBtn = document.getElementById('voice-ptt');
   if (pttBtn) {
-    async function pttStart() {
-      pttBtn.classList.add('active');
-      await api.voiceStartListen().catch(() => {});
-    }
-    async function pttEnd() {
-      pttBtn.classList.remove('active');
-      await api.voiceStopListen().catch(() => {});
-    }
-    pttBtn.addEventListener('pointerdown', pttStart);
-    pttBtn.addEventListener('pointerup', pttEnd);
-    pttBtn.addEventListener('pointerleave', pttEnd);
-    pttBtn.addEventListener('pointercancel', pttEnd);
+    let pttOn = !!status.listening;
+    const reflect = () => {
+      pttBtn.classList.toggle('active', pttOn);
+      pttBtn.textContent = pttOn ? '🎤 收音中…' : '🎤 收音开/关';
+    };
+    reflect();
+    pttBtn.addEventListener('click', async () => {
+      pttOn = !pttOn;
+      reflect();
+      await api.voiceListen(pttOn).catch(() => {});
+    });
+  }
+
+  // v4.12.16：测试麦克风（在采集窗实测 getUserMedia，报告具体错误）
+  const probeBtn = document.getElementById('voice-probe');
+  if (probeBtn) {
+    probeBtn.addEventListener('click', async () => {
+      probeBtn.disabled = true;
+      statusEl.textContent = '正在测试麦克风…';
+      statusEl.dataset.tone = '';
+      const r = await api.voiceProbe().catch((e) => ({ ok: false, error: e.message }));
+      probeBtn.disabled = false;
+      if (r && r.ok) { statusEl.dataset.tone = 'ok'; statusEl.textContent = '麦克风可用 ✓（点「收音开/关」或按热键即可说话）'; }
+      else { statusEl.dataset.tone = 'error'; statusEl.textContent = '麦克风不可用：' + ((r && r.error) || '未知'); }
+    });
   }
 
   // 实时显示识别到的语音指令
@@ -3155,6 +3188,17 @@ async function renderVoiceSection() {
       trEl.textContent = '🎙 识别到：' + (text || '');
       clearTimeout(trEl._t);
       trEl._t = setTimeout(() => { trEl.hidden = true; }, 8000);
+    });
+  }
+
+  // 实时显示麦克风/采集错误（v4.12.16：让录音失败可见，而不是静默没反应）
+  const errEl = document.getElementById('voice-error');
+  if (errEl) {
+    api.onVoiceError(({ message }) => {
+      errEl.hidden = false;
+      errEl.textContent = '⚠ ' + (message || '语音出错');
+      clearTimeout(errEl._t);
+      errEl._t = setTimeout(() => { errEl.hidden = true; }, 10000);
     });
   }
 }

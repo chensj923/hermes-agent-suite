@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>voice-capture</title>
+</head>
+<body>
+<script>
+'use strict';
+// 常驻隐藏的采集窗：专门在 file:// 可靠上下文里跑 getUserMedia + MediaRecorder。
+let recorder = null;
+let chunks = [];
+let stream = null;
+let micId = '';
+
+function stopTracks() {
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+}
+
+window.vc.onCommand(async (cmd) => {
+  if (!cmd) return;
+  if (cmd.cmd === 'start') { micId = cmd.micId || ''; await startCapture(); }
+  else if (cmd.cmd === 'stop') { stopCapture(); }
+  else if (cmd.cmd === 'probe') { await probe(); }
+});
+
+async function startCapture() {
+  try {
+    const constraints = micId ? { audio: { deviceId: { exact: micId } } } : { audio: true };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    window.vc.reportState({ state: 'recording' });
+  } catch (e) {
+    window.vc.reportError({ name: (e && e.name) || 'Error', message: String((e && e.message) || e) });
+    return;
+  }
+  chunks = [];
+  try { recorder = new MediaRecorder(stream); }
+  catch (e) {
+    window.vc.reportError({ name: 'MediaRecorder', message: String((e && e.message) || e) });
+    stopTracks();
+    return;
+  }
+  recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+  recorder.onstop = async () => {
+    const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+    chunks = [];
+    try {
+      const buf = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      const step = 0x8000;
+      for (let i = 0; i < bytes.length; i += step) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+      window.vc.reportCaptured({ data: btoa(bin), mime: blob.type, micId });
+    } catch (e) {
+      window.vc.reportError({ name: 'encode', message: String((e && e.message) || e) });
+    }
+    stopTracks();
+  };
+  recorder.start();
+}
+
+function stopCapture() {
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+}
+
+async function probe() {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia(micId ? { audio: { deviceId: { exact: micId } } } : { audio: true });
+    s.getTracks().forEach((t) => t.stop());
+    window.vc.reportState({ state: 'ok' });
+  } catch (e) {
+    window.vc.reportError({ name: (e && e.name) || 'Error', message: String((e && e.message) || e) });
+  }
+}
+</script>
+</body>
+</html>

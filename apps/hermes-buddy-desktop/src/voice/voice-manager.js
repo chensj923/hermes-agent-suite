@@ -50,10 +50,111 @@ class VoiceManager {
     this._listenTimer = null;
     this._hotkey = '';
     this._globalShortcut = null; // 懒取，避免循环依赖
+    // v4.12.16：独立隐藏采集窗（file:// 可靠上下文跑 getUserMedia）
+    this._captureWin = null;
+    this._captureReady = false;
+    this._probeR = null;
   }
 
   setGlobalShortcut(gs) { this._globalShortcut = gs; }
   setOnVoiceCommand(fn) { this.onVoiceCommand = fn; }
+
+  // ---------------- 采集窗（v4.12.16）----------------
+  /** 创建一个常驻隐藏的 file:// 窗口专门跑 getUserMedia + MediaRecorder。 */
+  initCaptureWindow() {
+    if (this._captureWin || this._captureReady) return;
+    let electron;
+    try { electron = require('electron'); } catch (_) { return; }
+    const { BrowserWindow } = electron;
+    try {
+      const win = new BrowserWindow({
+        width: 1, height: 1,
+        show: false, frame: false, transparent: false,
+        skipTaskbar: true, resizable: false, alwaysOnTop: false,
+        webPreferences: {
+          preload: path.join(__dirname, 'capture-preload.js'),
+          contextIsolation: true, nodeIntegration: false, sandbox: false,
+        },
+      });
+      win.on('closed', () => { this._captureWin = null; this._captureReady = false; });
+      win.webContents.on('ipc-message', (_e, channel, ...args) => {
+        if (channel === 'vc:state') this._onCaptureState(args[0]);
+        else if (channel === 'vc:error') this._onCaptureErrorMsg(args[0]);
+        else if (channel === 'vc:captured') this._onCaptured(args[0]);
+      });
+      win.loadFile(path.join(__dirname, 'capture.html'))
+        .then(() => { this._captureReady = true; this.logger.info('voice-capture-window-ready'); })
+        .catch((e) => this.logger.warn('voice-capture-window-load-failed', { error: e.message }));
+      this._captureWin = win;
+    } catch (e) {
+      this.logger.warn('voice-capture-window-failed', { error: e.message });
+    }
+  }
+
+  _sendCapture(cmd) {
+    if (this._captureWin && !this._captureWin.isDestroyed()) {
+      try { this._captureWin.webContents.send('vc:cmd', cmd); return true; } catch (_) {}
+    }
+    return false;
+  }
+
+  _reportVoiceTranscript(text) {
+    const w = this.getMainWindow();
+    if (w && !w.isDestroyed()) { try { w.webContents.send('buddy:voice:transcript', { text }); } catch (_) {} }
+  }
+
+  _reportVoiceError(msg) {
+    const w = this.getMainWindow();
+    if (w && !w.isDestroyed()) { try { w.webContents.send('buddy:voice:error', { message: String(msg || '') }); } catch (_) {} }
+  }
+
+  async _onCaptured(payload) {
+    try {
+      const text = await this.handleCapture(payload || {});
+      this._reportVoiceTranscript(text);
+    } catch (e) {
+      this.logger.warn('voice-capture-handle-failed', { error: e.message });
+      this._reportVoiceError(String((e && e.message) || e));
+    }
+  }
+
+  _onCaptureState(s) {
+    if (s && s.state === 'ok' && this._probeR) {
+      try { this._probeR.resolve(true); } catch (_) {}
+      this._probeR = null;
+    }
+  }
+
+  _onCaptureErrorMsg(e) {
+    this.logger.warn('voice-capture-error', { name: e && e.name, message: e && e.message });
+    const msg = ((e && e.name) ? (e.name + '：') : '') + (e && e.message ? e.message : '麦克风打开失败');
+    this._reportVoiceError(msg);
+    // 出错则收起「收听中」指示并复位状态
+    const pet = this.getPet();
+    if (pet && pet.win && !pet.win.isDestroyed()) {
+      try { pet.win.webContents.send('pet:listen', { on: false }); } catch (_) {}
+    }
+    this._listening = false;
+    if (this._listenTimer) { clearTimeout(this._listenTimer); this._listenTimer = null; }
+    if (this._probeR) {
+      try { this._probeR.reject(new Error(msg)); } catch (_) {}
+      this._probeR = null;
+    }
+  }
+
+  /** 设置面板「测试麦克风」：在采集窗里实际 getUserMedia 一次，返回可用/具体错误。 */
+  probeMic() {
+    return new Promise((resolve, reject) => {
+      if (!this._captureWin || this._captureWin.isDestroyed()) { reject(new Error('采集窗口未就绪')); return; }
+      this._probeR = { resolve, reject };
+      if (!this._sendCapture({ cmd: 'probe', micId: this.getSettings().micId || '' })) {
+        this._probeR = null; reject(new Error('无法向采集窗发指令')); return;
+      }
+      setTimeout(() => {
+        if (this._probeR) { this._probeR.reject(new Error('麦克风测试超时（8 秒无响应）')); this._probeR = null; }
+      }, 8000);
+    });
+  }
 
   // ---------------- 设置 ----------------
   getSettings() {
@@ -187,17 +288,29 @@ class VoiceManager {
     if (was !== this._listening) {
       this.logger.info('voice-listening-changed', { listening: this._listening });
     }
+    // 桌宠只做「收听中」指示
     const pet = this.getPet();
     if (pet && pet.win && !pet.win.isDestroyed()) {
       try { pet.win.webContents.send('pet:listen', { on: this._listening }); } catch (_) {}
     }
+    // 实际收音交给独立采集窗（v4.12.16，file:// 可靠上下文）
     if (this._listening) {
+      if (!this._sendCapture({ cmd: 'start', micId: this.getSettings().micId || '' })) {
+        this.logger.warn('voice-capture-start-failed', { reason: 'capture-window-unavailable' });
+        this._reportVoiceError('采集窗口未就绪，无法收音（请重启应用后再试）');
+        this._listening = false;
+        if (pet && pet.win && !pet.win.isDestroyed()) {
+          try { pet.win.webContents.send('pet:listen', { on: false }); } catch (_) {}
+        }
+        return false;
+      }
       if (this._listenTimer) clearTimeout(this._listenTimer);
       this._listenTimer = setTimeout(() => this.setListening(false), 12000); // 安全网：最长 12s
-    } else if (this._listenTimer) {
-      clearTimeout(this._listenTimer);
-      this._listenTimer = null;
+    } else {
+      this._sendCapture({ cmd: 'stop' });
+      if (this._listenTimer) { clearTimeout(this._listenTimer); this._listenTimer = null; }
     }
+    return this._listening;
   }
 
   toggleListening() {
@@ -266,6 +379,7 @@ class VoiceManager {
       hotkeyRegistered: Boolean(this._hotkey),
       actualHotkey: this._hotkey || '',
       listening: this._listening,
+      captureReady: this._captureReady,
       engineReady: this.engineReady(),
       speakerId: cfg.speakerId || '',
       micId: cfg.micId || '',

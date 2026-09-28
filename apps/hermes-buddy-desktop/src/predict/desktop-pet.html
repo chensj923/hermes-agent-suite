@@ -295,15 +295,13 @@
     window.petApi?.onSpeak?.(say);
     window.petApi?.onWave?.(() => tapMotion(2000));
 
-    // ================= 语音（v4.12.14）=================
+    // ================= 语音（v4.12.16）=================
+    // 桌宠窗口只负责：朗读播放（TTS）+ 「收听中」指示 + 🎤 点击切换。
+    // 真正的麦克风采集已移到独立隐藏采集窗（file:// 可靠上下文），
+    // 经 pet:listen 指令驱动，避免透明 overlay 窗口在 getUserMedia 上的不确定性。
     const ttsAudio = document.getElementById('tts');
     const listenEl = document.getElementById('listen');
-    let voiceMicId = '';
-    let mediaRecorder = null;
-    let recChunks = [];
-    let recStream = null;
-
-    window.petApi?.onVoiceConfig?.((cfg) => { if (cfg && cfg.micId != null) voiceMicId = cfg.micId; });
+    const pttBtn = document.getElementById('ptt-btn');
 
     async function playAudio({ path, speakerId } = {}) {
       if (!path) return;
@@ -317,66 +315,19 @@
     }
     window.petApi?.onSpeakAudio?.(playAudio);
 
-    async function startCapture() {
-      try {
-        const constraints = voiceMicId
-          ? { audio: { deviceId: { exact: voiceMicId } } }
-          : { audio: true };
-        recStream = await navigator.mediaDevices.getUserMedia(constraints);
-      } catch (e) {
-        window.petApi?.error?.('mic-denied: ' + (e && e.message ? e.message : e));
-        return;
-      }
-      recChunks = [];
-      try { mediaRecorder = new MediaRecorder(recStream); }
-      catch (e) { window.petApi?.error?.('mediarecorder-unsupported: ' + (e && e.message ? e.message : e)); recStream.getTracks().forEach(t => t.stop()); return; }
-      mediaRecorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) recChunks.push(ev.data); };
-      mediaRecorder.onstop = async () => {
-        listenEl.classList.remove('on');
-        const blob = new Blob(recChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-        recChunks = [];
-        try {
-          const buf = await blob.arrayBuffer();
-          const bytes = new Uint8Array(buf);
-          let bin = '';
-          const step = 0x8000;
-          for (let i = 0; i < bytes.length; i += step) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
-          const b64 = btoa(bin);
-          await window.petApi?.sendCapture(b64, blob.type);
-        } catch (e) {
-          window.petApi?.error?.('voice-capture-send-failed: ' + (e && e.message ? e.message : e));
-        }
-        if (recStream) { recStream.getTracks().forEach((t) => t.stop()); recStream = null; }
-      };
-      mediaRecorder.start();
-      listenEl.classList.add('on');
-    }
+    // 主进程经 pet:listen 切换指示（on=true 显示「收听中」并点亮按钮）
+    window.petApi?.onListenCommand?.((on) => {
+      if (on) { listenEl.classList.add('on'); if (pttBtn) pttBtn.classList.add('listening'); }
+      else { listenEl.classList.remove('on'); if (pttBtn) pttBtn.classList.remove('listening'); }
+    });
 
-    function stopCapture() {
-      if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
-    }
-
-    window.petApi?.onListenCommand?.((on) => { if (on) startCapture(); else stopCapture(); });
-
-    // v4.12.15：桌宠上的「按住说话」按钮（pointerdown/up）
-    const pttBtn = document.getElementById('ptt-btn');
-    function pttStart(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      pttBtn.classList.add('listening');
-      try { window.petApi?.pushTalkStart?.(); } catch (_) {}
-    }
-    function pttEnd(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      pttBtn.classList.remove('listening');
-      try { window.petApi?.pushTalkStop?.(); } catch (_) {}
-    }
+    // v4.12.16：🎤 按钮点击切换（toggle）—— 点击开始、再点停止（与热键一致）
     if (pttBtn) {
-      pttBtn.addEventListener('pointerdown', pttStart);
-      pttBtn.addEventListener('pointerup', pttEnd);
-      pttBtn.addEventListener('pointerleave', pttEnd);
-      pttBtn.addEventListener('pointercancel', pttEnd);
+      pttBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        try { window.petApi?.pushTalkToggle?.(); } catch (_) {}
+      });
     }
 
     // ================= Live2D（v4.12.6 起默认关闭，按需动态加载）=================
