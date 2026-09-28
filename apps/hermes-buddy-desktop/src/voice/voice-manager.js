@@ -182,10 +182,14 @@ class VoiceManager {
 
   // ---------------- 监听（推话筒）----------------
   setListening(on) {
+    const was = this._listening;
     this._listening = !!on;
+    if (was !== this._listening) {
+      this.logger.info('voice-listening-changed', { listening: this._listening });
+    }
     const pet = this.getPet();
     if (pet && pet.win && !pet.win.isDestroyed()) {
-      pet.win.webContents.send('pet:listen', { on: this._listening });
+      try { pet.win.webContents.send('pet:listen', { on: this._listening }); } catch (_) {}
     }
     if (this._listening) {
       if (this._listenTimer) clearTimeout(this._listenTimer);
@@ -201,23 +205,47 @@ class VoiceManager {
     return this._listening;
   }
 
+  // 按住说话按钮（按下开始，松开结束）
+  pushToTalk(pressed) {
+    this.setListening(!!pressed);
+  }
+
   isListening() { return this._listening; }
 
   // ---------------- 热键 ----------------
   registerHotkey(accelerator) {
     const gs = this._globalShortcut;
-    if (!gs) return false;
+    if (!gs) {
+      this.logger.warn('voice-hotkey-no-globalShortcut');
+      return false;
+    }
     if (this._hotkey && this._hotkey !== accelerator) {
       try { gs.unregister(this._hotkey); } catch (_) {}
     }
     if (!accelerator) { this._hotkey = ''; return true; }
+    // 用户选的快捷键可能被系统/显卡驱动占用，失败后尝试若干备选；结果会写日志。
+    const candidates = [accelerator, 'Ctrl+Alt+Space', 'Ctrl+Shift+Space', 'Alt+Shift+Space']
+      .filter((v, i, a) => a.indexOf(v) === i);
     try {
       if (gs.isRegistered(accelerator)) gs.unregister(accelerator);
-      const ok = gs.register(accelerator, () => { try { this.toggleListening(); } catch (_) {} });
-      this._hotkey = ok ? accelerator : '';
-      return ok;
+      for (const cand of candidates) {
+        const ok = gs.register(cand, () => { try { this.toggleListening(); } catch (_) {} });
+        if (ok) {
+          this._hotkey = cand;
+          if (cand !== accelerator) {
+            this.logger.warn('voice-hotkey-fallback-used', { requested: accelerator, actual: cand });
+          } else {
+            this.logger.info('voice-hotkey-registered', { accelerator: cand });
+          }
+          return true;
+        }
+        this.logger.warn('voice-hotkey-register-failed', { accelerator: cand });
+      }
+      this._hotkey = '';
+      this.logger.error('voice-hotkey-all-failed', { requested: accelerator });
+      return false;
     } catch (e) {
-      this.logger.warn('voice-hotkey-register-failed', { error: e.message, accelerator });
+      this.logger.error('voice-hotkey-register-error', { error: e.message, accelerator });
       this._hotkey = '';
       return false;
     }
@@ -235,6 +263,8 @@ class VoiceManager {
       sttEnabled: cfg.sttEnabled,
       readAloud: cfg.readAloud,
       hotkey: cfg.hotkey,
+      hotkeyRegistered: Boolean(this._hotkey),
+      actualHotkey: this._hotkey || '',
       listening: this._listening,
       engineReady: this.engineReady(),
       speakerId: cfg.speakerId || '',

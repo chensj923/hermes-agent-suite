@@ -32,4 +32,7 @@ contextBridge.exposeInMainWorld('petApi', {
   sendCapture: (data, mime) => ipcRenderer.invoke('buddy:voice:capture', { data, mime }),
   // 主进程下发语音设备配置（麦克风/扬声器选择），渲染层缓存
   onVoiceConfig: (handler) => ipcRenderer.on('pet:voice-config', (_e, cfg) => { try { handler(cfg || {}); } catch (_) {} }),
+  // v4.12.15：按住说话按钮（pointerdown/up 触发）
+  pushTalkStart: () => ipcRenderer.send('pet:push-talk-start'),
+  pushTalkStop: () => ipcRenderer.send('pet:push-talk-stop'),
 });

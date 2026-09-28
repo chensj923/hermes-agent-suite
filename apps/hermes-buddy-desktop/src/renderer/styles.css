@@ -1010,6 +1010,11 @@ body.resizing .context-resizer { pointer-events: auto; }
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
   letter-spacing: 0.5px;
 }
+#voice-ptt.active {
+  background: var(--danger, #e8443a);
+  color: #fff;
+  border-color: var(--danger, #e8443a);
+}
 
 /* v4.10.18：推理记录 */
 .predict-log-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }

@@ -150,6 +150,7 @@ const api = {
   voiceSpeak: (text) => invoke('buddy:voice:speak', text),
   voiceStartListen: () => invoke('buddy:voice:start-listen'),
   voiceStopListen: () => invoke('buddy:voice:stop-listen'),
+  voiceListen: (on) => invoke('buddy:voice:listen', typeof on === 'boolean' ? on : undefined),
   onVoiceTranscript: (handler) => subscribe('buddy:voice:transcript', handler),
 
   // ---- 桌宠猫咪（v4.1） ----

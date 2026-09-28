@@ -886,6 +886,13 @@ function registerIpc() {
   handle('buddy:voice:speak', async (_event, text) => (voiceManager ? voiceManager.speak(String(text || '')) : false));
   handle('buddy:voice:start-listen', () => { if (voiceManager) voiceManager.setListening(true); return { listening: voiceManager ? voiceManager.isListening() : false }; });
   handle('buddy:voice:stop-listen', () => { if (voiceManager) voiceManager.setListening(false); return { listening: false }; });
+  handle('buddy:voice:listen', (_event, on) => {
+    if (voiceManager) {
+      if (typeof on === 'boolean') voiceManager.setListening(on);
+      return { listening: voiceManager.isListening(), enabled: voiceManager.getSettings().enabled };
+    }
+    return { listening: false, enabled: false };
+  });
   handle('buddy:voice:capture', async (_event, payload = {}) => {
     if (!voiceManager) return { ok: false, error: '语音未就绪' };
     try {
@@ -1328,6 +1335,17 @@ async function bootstrap() {
       logger.warn('install-auth-merge-failed', { error: e.message });
     }
 
+    // v4.12.15：在创建任何需要 getUserMedia 的渲染窗口之前，先设置自动放行麦克风权限，
+    // 避免桌宠首次请求 media 时 handler 还没挂好而被静默拒绝。
+    try {
+      if (session && session.defaultSession && typeof session.defaultSession.setPermissionRequestHandler === 'function') {
+        session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+          callback(permission === 'media' || permission === 'microphone' || permission === 'geolocation');
+        });
+        logger.info('session-permission-handler-set');
+      }
+    } catch (_) {}
+
     // v4.1：桌宠猫咪。v4.2：菜单「立即预测」走主动预测。v4.3：点猫弹菜单 + 自定义文案。
     try {
       const { DesktopPet } = require('./predict/desktop-pet');
@@ -1358,24 +1376,21 @@ async function bootstrap() {
         });
         voiceManager.setGlobalShortcut(globalShortcut);
         const vcfg = predictController.config.get('voice') || {};
-        voiceManager.registerHotkey(vcfg.hotkey || 'Ctrl+Alt+F1');
+        const hkOk = voiceManager.registerHotkey(vcfg.hotkey || 'Ctrl+Alt+F1');
         if (pet && pet.win && !pet.win.isDestroyed()) {
           pet.win.webContents.send('pet:voice-config', { micId: vcfg.micId || '' });
         }
-        logger.info('voice-manager-ready', { hotkey: vcfg.hotkey || 'Ctrl+Alt+F1' });
+        logger.info('voice-manager-ready', { hotkey: voiceManager.getSettings().hotkey || vcfg.hotkey || 'Ctrl+Alt+F1', registered: hkOk });
+
+        // v4.12.15：桌宠按住说话按钮（pointerdown/up 触发）
+        try {
+          ipcMain.on('pet:push-talk-start', () => { if (voiceManager) voiceManager.pushToTalk(true); });
+          ipcMain.on('pet:push-talk-stop', () => { if (voiceManager) voiceManager.pushToTalk(false); });
+        } catch (_) {}
       } catch (e) {
         voiceManager = null;
         logger.warn('voice-manager-init-failed', { error: e.message });
       }
-
-      // v4.12.14：允许桌宠渲染层 getUserMedia 采集麦克风（仅音频）
-      try {
-        if (session && session.defaultSession && typeof session.defaultSession.setPermissionRequestHandler === 'function') {
-          session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-            callback(permission === 'media' || permission === 'microphone' || permission === 'geolocation');
-          });
-        }
-      } catch (_) {}
     } catch (e) {
       pet = null;
       logger.warn('desktop-pet-init-failed', { error: e.message });

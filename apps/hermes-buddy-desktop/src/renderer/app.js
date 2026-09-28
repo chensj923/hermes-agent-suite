@@ -2407,8 +2407,10 @@ async function renderPredictTab() {
       <div class="settings-actions">
         <button class="primary" id="voice-save" type="button">保存语音设置</button>
         <button class="ghost" id="voice-test-tts" type="button">试听一句</button>
+        <button class="ghost" id="voice-ptt" type="button" title="按住说话">🎤 按住说话</button>
       </div>
       <div class="settings-status" id="voice-status" role="status"></div>
+      <p class="hint" id="voice-hint"></p>
       <div id="voice-engine" class="predict-stats"></div>
       <div id="voice-transcript" class="voice-transcript" hidden></div>
 
@@ -3019,11 +3021,25 @@ async function renderVoiceSection() {
   const statusEl = document.getElementById('voice-status');
   const engineEl = document.getElementById('voice-engine');
   const trEl = document.getElementById('voice-transcript');
+  const hintEl = document.getElementById('voice-hint');
   if (!enEl) return;
 
   enEl.checked = !!status.enabled;
   raEl.checked = status.readAloud !== false;
   hkEl.value = status.hotkey || 'Ctrl+Alt+F1';
+
+  // v4.12.15：显示热键注册状态，若失败提示换键
+  if (hintEl) {
+    if (!status.enabled) {
+      hintEl.textContent = '启用语音后，可用快捷键或桌宠/本按钮触发麦克风收音。';
+    } else if (status.hotkeyRegistered) {
+      hintEl.textContent = `热键已注册：${status.actualHotkey || status.hotkey || 'Ctrl+Alt+F1'}。也可以点桌宠上的 🎤 按钮或本页「按住说话」。`;
+      hintEl.style.color = '';
+    } else {
+      hintEl.textContent = `热键「${status.hotkey || 'Ctrl+Alt+F1'}」注册失败（可能被系统/显卡驱动占用），请换一个快捷键或改用按钮。`;
+      hintEl.style.color = '#ff9e9e';
+    }
+  }
 
   // SAPI 嗓音
   for (const v of (voices || [])) {
@@ -3114,6 +3130,23 @@ async function renderVoiceSection() {
     await api.voiceSpeak('你好，我是你的桌宠，已经可以开口读回复啦。').catch(() => {});
     testBtn.disabled = false;
   });
+
+  // v4.12.15：设置面板「按住说话」按钮
+  const pttBtn = document.getElementById('voice-ptt');
+  if (pttBtn) {
+    async function pttStart() {
+      pttBtn.classList.add('active');
+      await api.voiceStartListen().catch(() => {});
+    }
+    async function pttEnd() {
+      pttBtn.classList.remove('active');
+      await api.voiceStopListen().catch(() => {});
+    }
+    pttBtn.addEventListener('pointerdown', pttStart);
+    pttBtn.addEventListener('pointerup', pttEnd);
+    pttBtn.addEventListener('pointerleave', pttEnd);
+    pttBtn.addEventListener('pointercancel', pttEnd);
+  }
 
   // 实时显示识别到的语音指令
   if (trEl) {
