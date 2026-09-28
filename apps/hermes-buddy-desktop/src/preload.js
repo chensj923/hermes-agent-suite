@@ -156,6 +156,10 @@ const api = {
   onVoiceError: (handler) => subscribe('buddy:voice:error', handler),
   // v4.12.18：没有桌宠窗口时，TTS 的 WAV 由主窗口播放（{path, url, speakerId}）
   onVoicePlay: (handler) => subscribe('buddy:voice:play', handler),
+  // v4.12.22：语音对话事件流 + 音色预设
+  voiceStyles: () => invoke('buddy:voice:styles'),
+  voiceOpenSpeechSettings: () => invoke('buddy:voice:open-speech-settings'),
+  onVoiceSession: (handler) => subscribe('buddy:voice:session', handler),
 
   // ---- 桌宠猫咪（v4.1） ----
   petMinimize: () => invoke('buddy:pet:minimize'),

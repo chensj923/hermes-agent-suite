@@ -43,6 +43,29 @@ const TTS_PS = 'tts.ps1';
 // 22.05kHz/16bit/单声道 ≈ 44KB/秒，4MB ≈ 90 秒语音，正常朗读不会超。
 const MAX_INLINE_BYTES = 4 * 1024 * 1024;
 
+/**
+ * v4.12.22：音色预设。
+ *
+ * 本机只有老式 SAPI 嗓音（Huihui/Yaoyao/Kangkang），机械感强、听着"不好听"，
+ * 而用户想要萝莉音这类音色。离线条件下靠两步做出音色：
+ *   1. SSML <prosody pitch>：让合成引擎改基频（+18% 明显变尖）；
+ *   2. ffmpeg asetrate + atempo：整体变调但**不改变语速**（asetrate 提高采样率
+ *      让声音变尖变快，atempo 反向补偿回原速），做出真正的"童声/萝莉"效果。
+ * ffmpeg 已随语音引擎一起装好，无新增下载；ffmpeg 缺失时自动降级为只改 pitch。
+ */
+const VOICE_STYLES = [
+  { id: 'natural', label: '原声（不改音色）', pitch: '', shift: 1, rate: 0 },
+  { id: 'loli', label: '萝莉 / 童声', pitch: '+18%', shift: 1.24, rate: 2 },
+  { id: 'sweet', label: '甜美少女', pitch: '+10%', shift: 1.12, rate: 2 },
+  { id: 'lively', label: '元气少女', pitch: '+8%', shift: 1.08, rate: 8 },
+  { id: 'gentle', label: '温柔姐姐', pitch: '-2%', shift: 1.02, rate: -5 },
+  { id: 'calm', label: '沉稳知性', pitch: '-8%', shift: 0.92, rate: -8 },
+];
+
+function styleById(id) {
+  return VOICE_STYLES.find((s) => s.id === id) || VOICE_STYLES[0];
+}
+
 class VoiceManager {
   constructor({ logger, appDir, getPet, getMainWindow, getPredict, onVoiceCommand } = {}) {
     this.logger = logger || { info() {}, warn() {}, error() {}, debug() {} };
@@ -51,6 +74,8 @@ class VoiceManager {
     this.getMainWindow = getMainWindow || (() => null);
     this.getPredict = getPredict || (() => null);
     this.onVoiceCommand = typeof onVoiceCommand === 'function' ? onVoiceCommand : null;
+    // v4.12.22：语音会话事件（聆听/识别中/我说的/AI 回复）→ 主窗口「语音对话」面板
+    this.onSession = null;
     this._listening = false;
     this._listenTimer = null;
     this._hotkey = '';
@@ -63,6 +88,8 @@ class VoiceManager {
 
   setGlobalShortcut(gs) { this._globalShortcut = gs; }
   setOnVoiceCommand(fn) { this.onVoiceCommand = fn; }
+  /** v4.12.22：注册会话事件接收器（main 用它把主窗口唤到前台）。 */
+  setSessionSink(fn) { this.onSession = typeof fn === 'function' ? fn : null; }
 
   // ---------------- 采集窗（v4.12.16）----------------
   /** 创建一个常驻隐藏的 file:// 窗口专门跑 getUserMedia + MediaRecorder。 */
@@ -111,12 +138,31 @@ class VoiceManager {
   _reportVoiceError(msg) {
     const w = this.getMainWindow();
     if (w && !w.isDestroyed()) { try { w.webContents.send('buddy:voice:error', { message: String(msg || '') }); } catch (_) {} }
+    this._emitSession({ type: 'error', message: String(msg || '') });
+  }
+
+  /**
+   * v4.12.22：语音会话事件流 —— 驱动主窗口「语音对话」面板按聊天步骤滚动。
+   * 事件：{type:'open'} | {type:'phase',phase,text} | {type:'user',text} |
+   *       {type:'ai',text,pending} | {type:'error',message}
+   */
+  _emitSession(evt) {
+    if (!evt || typeof evt !== 'object') return;
+    const w = this.getMainWindow();
+    if (w && !w.isDestroyed()) {
+      try { w.webContents.send('buddy:voice:session', evt); } catch (_) {}
+    }
+    if (typeof this.onSession === 'function') {
+      try { this.onSession(evt); } catch (_) {}
+    }
   }
 
   async _onCaptured(payload) {
     try {
+      this._emitSession({ type: 'phase', phase: 'recognizing', text: '正在识别你说的话…' });
       const text = await this.handleCapture(payload || {});
       this._reportVoiceTranscript(text);
+      this._emitSession({ type: 'user', text });
     } catch (e) {
       this.logger.warn('voice-capture-handle-failed', { error: e.message });
       this._reportVoiceError(String((e && e.message) || e));
@@ -164,7 +210,7 @@ class VoiceManager {
   // ---------------- 设置 ----------------
   getSettings() {
     const pc = this.getPredict();
-    const def = { enabled: false, speakerId: '', micId: '', voiceName: '', rate: 0, volume: 100, hotkey: 'Ctrl+Alt+F1', readAloud: true, sttEnabled: true, lang: 'zh' };
+    const def = { enabled: false, speakerId: '', micId: '', voiceName: '', style: 'natural', rate: 0, volume: 100, hotkey: 'Ctrl+Alt+F1', readAloud: true, sttEnabled: true, lang: 'zh' };
     if (!pc || !pc.config || typeof pc.config.get !== 'function') return def;
     const v = pc.config.get('voice');
     return Object.assign({}, def, v || {});
@@ -207,14 +253,47 @@ class VoiceManager {
     fs.mkdirSync(outDir, { recursive: true });
     const wav = path.join(outDir, 'tts.wav');
     const ps = extractPs1(TTS_PS);
-    const args = ['-ExecutionPolicy', 'Bypass', '-File', ps, '-Text', text, '-OutWav', wav, '-Rate', String(cfg.rate || 0), '-Volume', String(cfg.volume == null ? 100 : cfg.volume)];
+    const style = styleById(cfg.style);
+    // 预设自带的语速偏移 + 用户微调；SAPI rate 只允许 -10..10
+    const rate = Math.max(-10, Math.min(10, Math.round((cfg.rate || 0) + (style.rate || 0))));
+    const args = ['-ExecutionPolicy', 'Bypass', '-File', ps, '-Text', text, '-OutWav', wav, '-Rate', String(rate), '-Volume', String(cfg.volume == null ? 100 : cfg.volume)];
     if (cfg.voiceName) { args.push('-Voice'); args.push(cfg.voiceName); }
+    if (style.pitch) { args.push('-Pitch'); args.push(style.pitch); }
     try {
       await execFileAsync('powershell', args, { windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 30000 });
     } finally {
       try { fs.unlinkSync(ps); } catch (_) {}
     }
-    return wav;
+    // 第二步音色：变调不变速（萝莉/甜美全靠这一步）
+    const shifted = await this._shiftPitch(wav, style.shift);
+    return shifted || wav;
+  }
+
+  /**
+   * v4.12.22：用 ffmpeg 做"变调不变速"。
+   * asetrate=sr*ratio 把声音变尖（同时变快），atempo=1/ratio 把速度补回来，
+   * 于是语速不变、音调升高 —— 这就是萝莉/童声的关键一步。
+   * ffmpeg 缺失或失败时返回 null（调用方用原音频，绝不因为变调没声音）。
+   */
+  async _shiftPitch(wav, ratio) {
+    const r = Number(ratio);
+    if (!r || Math.abs(r - 1) < 0.01) return null;
+    const ffmpeg = pre.findEngine('ffmpeg', this.appDir);
+    if (!ffmpeg) return null;
+    const out = wav.replace(/\.wav$/i, '-shift.wav');
+    const inv = (1 / r).toFixed(6);
+    try {
+      await execFileAsync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', wav,
+        '-af', `asetrate=sr*${r},atempo=${inv},aresample=44100`, out],
+      { windowsHide: true, timeout: 30000 });
+      if (fs.existsSync(out) && fs.statSync(out).size > 1024) {
+        try { fs.unlinkSync(wav); } catch (_) {}
+        return out;
+      }
+    } catch (e) {
+      this.logger.warn('voice-pitch-shift-failed', { error: (e && e.message) || String(e), ratio: r });
+    }
+    return null;
   }
 
   /**
@@ -287,6 +366,7 @@ class VoiceManager {
       return { ok: false, reason };
     }
     this.logger.info('voice-tts-ready', { bytes: payload.bytes, inline: !payload.dataUrl ? false : true });
+    this._emitSession({ type: 'phase', phase: 'speaking', text: '朗读中…' });
     // v4.12.21：只在桌宠页面真正 ready（onSpeakAudio 已注册）时才发桌宠窗口，
     // 否则载荷会被静默丢掉、哪里都不会响——退回主窗口播放（CSP 已放行 media-src data:）。
     const petWin = (pet && pet.win && !pet.win.isDestroyed() && pet.isReady !== false) ? pet.win : null;
@@ -401,6 +481,9 @@ class VoiceManager {
     }
     // 实际收音交给独立采集窗（v4.12.16，file:// 可靠上下文）
     if (this._listening) {
+      // v4.12.22：一激活语音就把主窗口唤到「语音对话」，让用户看到识别全过程
+      this._emitSession({ type: 'open' });
+      this._emitSession({ type: 'phase', phase: 'listening', text: '聆听中…（说完再按一次快捷键，或等 12 秒自动结束）' });
       if (!this._sendCapture({ cmd: 'start', micId: this.getSettings().micId || '' })) {
         this.logger.warn('voice-capture-start-failed', { reason: 'capture-window-unavailable' });
         this._reportVoiceError('采集窗口未就绪，无法收音（请重启应用后再试）');
@@ -490,8 +573,12 @@ class VoiceManager {
       speakerId: cfg.speakerId || '',
       micId: cfg.micId || '',
       lang: cfg.lang || 'zh',
+      style: cfg.style || 'natural',
     };
   }
+
+  /** v4.12.22：可选音色预设（萝莉/甜美/温柔…），供设置页下拉渲染。 */
+  voiceStyles() { return VOICE_STYLES.slice(); }
 }
 
-module.exports = { VoiceManager };
+module.exports = { VoiceManager, VOICE_STYLES };

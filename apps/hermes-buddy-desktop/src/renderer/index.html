@@ -258,6 +258,9 @@
 
       <button class="primary new-chat" id="btn-new-chat" type="button">+ 新智能体</button>
 
+      <!-- v4.12.22：语音对话入口（激活语音时也会自动跳到这里） -->
+      <button class="ghost" id="btn-voice-chat" type="button" style="margin:0 12px 8px;width:calc(100% - 24px);">🎤 语音对话</button>
+
       <div class="session-list" id="session-list">
         <div class="session-empty">暂无智能体</div>
       </div>
@@ -321,6 +324,21 @@
         <input type="file" id="file-input" multiple hidden
                accept="image/*,audio/*,video/*,.txt,.md,.json,.csv,.log,.yaml,.yml,.toml,.ini,.xml,.js,.ts,.jsx,.tsx,.py,.java,.go,.rb,.rs,.sh,.sql,.html,.css,.csv,.pdf,.docx,.xlsx,.zip">
       </form>
+    </main>
+
+    <!-- v4.12.22 语音对话：一激活语音就自动跳到这里，按聊天步骤滚动（聆听中 → 识别中 → 我说的 → AI 回复） -->
+    <main class="voice-view" id="view-voice" hidden>
+      <header class="voice-view-header">
+        <div class="voice-view-title">🎤 语音对话</div>
+        <div class="voice-view-status" id="voice-chat-status">空闲</div>
+        <div class="voice-view-actions">
+          <button class="primary" id="voice-chat-ptt" type="button">🎤 开始说话</button>
+          <button class="ghost" id="voice-chat-clear" type="button">清空</button>
+          <button class="ghost" id="voice-chat-back" type="button">返回对话</button>
+        </div>
+      </header>
+      <div class="voice-chat-log" id="voice-chat-log" aria-live="polite"></div>
+      <div class="voice-chat-hint" id="voice-chat-hint">按快捷键或点上面的按钮开始说话；识别与回复会像聊天一样在这里逐条滚动。</div>
     </main>
 
     <div class="context-overlay" id="context-overlay" hidden></div>

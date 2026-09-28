@@ -70,6 +70,8 @@ async function runVoiceCommand(text, wi) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('buddy:voice:transcript', { text: String(text) }); } catch (_) {}
   }
+  // v4.12.22：AI 侧先挂一条「思考中」气泡，拿到回复后原地替换 —— 聊天感
+  if (voiceManager) voiceManager._emitSession({ type: 'ai', text: '正在思考…', pending: true });
   let reply = null;
   try {
     if (predictController && typeof predictController.voicePrompt === 'function') {
@@ -81,6 +83,7 @@ async function runVoiceCommand(text, wi) {
   if (!reply) {
     reply = '（未连接到 Hermes 或本地模型不可用，已收到你的语音：' + String(text).slice(0, 60) + '）';
   }
+  if (voiceManager) voiceManager._emitSession({ type: 'ai', text: reply, pending: false });
   if (voiceManager) { try { await voiceManager.speak(reply); } catch (_) {} }
 }
 
@@ -876,6 +879,12 @@ function registerIpc() {
   // ---- 语音（v4.12.14：TTS/STT）----
   handle('buddy:voice:status', () => (voiceManager ? voiceManager.status() : { enabled: false, engineReady: false }));
   handle('buddy:voice:get-voices', async () => (voiceManager ? voiceManager.getVoices() : []));
+  // v4.12.22：音色预设（萝莉/甜美/温柔…）+ 系统语音安装入口
+  handle('buddy:voice:styles', () => (voiceManager ? voiceManager.voiceStyles() : []));
+  handle('buddy:voice:open-speech-settings', () => {
+    try { shell.openExternal('ms-settings:speech'); return { ok: true }; }
+    catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+  });
   handle('buddy:voice:engine-status', () => mediaEngines.getStatus(app.getPath('userData')));
   handle('buddy:voice:set', async (_event, patch = {}) => {
     if (!voiceManager) return { ok: false, error: '语音未就绪' };
@@ -1393,6 +1402,12 @@ async function bootstrap() {
           onVoiceCommand: runVoiceCommand,
         });
         voiceManager.setGlobalShortcut(globalShortcut);
+        // v4.12.22：语音一激活就把主窗口唤到「语音对话」视图（热键/桌宠按钮都走这条）
+        voiceManager.setSessionSink((evt) => {
+          if (evt && evt.type === 'open') {
+            try { restoreMainWindow(); } catch (_) {}
+          }
+        });
         const vcfg = predictController.config.get('voice') || {};
         const hkOk = voiceManager.registerHotkey(vcfg.hotkey || 'Ctrl+Alt+F1');
         if (pet && pet.win && !pet.win.isDestroyed()) {

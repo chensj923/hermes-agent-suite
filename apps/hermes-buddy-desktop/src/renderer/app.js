@@ -111,6 +111,16 @@ const el = {
   contextBody: $('context-body'),
   btnContextClose: $('btn-context-close'),
 
+  // v4.12.22 语音对话视图
+  chatArea: document.querySelector('.chat-area'),
+  viewVoice: $('view-voice'),
+  btnVoiceChat: $('btn-voice-chat'),
+  voiceChatLog: $('voice-chat-log'),
+  voiceChatStatus: $('voice-chat-status'),
+  voiceChatPtt: $('voice-chat-ptt'),
+  voiceChatClear: $('voice-chat-clear'),
+  voiceChatBack: $('voice-chat-back'),
+
   // 横幅
   banner: $('banner'),
   bannerText: $('banner-text'),
@@ -229,8 +239,12 @@ function showView(name) {
   state.currentView = name;
   const isConnect = name === 'connect';
   const isSettings = name === 'settings';
+  // v4.12.22：语音对话视图 —— 与聊天共用侧栏，只替换右侧主区
+  const isVoice = name === 'voice';
   el.viewConnect.hidden = !isConnect;
   el.app.hidden = isConnect;
+  if (el.chatArea) el.chatArea.hidden = isVoice;
+  if (el.viewVoice) el.viewVoice.hidden = !isVoice;
   el.contextPanel.hidden = !isSettings;
   if (el.contextOverlay) el.contextOverlay.hidden = !isSettings;
   el.btnDisconnect.hidden = isConnect;
@@ -2566,9 +2580,24 @@ async function renderPredictTab() {
       <label class="settings-field">麦克风（收音输入设备）
         <select id="voice-mic"><option value="">系统默认</option></select>
       </label>
-      <label class="settings-field">语音（SAPI 嗓音）
+      <label class="settings-field">嗓音（SAPI 语音）
         <select id="voice-voice"><option value="">系统默认中文语音</option></select>
       </label>
+      <!-- v4.12.22：音色预设。本机只有老式 SAPI 嗓音，靠 SSML 变调 + ffmpeg 变调不变速
+           做出萝莉/甜美/温柔等音色；想要系统级新嗓音可一键打开 Windows 语音设置安装。 -->
+      <label class="settings-field">音色风格
+        <select id="voice-style"></select>
+      </label>
+      <p class="hint" id="voice-style-hint" hidden></p>
+      <label class="settings-field">语速微调（-10 慢 → +10 快）
+        <input id="voice-rate" type="range" min="-10" max="10" step="1">
+      </label>
+      <label class="settings-field">音量
+        <input id="voice-volume" type="range" min="0" max="100" step="5">
+      </label>
+      <div class="settings-actions">
+        <button class="ghost" id="voice-install-voices" type="button" title="打开 Windows 语音设置添加更多语音">安装更多嗓音…</button>
+      </div>
       <label class="settings-field">推话筒快捷键（如 Ctrl+Alt+F1；支持的修饰键 Ctrl/Alt/Shift + 字母或 F1-F12）
         <input id="voice-hotkey" type="text" placeholder="Ctrl+Alt+F1">
       </label>
@@ -3114,10 +3143,54 @@ async function renderVoiceSection() {
   for (const v of (voices || [])) {
     const o = document.createElement('option');
     o.value = v.Name || '';
-    o.textContent = `${v.Name || v.Id || '?'}${v.Culture ? ' (' + v.Culture + ')' : ''}`;
+    // v4.12.22：标出性别/语种，挑嗓音时一眼能分清（SAPI Gender：1 男 / 2 女）
+    const g = v.Gender === 2 ? '♀ 女声' : (v.Gender === 1 ? '♂ 男声' : '');
+    o.textContent = `${v.Name || v.Id || '?'}${v.Culture ? ' (' + v.Culture + ')' : ''}${g ? ' · ' + g : ''}`;
     voiceEl.appendChild(o);
   }
   if (status.voiceName) voiceEl.value = status.voiceName;
+
+  // v4.12.22：音色预设（萝莉/甜美/温柔…）+ 语速音量微调
+  const styleEl = document.getElementById('voice-style');
+  const rateEl = document.getElementById('voice-rate');
+  const volEl = document.getElementById('voice-volume');
+  const styles = await api.voiceStyles().catch(() => []);
+  if (styleEl && !styleEl.dataset.filled) {
+    for (const s of styles) {
+      const o = document.createElement('option');
+      o.value = s.id;
+      o.textContent = s.label;
+      styleEl.appendChild(o);
+    }
+    styleEl.dataset.filled = '1';
+  }
+  if (styleEl) styleEl.value = status.style || 'natural';
+  if (rateEl) rateEl.value = String(status.rate == null ? 0 : status.rate);
+  if (volEl) volEl.value = String(status.volume == null ? 100 : status.volume);
+  const installVoicesBtn = document.getElementById('voice-install-voices');
+  if (installVoicesBtn) {
+    installVoicesBtn.addEventListener('click', async () => {
+      await api.voiceOpenSpeechSettings().catch(() => {});
+      if (statusEl) statusEl.textContent = '已打开 Windows「语音」设置：添加语音后回到这里点「重新检测嗓音」。';
+    });
+  }
+  // v4.12.22：变调这一步要靠 ffmpeg（与语音识别同一套引擎）。没装的话只能做 SSML 变调，
+  // 萝莉音会明显打折——必须说清楚，否则用户以为"选了没用"。
+  const styleHintEl = document.getElementById('voice-style-hint');
+  if (styleHintEl) {
+    const ffmpegOk = !!(engine && engine.ffmpeg && engine.ffmpeg.ok);
+    if (!ffmpegOk && (styleEl && styleEl.value && styleEl.value !== 'natural')) {
+      styleHintEl.hidden = false;
+      styleHintEl.dataset.tone = 'error';
+      styleHintEl.textContent = `当前音色（变调）需要 ffmpeg，尚未安装：现在只会做 SSML 变调，效果打折。请在「本机引擎与模型」页安装语音引擎（Whisper/ffmpeg）。`;
+    } else if (!ffmpegOk) {
+      styleHintEl.hidden = false;
+      styleHintEl.dataset.tone = '';
+      styleHintEl.textContent = '提示：安装 ffmpeg（本机引擎与模型页）后，萝莉/甜美等音色会做「变调不变速」处理，听感更明显。';
+    } else {
+      styleHintEl.hidden = true;
+    }
+  }
 
   // 扬声器 / 麦克风：渲染层 enumerateDevices
   let devices = [];
@@ -3198,6 +3271,9 @@ async function renderVoiceSection() {
   const saveBtn = document.getElementById('voice-save');
   if (saveBtn) saveBtn.addEventListener('click', async () => {
     saveBtn.disabled = true;
+    const styleEl2 = document.getElementById('voice-style');
+    const rateEl2 = document.getElementById('voice-rate');
+    const volEl2 = document.getElementById('voice-volume');
     const patch = {
       enabled: enEl.checked,
       readAloud: raEl.checked,
@@ -3205,6 +3281,10 @@ async function renderVoiceSection() {
       micId: micEl.value || '',
       voiceName: voiceEl.value || '',
       hotkey: (hkEl.value || 'Ctrl+Alt+F1').trim(),
+      // v4.12.22：音色风格 + 语速/音量微调
+      style: (styleEl2 && styleEl2.value) || 'natural',
+      rate: Number(rateEl2 && rateEl2.value) || 0,
+      volume: volEl2 && volEl2.value !== '' ? Number(volEl2.value) : 100,
     };
     const r = await api.voiceSet(patch).catch((e) => ({ ok: false, error: e.message }));
     statusEl.dataset.tone = r && r.ok ? 'ok' : 'error';
@@ -3217,7 +3297,16 @@ async function renderVoiceSection() {
   const testBtn = document.getElementById('voice-test-tts');
   if (testBtn) testBtn.addEventListener('click', async () => {
     testBtn.disabled = true;
-    const r = await api.voiceSpeak('你好，我是你的桌宠，已经可以开口读回复啦。')
+    // v4.12.22：试听前先把当前音色/语速存下来，保证听到的就是刚选的萝莉/甜美音色
+    const stEl = document.getElementById('voice-style');
+    const rtEl = document.getElementById('voice-rate');
+    const vlEl = document.getElementById('voice-volume');
+    await api.voiceSet({
+      style: (stEl && stEl.value) || 'natural',
+      rate: Number(rtEl && rtEl.value) || 0,
+      volume: vlEl && vlEl.value !== '' ? Number(vlEl.value) : 100,
+    }).catch(() => ({}));
+    const r = await api.voiceSpeak('你好呀，我是你的桌宠，今天也要元气满满哦。')
       .catch((e) => ({ ok: false, reason: String((e && e.message) || e || '未知错误') }));
     if (r && r.ok) {
       if (statusEl) { statusEl.dataset.tone = 'ok'; statusEl.textContent = '已朗读，听到声音了吗？'; }
@@ -3277,6 +3366,119 @@ async function renderVoiceSection() {
       errEl.textContent = '⚠ ' + (message || '语音出错');
       clearTimeout(errEl._t);
       errEl._t = setTimeout(() => { errEl.hidden = true; }, 10000);
+    });
+  }
+}
+
+// ============================================================ v4.12.22 语音对话
+// 激活语音后立刻跳到这里，按聊天步骤滚动：聆听中 → 识别中 → 我说的 → AI 思考中 → AI 回复 → 朗读中。
+// 与文字聊天共用气泡样式，但独立成一条流，方便回看整通语音会话。
+
+let _voicePttOn = false;
+let _voicePendingAi = null;   // 正在等待 AI 回复的那条气泡（拿到结果就原地替换）
+
+function voiceChatOpen() {
+  if (state.currentView === 'connect') return;   // 还没连上时不开
+  showView('voice');
+  scrollVoiceChat();
+}
+
+/** 追加（或就地更新）一条语音对话消息。 */
+function pushVoiceMsg({ role = 'system', text = '', pending = false, key = '' }) {
+  const box = el.voiceChatLog;
+  if (!box) return null;
+  if (key && box.querySelector('[data-key="' + key + '"]')) {
+    const old = box.querySelector('[data-key="' + key + '"]');
+    old.textContent = text;
+    old.classList.toggle('pending', !!pending);
+    scrollVoiceChat();
+    return old;
+  }
+  const d = document.createElement('div');
+  d.className = 'msg ' + role + (pending ? ' pending' : '');
+  if (key) d.dataset.key = key;
+  d.textContent = text + (pending ? ' ' : '');
+  if (pending) {
+    const dot = document.createElement('span');
+    dot.className = 'voice-dot';
+    d.appendChild(dot);
+  }
+  box.appendChild(d);
+  scrollVoiceChat();
+  return d;
+}
+
+function scrollVoiceChat() {
+  const box = el.voiceChatLog;
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+function setVoicePhase(phase, text) {
+  if (el.voiceChatStatus) {
+    el.voiceChatStatus.dataset.phase = phase || '';
+    el.voiceChatStatus.textContent = text || '';
+  }
+}
+
+function initVoiceChat() {
+  if (!el.viewVoice || !api.onVoiceSession) return;
+  api.onVoiceSession((evt) => {
+    if (!evt || !evt.type) return;
+    if (evt.type === 'open') { voiceChatOpen(); return; }
+    if (evt.type === 'phase') {
+      voiceChatOpen();
+      setVoicePhase(evt.phase, evt.text || '');
+      // 阶段提示作为系统气泡进流，用户能看到完整步骤
+      if (evt.phase === 'listening' || evt.phase === 'recognizing') {
+        pushVoiceMsg({ role: 'system', text: '🎙 ' + (evt.text || '') });
+      }
+      return;
+    }
+    if (evt.type === 'user') {
+      voiceChatOpen();
+      _voicePendingAi = null;
+      pushVoiceMsg({ role: 'user', text: String(evt.text || '').trim() || '（没听清）' });
+      setVoicePhase('thinking', 'AI 正在思考…');
+      return;
+    }
+    if (evt.type === 'ai') {
+      voiceChatOpen();
+      if (evt.pending) {
+        _voicePendingAi = pushVoiceMsg({ role: 'assistant', text: evt.text || '正在思考…', pending: true, key: 'ai-pending' });
+        return;
+      }
+      // 拿到正式回复：替换掉"思考中"那条，保持聊天流干净
+      if (_voicePendingAi && _voicePendingAi.parentNode) {
+        _voicePendingAi.classList.remove('pending');
+        _voicePendingAi.textContent = String(evt.text || '');
+        _voicePendingAi.removeAttribute('data-key');
+        scrollVoiceChat();
+      } else {
+        pushVoiceMsg({ role: 'assistant', text: String(evt.text || '') });
+      }
+      _voicePendingAi = null;
+      return;
+    }
+    if (evt.type === 'error') {
+      voiceChatOpen();
+      pushVoiceMsg({ role: 'error', text: '⚠ ' + String(evt.message || '语音出错') });
+      setVoicePhase('', '出错了');
+    }
+  });
+
+  if (el.btnVoiceChat) el.btnVoiceChat.addEventListener('click', () => voiceChatOpen());
+  if (el.voiceChatBack) el.voiceChatBack.addEventListener('click', () => showView('chat'));
+  if (el.voiceChatClear && el.voiceChatLog) {
+    el.voiceChatClear.addEventListener('click', () => { el.voiceChatLog.innerHTML = ''; _voicePendingAi = null; });
+  }
+  if (el.voiceChatPtt) {
+    el.voiceChatPtt.addEventListener('click', async () => {
+      _voicePttOn = !_voicePttOn;
+      el.voiceChatPtt.textContent = _voicePttOn ? '⏹ 停止并识别' : '🎤 开始说话';
+      el.voiceChatPtt.classList.toggle('primary', !_voicePttOn);
+      await api.voiceListen(_voicePttOn).catch(() => {});
+      // 停止收音后按钮复位（识别/回复由事件流驱动）
+      if (!_voicePttOn) el.voiceChatPtt.classList.add('primary');
     });
   }
 }
@@ -3784,6 +3986,9 @@ el.btnManageConn.addEventListener('click', () => {
   } catch (_) {
     el.foot.textContent = 'Hermes Buddy';
   }
+
+  // v4.12.22：语音对话面板（订阅会话事件，热键/🎤 一激活就自动跳过来）
+  try { initVoiceChat(); } catch (_) {}
 
   let status = await api.status().catch(() => ({ configured: false }));
   applyStatus(status);
