@@ -3174,19 +3174,14 @@ async function renderVoiceSection() {
       if (statusEl) statusEl.textContent = '已打开 Windows「语音」设置：添加语音后回到这里点「重新检测嗓音」。';
     });
   }
-  // v4.12.22：变调这一步要靠 ffmpeg（与语音识别同一套引擎）。没装的话只能做 SSML 变调，
-  // 萝莉音会明显打折——必须说清楚，否则用户以为"选了没用"。
+  // v4.12.24：变调改成「SAPI 慢速合成 + 本地抽取重采样」，纯本地、不依赖 ffmpeg。
+  // 只有在没法变调（非 PCM 输出等异常）时才提示。
   const styleHintEl = document.getElementById('voice-style-hint');
   if (styleHintEl) {
-    const ffmpegOk = !!(engine && engine.ffmpeg && engine.ffmpeg.ok);
-    if (!ffmpegOk && (styleEl && styleEl.value && styleEl.value !== 'natural')) {
-      styleHintEl.hidden = false;
-      styleHintEl.dataset.tone = 'error';
-      styleHintEl.textContent = `当前音色（变调）需要 ffmpeg，尚未安装：现在只会做 SSML 变调，效果打折。请在「本机引擎与模型」页安装语音引擎（Whisper/ffmpeg）。`;
-    } else if (!ffmpegOk) {
+    if (styleEl && styleEl.value && styleEl.value !== 'natural') {
       styleHintEl.hidden = false;
       styleHintEl.dataset.tone = '';
-      styleHintEl.textContent = '提示：安装 ffmpeg（本机引擎与模型页）后，萝莉/甜美等音色会做「变调不变速」处理，听感更明显。';
+      styleHintEl.textContent = '音色由本地重采样实现「变调不变速」，无需联网也不需要 ffmpeg；听感不明显可在下方调语速。';
     } else {
       styleHintEl.hidden = true;
     }

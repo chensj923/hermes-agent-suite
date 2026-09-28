@@ -37,44 +37,79 @@ function makeVm(sink) {
   return { vm, sent, win };
 }
 
-test('音色预设里必须有萝莉/童声，且带 pitch 与 >1 的变调系数', () => {
+test('音色预设里必须有萝莉/童声，且变调系数明显高于 1', () => {
   const loli = VOICE_STYLES.find((s) => /萝莉|童声/.test(s.label));
   assert.ok(loli, '预设里应该有萝莉/童声：' + JSON.stringify(VOICE_STYLES.map((s) => s.label)));
-  assert.ok(loli.pitch, '萝莉音必须带 SSML pitch（否则不变调）：' + JSON.stringify(loli));
-  assert.ok(loli.shift > 1.1, '萝莉音的变调系数应明显高于 1：' + loli.shift);
+  assert.ok(Number(loli.pitch) > 1.1, '萝莉音的变调系数应明显高于 1：' + loli.pitch);
 });
 
-test('每个预设的字段都合法（id/label 非空，shift 为正数，rate 在 -10..10）', () => {
+test('每个预设的字段都合法（id/label 非空，pitch 为正数，rate 在 -10..10）', () => {
   for (const s of VOICE_STYLES) {
     assert.ok(s.id && s.label, '预设缺 id/label：' + JSON.stringify(s));
-    assert.ok(Number(s.shift) > 0, 'shift 必须为正：' + JSON.stringify(s));
+    assert.ok(Number(s.pitch) > 0, 'pitch 必须为正数：' + JSON.stringify(s));
     assert.ok(Math.abs(Number(s.rate) || 0) <= 10, 'rate 越界：' + JSON.stringify(s));
   }
 });
 
-test('未知音色 id 回退到原声，绝不把空配置丢给 SAPI', async () => {
-  const { vm } = makeVm();
-  vm.getSettings = () => ({ enabled: true, style: '不存在的音色', voiceName: '', rate: 0, volume: 100 });
-  // 直接跑渲染参数拼装路径：未知 style 应等价于原声（pitch 为空、shift=1）
-  const cfg = vm.getSettings();
-  const style = require('../src/voice/voice-manager').VOICE_STYLES.find((s) => s.id === cfg.style) || VOICE_STYLES[0];
-  assert.equal(style.id, 'natural', '未知 id 必须回退到 natural');
-  assert.equal(style.pitch, '', '回退后不应给 SAPI 传 pitch');
-  assert.equal(style.shift, 1, '回退后不应做变调');
+// v4.12.24：变调系数必须能被 SAPI 语速补偿回来，否则"变调=变速"听着像快进
+test('每个非原声预设的语速补偿量与变调系数匹配（|log2(pitch)+0.1575·rate| 够小）', () => {
+  const { sapiRateForPitch } = require('../src/voice/voice-manager');
+  for (const s of VOICE_STYLES) {
+    const comp = sapiRateForPitch(s.pitch);
+    // 补偿后残余时长误差 = 2^(-0.1575·comp) / pitch
+    const residual = Math.pow(2, -0.1575 * comp) / Number(s.pitch);
+    assert.ok(residual > 0.9 && residual < 1.12,
+      `预设 ${s.id} 变调 ${s.pitch} 的语速补偿 ${comp} 不匹配，残余时长倍率 ${residual.toFixed(3)}（会明显变速）`);
+  }
 });
 
-test('_shiftPitch：原声（ratio≈1）直接跳过，不白跑一次 ffmpeg', async () => {
+test('sapiRateForPitch：变调越高，合成语速越慢（负 rate）', () => {
+  const { sapiRateForPitch } = require('../src/voice/voice-manager');
+  assert.ok(sapiRateForPitch(1.26) <= -1, '升调应让 SAPI 说慢：' + sapiRateForPitch(1.26));
+  assert.ok(sapiRateForPitch(0.9) >= 1, '降调应让 SAPI 说快：' + sapiRateForPitch(0.9));
+  assert.equal(sapiRateForPitch(1), 0, '原声不补偿');
+});
+
+test('未知音色 id 回退到原声，绝不把空配置丢给 SAPI', () => {
+  const cfg = { enabled: true, style: '不存在的音色', voiceName: '', rate: 0, volume: 100 };
+  const style = VOICE_STYLES.find((s) => s.id === cfg.style) || VOICE_STYLES[0];
+  assert.equal(style.id, 'natural', '未知 id 必须回退到 natural');
+  assert.equal(Number(style.pitch), 1, '回退后不应做变调');
+});
+
+test('_shiftPitch：原声（ratio≈1）直接跳过，不做无谓处理', async () => {
   const { vm } = makeVm();
   assert.equal(await vm._shiftPitch('x.wav', 1), null, '原声不该变调');
   assert.equal(await vm._shiftPitch('x.wav', 0), null, '非法 ratio 不该变调');
   assert.equal(await vm._shiftPitch('x.wav', 1.005), null, '几乎等于原声时跳过');
 });
 
-test('没有 ffmpeg 时变调静默降级（不能因为没 ffmpeg 就没声音）', async () => {
+// v4.12.24：变调不能再依赖 ffmpeg（用户机器没装 → 选了音色还是原声）
+test('没有 ffmpeg 也能变调（纯 JS 重采样，实测 PCM WAV 生效）', async () => {
+  const { vm, } = makeVm(); // appDir 是空临时目录 → 找不到 ffmpeg
+  const { writeWavPcm, readWavPcm } = require('../src/voice/voice-manager');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-pitch-'));
+  const src = path.join(dir, 'tts.wav');
+  // 造一段 440Hz 正弦：变调后频率必须变成 440×ratio
+  const sr = 22050, n = sr, s = new Int16Array(n);
+  for (let i = 0; i < n; i++) s[i] = Math.round(0.6 * 32767 * Math.sin(2 * Math.PI * 440 * i / sr));
+  writeWavPcm(src, { sampleRate: sr, channels: 1, samples: s });
+  const out = await vm._shiftPitch(src, 1.26);
+  assert.ok(out && fs.existsSync(out), '没有 ffmpeg 也必须产出变调文件（否则音色形同虚设）');
+  const pcm = readWavPcm(out);
+  const zcr = (a) => { let z = 0; for (let i = 1; i < a.length; i++) if ((a[i - 1] < 0) !== (a[i] < 0)) z++; return z; };
+  const f = zcr(pcm.samples) / 2 / (pcm.frames / sr);
+  assert.ok(Math.abs(f - 440 * 1.26) < 12, `变调后频率应≈${(440 * 1.26).toFixed(0)}Hz，实测 ${f.toFixed(1)}Hz`);
+  // 时长应被压缩到 1/1.26（配合 SAPI 慢速合成后回到原速）
+  assert.ok(Math.abs(pcm.frames - Math.floor(n / 1.26)) <= 1, '输出帧数应为 源帧数/ratio：' + pcm.frames);
+});
+
+test('非 PCM / 打不开的文件：变调失败返回 null，绝不把坏音频往下传', async () => {
   const { vm } = makeVm();
-  // appDir 是空临时目录 → findEngine 找不到 ffmpeg
-  const r = await vm._shiftPitch('x.wav', 1.24);
-  assert.equal(r, null, '找不到 ffmpeg 必须返回 null，由调用方用原音频');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-bad-'));
+  const bad = path.join(dir, 'tts.wav');
+  fs.writeFileSync(bad, 'not a wav at all');
+  assert.equal(await vm._shiftPitch(bad, 1.26), null, '坏文件必须返回 null（调用方用原音频）');
 });
 
 test('会话事件会发到主窗口，且 onSession 回调也能收到', () => {

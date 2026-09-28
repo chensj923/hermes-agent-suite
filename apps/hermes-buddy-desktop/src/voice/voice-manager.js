@@ -44,23 +44,104 @@ const TTS_PS = 'tts.ps1';
 const MAX_INLINE_BYTES = 4 * 1024 * 1024;
 
 /**
- * v4.12.22：音色预设。
+ * v4.12.24：音色预设（**纯离线、零依赖，实测生效**）。
  *
- * 本机只有老式 SAPI 嗓音（Huihui/Yaoyao/Kangkang），机械感强、听着"不好听"，
- * 而用户想要萝莉音这类音色。离线条件下靠两步做出音色：
- *   1. SSML <prosody pitch>：让合成引擎改基频（+18% 明显变尖）；
- *   2. ffmpeg asetrate + atempo：整体变调但**不改变语速**（asetrate 提高采样率
- *      让声音变尖变快，atempo 反向补偿回原速），做出真正的"童声/萝莉"效果。
- * ffmpeg 已随语音引擎一起装好，无新增下载；ffmpeg 缺失时自动降级为只改 pitch。
+ * 踩过的坑（v4.12.22 的做法在这台机器上彻底失效，用户反馈"选了还是原声"）：
+ *   1. SSML <prosody pitch>：老式桌面语音（Huihui）**完全无视 pitch** ——
+ *      同一句话用 +18% / -18% / 不设，生成的 WAV 字节完全相同（MD5 一致）；
+ *   2. ffmpeg asetrate+atempo：ffmpeg 随语音引擎安装，用户机器上没装 → 直接跳过。
+ *
+ * 现在的做法：「先说慢，再抽取」，等价于 ffmpeg 的变调不变速，但不依赖任何外部程序：
+ *   - SAPI Rate 为负 → 合成出的音频更长（实测 s ≈ 2^(-0.1575·rate)，rate=-2 时 1.248×）；
+ *   - 再按 ratio 抽取（output[i] = src[i·ratio]）→ 音调 ×ratio、时长 ÷ratio；
+ *   - 取 rate 使 s ≈ ratio，于是**时长回到原速、只有音调变了**。
+ * extraRate 是在补偿量之上额外的语速（活泼 +，温柔 -）。
  */
 const VOICE_STYLES = [
-  { id: 'natural', label: '原声（不改音色）', pitch: '', shift: 1, rate: 0 },
-  { id: 'loli', label: '萝莉 / 童声', pitch: '+18%', shift: 1.24, rate: 2 },
-  { id: 'sweet', label: '甜美少女', pitch: '+10%', shift: 1.12, rate: 2 },
-  { id: 'lively', label: '元气少女', pitch: '+8%', shift: 1.08, rate: 8 },
-  { id: 'gentle', label: '温柔姐姐', pitch: '-2%', shift: 1.02, rate: -5 },
-  { id: 'calm', label: '沉稳知性', pitch: '-8%', shift: 0.92, rate: -8 },
+  { id: 'natural', label: '原声（不改音色）', pitch: 1, rate: 0 },
+  { id: 'loli', label: '萝莉 / 童声', pitch: 1.26, rate: 0 },
+  { id: 'sweet', label: '甜美少女', pitch: 1.12, rate: 0 },
+  { id: 'lively', label: '元气少女', pitch: 1.12, rate: 2 },
+  { id: 'gentle', label: '温柔姐姐', pitch: 0.98, rate: -2 },
+  { id: 'calm', label: '沉稳知性', pitch: 0.9, rate: -2 },
 ];
+
+/**
+ * SAPI 语速 → 相对时长实测为 s ≈ 2^(-0.1575·rate)（本机 Huihui 实测：
+ * -10→3.01, -2→1.248, 0→1.0, +2→0.8046, +10→0.336）。
+ * 要让"变调后时长不变"，需 s ≈ pitch，反解出该用多慢的语速去合成。
+ */
+function sapiRateForPitch(pitch) {
+  const p = Number(pitch);
+  if (!p || p <= 0) return 0;
+  const r = -Math.log2(p) / 0.1575;
+  return Math.max(-10, Math.min(10, Math.round(r)));
+}
+
+/**
+ * v4.12.24：读 PCM WAV（SAPI 输出 = 16bit PCM，fmt 块可能是 18 字节带 cbSize，
+ * 所以必须按 chunk 遍历找 fmt/data，不能写死 44 字节偏移——写死会读到错的采样率）。
+ */
+function readWavPcm(file) {
+  const b = fs.readFileSync(file);
+  if (b.length < 44 || b.toString('ascii', 0, 4) !== 'RIFF') throw new Error('不是 WAV 文件');
+  let p = 12, fmt = null, data = null;
+  while (p + 8 <= b.length) {
+    const id = b.toString('ascii', p, p + 4);
+    const size = b.readUInt32LE(p + 4);
+    const off = p + 8;
+    if (id === 'fmt ') fmt = { off, size };
+    else if (id === 'data') { data = { off, size: Math.min(size, b.length - off) }; break; }
+    p = off + size + (size % 2); // chunk 按偶数字节对齐
+  }
+  if (!fmt || !data) throw new Error('WAV 缺少 fmt 或 data 块');
+  const tag = b.readUInt16LE(fmt.off);
+  const channels = b.readUInt16LE(fmt.off + 2);
+  const sampleRate = b.readUInt32LE(fmt.off + 4);
+  const bits = b.readUInt16LE(fmt.off + 14);
+  if (tag !== 1 || bits !== 16) throw new Error(`暂不支持的 WAV 格式（tag=${tag}, bits=${bits}）`);
+  const frames = Math.floor(data.size / (channels * 2));
+  const samples = new Int16Array(frames * channels);
+  for (let i = 0; i < samples.length; i++) samples[i] = b.readInt16LE(data.off + i * 2);
+  return { sampleRate, channels, bits, frames, samples };
+}
+
+function writeWavPcm(file, { sampleRate, channels, samples }) {
+  const dataBytes = samples.length * 2;
+  const buf = Buffer.alloc(44 + dataBytes);
+  buf.write('RIFF', 0, 'ascii'); buf.writeUInt32LE(36 + dataBytes, 4); buf.write('WAVE', 8, 'ascii');
+  buf.write('fmt ', 12, 'ascii'); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(channels, 22);
+  buf.writeUInt32LE(sampleRate, 24); buf.writeUInt32LE(sampleRate * channels * 2, 28);
+  buf.writeUInt16LE(channels * 2, 32); buf.writeUInt16LE(16, 34);
+  buf.write('data', 36, 'ascii'); buf.writeUInt32LE(dataBytes, 40);
+  for (let i = 0; i < samples.length; i++) buf.writeInt16LE(samples[i], 44 + i * 2);
+  fs.writeFileSync(file, buf);
+}
+
+/**
+ * 变调不变速：「先说慢（SAPI 负 rate）→ 再按 ratio 抽取」。
+ * output[i] = src[i·ratio] → 音调 ×ratio、时长 ÷ratio；
+ * 源时长已被 SAPI 拉长到 ≈ratio 倍（见 sapiRateForPitch），故最终时长≈原速。
+ * 输出帧数取 floor(frames/ratio)，绝不能取 frames —— 那会读到源末尾之外（尾部静音）。
+ */
+function resamplePcmLinear(samples, ratio, channels) {
+  const ch = channels || 1;
+  const srcFrames = Math.floor(samples.length / ch);
+  const outFrames = Math.floor(srcFrames / ratio);
+  const out = new Int16Array(outFrames * ch);
+  for (let i = 0; i < outFrames; i++) {
+    const pos = i * ratio;
+    const i0 = Math.floor(pos);
+    const frac = pos - i0;
+    const i1 = i0 + 1;
+    for (let c = 0; c < ch; c++) {
+      const a = i0 < srcFrames ? samples[i0 * ch + c] : 0;
+      const b = i1 < srcFrames ? samples[i1 * ch + c] : a;
+      out[i * ch + c] = Math.max(-32768, Math.min(32767, Math.round(a + (b - a) * frac)));
+    }
+  }
+  return out;
+}
 
 function styleById(id) {
   return VOICE_STYLES.find((s) => s.id === id) || VOICE_STYLES[0];
@@ -256,33 +337,52 @@ class VoiceManager {
     const wav = path.join(outDir, 'tts.wav');
     const ps = extractPs1(TTS_PS);
     const style = styleById(cfg.style);
-    // 预设自带的语速偏移 + 用户微调；SAPI rate 只允许 -10..10
-    const rate = Math.max(-10, Math.min(10, Math.round((cfg.rate || 0) + (style.rate || 0))));
+    // 变调靠「合成时说慢 + 抽取」两步，这里先把 SAPI 语速调到补偿量（负=更慢）
+    const pitchRatio = Number(style.pitch) || 1;
+    const rate = Math.max(-10, Math.min(10,
+      Math.round((cfg.rate || 0) + (style.rate || 0) + sapiRateForPitch(pitchRatio))));
     const args = ['-ExecutionPolicy', 'Bypass', '-File', ps, '-Text', text, '-OutWav', wav, '-Rate', String(rate), '-Volume', String(cfg.volume == null ? 100 : cfg.volume)];
     if (cfg.voiceName) { args.push('-Voice'); args.push(cfg.voiceName); }
-    if (style.pitch) { args.push('-Pitch'); args.push(style.pitch); }
+    // 注意：不再传 -Pitch。实测 SSML <prosody pitch> 对桌面语音无效（字节级相同），
+    // 传了只会让人误以为已经变调；音调统一由下面的重采样负责。
     try {
       await execFileAsync('powershell', args, { windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 30000 });
     } finally {
       try { fs.unlinkSync(ps); } catch (_) {}
     }
-    // 第二步音色：变调不变速（萝莉/甜美全靠这一步）
-    const shifted = await this._shiftPitch(wav, style.shift);
+    // 第二步音色：抽取变调（萝莉/甜美全靠这一步，纯 JS，不需要 ffmpeg）
+    const shifted = await this._shiftPitch(wav, pitchRatio);
     return shifted || wav;
   }
 
   /**
-   * v4.12.22：用 ffmpeg 做"变调不变速"。
-   * asetrate=sr*ratio 把声音变尖（同时变快），atempo=1/ratio 把速度补回来，
-   * 于是语速不变、音调升高 —— 这就是萝莉/童声的关键一步。
-   * ffmpeg 缺失或失败时返回 null（调用方用原音频，绝不因为变调没声音）。
+   * v4.12.24：变调不变速 —— **纯 JS 重采样，不依赖 ffmpeg**。
+   *
+   * 之所以必须自己算：v4.12.22 靠「SSML <prosody pitch> + ffmpeg asetrate/atempo」两步，
+   * 实测在这台机器上全落空 ——
+   *   1) 老式桌面语音（Huihui）对 SSML pitch 完全无视：同一句话用 +18% / -18% / 不设
+   *      生成的 WAV **字节完全相同**（MD5 一致），等于没做；
+   *   2) ffmpeg 随语音引擎安装，用户机器上没装 → 直接跳过。
+   * 于是"选了萝莉音还是原声"。改成对 PCM 采样做重采样：时长不变、音调升 ratio 倍，
+   * 零外部依赖，任何机器都生效；非 PCM 格式才退回 ffmpeg。
    */
   async _shiftPitch(wav, ratio) {
     const r = Number(ratio);
     if (!r || Math.abs(r - 1) < 0.01) return null;
+    const out = wav.replace(/\.wav$/i, '-shift.wav');
+    try {
+      const pcm = readWavPcm(wav);
+      const shifted = resamplePcmLinear(pcm.samples, r, pcm.channels);
+      writeWavPcm(out, { sampleRate: pcm.sampleRate, channels: pcm.channels, samples: shifted });
+      try { fs.unlinkSync(wav); } catch (_) {}
+      this.logger.info('voice-pitch-shift', { ratio: r, mode: 'js-resample', frames: pcm.frames });
+      return out;
+    } catch (e) {
+      this.logger.warn('voice-pitch-shift-js-failed', { error: (e && e.message) || String(e), ratio: r });
+    }
+    // 兜底：非常规 WAV（非 16bit PCM）交给 ffmpeg，装了就试试
     const ffmpeg = pre.findEngine('ffmpeg', this.appDir);
     if (!ffmpeg) return null;
-    const out = wav.replace(/\.wav$/i, '-shift.wav');
     const inv = (1 / r).toFixed(6);
     try {
       await execFileAsync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', wav,
@@ -293,7 +393,7 @@ class VoiceManager {
         return out;
       }
     } catch (e) {
-      this.logger.warn('voice-pitch-shift-failed', { error: (e && e.message) || String(e), ratio: r });
+      this.logger.warn('voice-pitch-shift-ffmpeg-failed', { error: (e && e.message) || String(e), ratio: r });
     }
     return null;
   }
@@ -588,4 +688,4 @@ class VoiceManager {
   voiceStyles() { return VOICE_STYLES.slice(); }
 }
 
-module.exports = { VoiceManager, VOICE_STYLES };
+module.exports = { VoiceManager, VOICE_STYLES, sapiRateForPitch, readWavPcm, writeWavPcm, resamplePcmLinear };
