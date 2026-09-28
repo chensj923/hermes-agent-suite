@@ -71,11 +71,13 @@ class DesktopPet {
    * @param {string} [opts.dataDir]      userData 目录（存 pet-lines.json）
    * @param {string} [opts.preloadPath]
    */
-  constructor({ logger, onPredict, onRestore, onHide, dataDir, preloadPath } = {}) {
+  constructor({ logger, onPredict, onRestore, onHide, onError, dataDir, preloadPath } = {}) {
     this.logger = logger || { info() {}, warn() {}, error() {} };
     this.onPredict = onPredict || (() => {});
     this.onRestore = onRestore || (() => {});
     this.onHide = onHide || (() => {});
+    // v4.12.21：渲染层诊断错误（含 TTS 播放失败）转发给主窗口设置页，用户能直接看到原因
+    this.onError = onError || null;
     this.dataDir = dataDir || '';
     this.preloadPath = preloadPath || path.join(__dirname, 'desktop-pet-preload.js');
     this.linesFile = this.dataDir ? path.join(this.dataDir, 'pet-lines.json') : '';
@@ -93,6 +95,9 @@ class DesktopPet {
   }
 
   get available() { return !!_electron; }
+
+  /** v4.12.21：桌宠页面是否已加载完成（未 ready 时 onSpeakAudio 还没注册，发过去会丢）。 */
+  get isReady() { return !!this._ready; }
 
   /**
    * v4.5：注册 pet:// 特权协议（必须在 app ready 之前调用一次）。
@@ -176,7 +181,11 @@ class DesktopPet {
       try { this.logger.info('pet-drag-trace', { trace: JSON.parse(JSON.stringify(data || {})) }); } catch (_) {}
     });
     // v4.7：不再靠 hover 切换穿透（见 _setClickThrough）；渲染层诊断错误上报
-    ipcMain.on('pet:error', (_e, msg) => this.logger.warn('pet-renderer-error', { error: String(msg || '').slice(0, 300) }));
+    // v4.12.21：TTS 播放失败等渲染层错误除了记日志，还要转发主窗口（设置页错误条可见）
+    ipcMain.on('pet:error', (_e, msg) => {
+      this.logger.warn('pet-renderer-error', { error: String(msg || '').slice(0, 300) });
+      if (typeof this.onError === 'function') { try { this.onError(String(msg || '')); } catch (_) {} }
+    });
     // v4.7：动画开关（省电模式）
     ipcMain.on('pet:paused', (_e, paused) => { this._paused = Boolean(paused); });
     // 文案编辑窗口的读写

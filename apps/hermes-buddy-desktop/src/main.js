@@ -1367,6 +1367,12 @@ async function bootstrap() {
         onPredict: () => runProactivePredict(),
         onRestore: () => restoreMainWindow(),
         onHide: () => logger.info('pet-hidden'),
+        // v4.12.21：桌宠渲染层错误（如 TTS 播放失败）转发主窗口设置页错误条
+        onError: (msg) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            try { mainWindow.webContents.send('buddy:voice:error', { message: String(msg || '') }); } catch (_) {}
+          }
+        },
       });
       // v4.12.3：注册 pet:// 协议处理器。缺少这一步导致 Live2D 模型 fetch 报 Network error，
       // 渲染器 fallback 到 PNG，桌宠动画卡顿。

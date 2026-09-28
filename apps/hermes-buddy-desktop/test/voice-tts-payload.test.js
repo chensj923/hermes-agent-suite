@@ -116,3 +116,24 @@ test('speak() 遇到空壳音频返回 ok:false 且原因可读（不得假装�
   assert.ok(/语音/.test(r.reason), '原因应给出可操作指引：' + r.reason);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ---- v4.12.21：主窗口 CSP 必须放行 data: 媒体 ----
+// 背景：主窗口 index.html 的 CSP 是 default-src 'none' 且没有 media-src，
+// 媒体回退到 'none'，连内联 data: 音频都被 CSP 拦截，试听在主窗口必然报
+// "no supported source"（v4.12.20 的 data URL 修复救不了主窗口就是这一刀）。
+test('主窗口 CSP 必须包含 media-src 且放行 data:（否则试听必失败）', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const m = html.match(/Content-Security-Policy"\s+content="([^"]+)"/);
+  assert.ok(m, 'index.html 必须声明 CSP');
+  const csp = m[1];
+  const media = csp.split(';').map((s) => s.trim()).find((d) => d.startsWith('media-src'));
+  assert.ok(media, 'CSP 必须显式包含 media-src（default-src none 会连 data: 一起拦）');
+  assert.ok(/(^|\s)data:/.test(media), 'media-src 必须放行 data:，实际为：' + media);
+});
+
+test('桌宠窗口必须暴露 isReady，speak() 据此决定是否把音频发往桌宠窗口', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice', 'voice-manager.js'), 'utf8');
+  assert.ok(src.includes('pet.isReady'), 'speak() 必须检查 pet.isReady，防止载荷发进未就绪的桌宠页面被静默丢弃');
+  const pet = fs.readFileSync(path.join(__dirname, '..', 'src', 'predict', 'desktop-pet.js'), 'utf8');
+  assert.ok(/get isReady\(\)/.test(pet), 'DesktopPet 必须暴露 isReady getter');
+});

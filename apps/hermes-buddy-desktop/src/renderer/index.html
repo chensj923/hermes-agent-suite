@@ -2,9 +2,11 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <!-- 渲染层不发任何网络请求，一切经主进程 IPC，所以 connect-src 直接锁死。 -->
+  <!-- 渲染层不发任何网络请求，一切经主进程 IPC，所以 connect-src 直接锁死。
+       v4.12.21：补 media-src —— default-src 'none' 会连 data: 音频一起拦掉，
+       TTS 试听在主窗口必然报 "no supported source"。 -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
   <title>Hermes Buddy</title>
   <link rel="stylesheet" href="styles.css">
 </head>

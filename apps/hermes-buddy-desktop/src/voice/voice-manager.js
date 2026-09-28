@@ -287,7 +287,9 @@ class VoiceManager {
       return { ok: false, reason };
     }
     this.logger.info('voice-tts-ready', { bytes: payload.bytes, inline: !payload.dataUrl ? false : true });
-    const petWin = (pet && pet.win && !pet.win.isDestroyed()) ? pet.win : null;
+    // v4.12.21：只在桌宠页面真正 ready（onSpeakAudio 已注册）时才发桌宠窗口，
+    // 否则载荷会被静默丢掉、哪里都不会响——退回主窗口播放（CSP 已放行 media-src data:）。
+    const petWin = (pet && pet.win && !pet.win.isDestroyed() && pet.isReady !== false) ? pet.win : null;
     if (petWin) {
       try { petWin.webContents.send('pet:speak-audio', payload); return { ok: true, reason: '' }; } catch (_) {}
     }
