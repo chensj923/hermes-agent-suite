@@ -27,6 +27,7 @@ const { createSceneWatcher, normalizeSceneRules } = require('./scene-rules');
 // v4.11.0：应用画像库（约 100 种软件 × 3 个常用行为）与结晶引擎（长期记忆）
 const { lookupApp, behaviorsOf, behaviorById, isGame, CATEGORY_LABEL, INTENT_META } = require('./app-profiles');
 const { CrystalEngine } = require('./crystal-engine');
+const { ExperienceCrystal } = require('./experience-crystal');
 
 /** v4.8.2：hybrid 模式下本地模型只是「触发筛选器」。
 /**
@@ -275,6 +276,8 @@ class PredictController {
     this._sceneWatcher = createSceneWatcher(this.config.get('sceneRules'));
     // v4.11.0：结晶引擎（本地长期记忆）+ 应用画像触发的每应用冷却表
     this.crystal = new CrystalEngine({ dataDir: path.join(this.appDir, 'predict'), logger: this.logger });
+    // v4.12.13：经验结晶引擎（按用户定义的结晶重做：从行为提炼→分级 script/model→每日沉淀）
+    this.experience = new ExperienceCrystal({ dataDir: path.join(this.appDir, 'predict'), logger: this.logger });
     this._appLastFired = {};
     // v4.12.1：onWindowChange 处理锁。窗口事件路径不设置 _processing，但卡片
     // await panel.show 最长 20s，期间新切窗事件会再起卡片，导致 9s 内多条流水线、
@@ -334,6 +337,8 @@ class PredictController {
   _recordBehavior(profileId, behaviorId, intent, text, proactive) {
     try {
       this.crystal.record({ appId: profileId, behaviorId, intent, text, proactive: !!proactive });
+      // v4.12.13：同步转发给经验结晶（按 intent 区分 reply/behavior 两类）
+      this.experience.record({ appId: profileId, behaviorId, intent, text, proactive: !!proactive });
     } catch (e) {
       this.logger.warn('crystal-record-failed', { error: e.message });
     }
@@ -341,6 +346,11 @@ class PredictController {
 
   /** 记录用户对某行为接受/拒绝。 */
   _recordOutcome(profileId, behaviorId, accepted) {
+    try {
+      this.experience.recordOutcome({ appId: profileId, behaviorId }, accepted);
+    } catch (e) {
+      this.logger.warn('experience-outcome-failed', { error: e.message });
+    }
     try {
       return this.crystal.recordOutcome({ appId: profileId, behaviorId }, accepted);
     } catch (e) {
@@ -371,6 +381,38 @@ class PredictController {
       this.logger.warn('crystal-background-failed', { error: e.message });
       return null;
     }
+  }
+
+  /**
+   * v4.12.13：后台经验结晶——启用后/每日定时静默跑：从行为提炼经验并分级。
+   */
+  async runBackgroundExperienceCrystal(force) {
+    try {
+      if (!force && !this.experience.shouldCrystal()) return null;
+      const before = this.experience.summary();
+      const result = this.experience.crystallize();
+      this.logger.info('experience-crystal-background', { before, result });
+      this._logEntry({ phase: 'experience-crystal', status: 'ok', added: result.added.length, retired: result.retired.length, kept: result.kept });
+      return result;
+    } catch (e) {
+      this.logger.warn('experience-crystal-background-failed', { error: e.message });
+      return null;
+    }
+  }
+
+  /** 经验结晶摘要（设置面板展示）。 */
+  getExperienceSummary() {
+    try { return this.experience.summary(); } catch (_) { return { patterns: 0, experiences: 0, events: 0, lastCrystalAt: 0, runs: 0 }; }
+  }
+
+  /** 经验结晶列表（分级展示）。 */
+  getExperiences() {
+    try { return this.experience.allExperiences(); } catch (_) { return []; }
+  }
+
+  /** 经验文档（同步到服务端用）。 */
+  getExperienceDoc() {
+    try { return this.experience.exportDoc(); } catch (_) { return ''; }
   }
 
   /** 结晶摘要（设置面板展示）。 */
@@ -747,12 +789,18 @@ class PredictController {
     // v4.11.0：后台结晶——第二次及以后打开应用时静默跑一次：
     // 淘汰过期/不爱用的预测，固化新的高频高接受率行为（纯本地计算，不阻塞启用）
     this.runBackgroundCrystal().catch(() => {});
+    // v4.12.13：经验结晶——启用后跑一次，并每日定时重跑（替代"仅启用一次"）
+    this.runBackgroundExperienceCrystal().catch(() => {});
+    if (!this._experienceTimer) {
+      this._experienceTimer = setInterval(() => this.runBackgroundExperienceCrystal().catch(() => {}), 24 * 60 * 60 * 1000);
+    }
     this.logger.info('predict-enabled');
     return this.getStatus();
   }
 
   /** 停用：停钩子、停模型、清上下文。 */
   async disable() {
+    if (this._experienceTimer) { try { clearInterval(this._experienceTimer); } catch (_) {} this._experienceTimer = null; }
     if (this.hooks) { try { this.hooks.stop(); } catch (_) {} this.hooks = null; }
     if (this._fgWatcher) { try { this._fgWatcher.stop(); } catch (_) {} this._fgWatcher = null; }
     if (this.modelRunner) { try { await this.modelRunner.stop(); } catch (_) {} this.modelRunner = null; }

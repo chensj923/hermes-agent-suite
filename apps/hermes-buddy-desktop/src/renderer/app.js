@@ -2380,6 +2380,10 @@ async function renderPredictTab() {
       <h3>偏好结晶（只存模式，不存内容）</h3>
       <div id="predict-stats" class="predict-stats"></div>
 
+      <h3>经验结晶（每日自动分级：脚本 / 模型方案）</h3>
+      <p class="hint">从你的常用行为与回复中提炼经验，每天结晶更新：确定性高的固化为可直接执行的规则（script），需判断的固化为调用模型的方案（model）。连接服务端后自动同步。</p>
+      <div id="experience-crystal" class="predict-stats"></div>
+
       <h3>回填方式</h3>
       <label class="settings-field">生成内容如何进入当前窗体
         <select id="predict-insert-mode">
@@ -2699,6 +2703,36 @@ async function renderPredictTab() {
       table.appendChild(tr);
     }
     statsEl.appendChild(table);
+  }
+
+  // 经验结晶（v4.12.13）：分级列表展示
+  const expEl = $('experience-crystal');
+  if (expEl) {
+    const sum = await api.experienceSummary().catch(() => null);
+    const list = await api.experienceList().catch(() => []);
+    if (!sum || (sum.experiences === 0 && sum.patterns === 0)) {
+      expEl.textContent = '（暂无经验，多用几次后会自动累积并分级）';
+    } else {
+      const meta = `模式 ${sum.patterns} · 经验 ${sum.experiences} · 上次结晶 ${sum.lastCrystalAt ? new Date(sum.lastCrystalAt).toLocaleString() : '尚未'}`;
+      const tip = document.createElement('div');
+      tip.className = 'hint';
+      tip.textContent = meta;
+      expEl.appendChild(tip);
+      const tbl = document.createElement('table');
+      tbl.className = 'predict-crystal-table';
+      const head = document.createElement('tr');
+      head.innerHTML = '<th>分级</th><th>场景</th><th>频率</th><th>接受率</th><th>做法/模板</th>';
+      tbl.appendChild(head);
+      for (const e of list) {
+        const tr = document.createElement('tr');
+        const scope = e.appId === 'unknown' ? e.intent : `${e.appId}/${e.behaviorId}`;
+        const rate = Math.round((e.acceptRate || 0) * 100);
+        const tierLabel = e.tier === 'script' ? '脚本' : '模型';
+        tr.innerHTML = `<td>${tierLabel}</td><td>${escapeHtml(scope)}</td><td>${e.frequency || 0}</td><td>${rate}%</td><td>${escapeHtml(String(e.template || '').slice(0, 60))}</td>`;
+        tbl.appendChild(tr);
+      }
+      expEl.appendChild(tbl);
+    }
   }
 
   // 杀软

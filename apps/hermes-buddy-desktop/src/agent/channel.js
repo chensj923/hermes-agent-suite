@@ -43,7 +43,7 @@ const REQUIRED_CHANNEL_VERSION = '2.3';
  * v4.12.12：抬到 15，因 deploy 已携带自动同步能力（模型随 config 对齐），
  * 旧服务端（build 14）缺失该能力，装新客户端后应由向导/部署面板自动重部署升级。
  */
-const REQUIRED_CHANNEL_BUILD = 15;
+const REQUIRED_CHANNEL_BUILD = 16;
 
 /**
  * v4.10.30：predict_request 的等待上限。

@@ -62,7 +62,7 @@ CHANNEL_VERSION = "2.3"
 #   14 = v4.12.x 上游模型名解析改为「Hermes config.yaml 权威、buddy-proxy.env 历史 pin 仅兜底」
 #        （部署即随 config 自动对齐；改 config 重启通道即生效，不再被陈旧 pin 掩盖）
 #   15 = v4.12.12 同 14 脚本内容，随 deploy 自动同步发布：客户端据此要求服务端重部署升级
-CHANNEL_BUILD = "15"
+CHANNEL_BUILD = "16"
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 CONFIG_YAML = os.path.join(HERMES_HOME, "config.yaml")
@@ -1467,12 +1467,13 @@ class WSConnection:
             if not content.strip():
                 self.send_json({"type": "sync_memory_result", "ok": False, "error": "内容为空"})
                 return
-            # 按 scope 分文件：project / global / agents
-            fname = {"global": "GLOBAL.md", "agents": "AGENTS.md"}.get(scope, "PROJECT.md")
+            # 按 scope 分文件：project / global / agents / experience
+            fname = {"global": "GLOBAL.md", "agents": "AGENTS.md", "experience": "EXPERIENCE.md"}.get(scope, "PROJECT.md")
             path = os.path.join(mem_dir, fname)
-            # 追加而非覆盖（每次同步是增量贡献，不是替换）
-            with open(path, "a", encoding="utf-8") as f:
-                f.write("\n## %s\n%s\n" % (time.strftime("%Y-%m-%d %H:%M"), content))
+            # v4.12.13：覆盖写——每次同步客户端传来的该 scope 完整内容，
+            # 避免追加模式导致无限重复膨胀（build≤15 为追加，已废弃）。
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
             sys.stderr.write("[channel] memory crystallized to %s (%d chars)\n" % (fname, len(content)))
             self.send_json({"type": "sync_memory_result", "ok": True, "scope": scope, "file": fname})
         except Exception as exc:  # noqa: BLE001

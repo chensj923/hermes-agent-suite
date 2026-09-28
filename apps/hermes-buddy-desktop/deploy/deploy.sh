@@ -761,7 +761,7 @@ if command -v curl >/dev/null 2>&1; then
   if [[ -n "$CHANNEL_HEALTH" ]]; then CHANNEL_UP=1; fi
 fi
 CHANNEL_VERSION_EXPECTED="2.3"
-CHANNEL_BUILD_EXPECTED="15"
+CHANNEL_BUILD_EXPECTED="16"
 
 if [[ "$PROXY_UP" == "1" ]]; then
   echo "  [OK] 推理直通代理  : http://0.0.0.0:$PROXY_PORT  (用 Gateway API Key 鉴权)"

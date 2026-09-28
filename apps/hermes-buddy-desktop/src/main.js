@@ -724,7 +724,7 @@ function registerIpc() {
             const proxyEnv = result.proxy_env || 'no';
             // 与 src/agent/channel.js 的 REQUIRED_CHANNEL_VERSION 保持一致
             const REQUIRED_CHANNEL_VERSION = '2.3';
-            const REQUIRED_CHANNEL_BUILD = 15;
+            const REQUIRED_CHANNEL_BUILD = 16;
             const verAtLeast = (v, req) => {
               if (!v || v === 'none') return false;
               const a = String(v).split('.').map((n) => parseInt(n, 10) || 0);
@@ -962,6 +962,9 @@ function registerIpc() {
   handle('buddy:predict:set-sensitivity', (_event, s) => getPredict().setSensitivity(s));
   handle('buddy:predict:set-authorized', (_event, v) => getPredict().setAuthorized(v));
   handle('buddy:predict:crystallization', () => getPredict().getCrystallization());
+  // v4.12.13：经验结晶（分级）面板数据接口
+  handle('buddy:experience:summary', () => { try { const p = getPredict(); return p ? p.getExperienceSummary() : null; } catch (_) { return null; } });
+  handle('buddy:experience:list', () => { try { const p = getPredict(); return p ? p.getExperiences() : []; } catch (_) { return []; } });
   handle('buddy:predict:trigger', (_event, rule) => getPredict().triggerRule(rule || 'word_writing'));
   // VLM 引擎现状（是否已装 llama-server / 模型 / mmproj），UI 据此提示安装。
   // v4.7：把用户指定的本地模型/视觉投影路径一起算进去（自定义优先于自动下载的那份）。
@@ -1259,6 +1262,8 @@ async function bootstrap() {
         if (typeof predictLogCallback === 'function') predictLogCallback(entry);
       },
     });
+    // v4.12.13：把经验结晶引擎挂到 SessionManager，连接时一并同步到服务端
+    if (manager) manager.predict = predictController;
     logger.info('predict-controller-ready');
 
     // v4.0：读取 NSIS 安装向导写的授权文件，合并到 PredictConfig

@@ -797,6 +797,14 @@ class SessionManager {
         scopes.push('agents');
       } catch (e) { errors.push(`agents: ${e.message || '失败'}`); }
     }
+    // v4.12.13：经验结晶（分级后的经验文档）一并同步到服务端，覆盖写
+    const expDoc = this.predict ? (this.predict.getExperienceDoc() || '') : '';
+    if (expDoc && expDoc.trim()) {
+      try {
+        await this.channel.syncMemory(expDoc, 'experience');
+        scopes.push('experience');
+      } catch (e) { errors.push(`experience: ${e.message || '失败'}`); }
+    }
     this._lastCrystallize = {
       at: Date.now(),
       scopes,
